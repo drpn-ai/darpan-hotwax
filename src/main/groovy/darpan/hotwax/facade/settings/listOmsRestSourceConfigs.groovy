@@ -21,7 +21,7 @@ if (!activeTenantUserGroupId) {
 
 String search = FacadeSupport.normalize(query)?.toLowerCase()
 List<Map<String, Object>> filtered = search ? rows.findAll { row ->
-    [row.omsRestSourceConfigId, row.description, row.baseUrl, row.ordersPath, row.authType].any {
+    [row.omsRestSourceConfigId, row.description, row.baseUrl, row.ordersPath, row.timeZone, row.authType].any {
         it?.toString()?.toLowerCase()?.contains(search)
     }
 } : rows

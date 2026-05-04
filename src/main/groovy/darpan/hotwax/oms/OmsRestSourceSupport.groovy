@@ -16,6 +16,7 @@ class OmsRestSourceSupport {
     static final String DEFAULT_ORDERS_PATH = "/rest/s1/oms/orders"
     static final String DEFAULT_FILE_NAME_PREFIX = "oms-orders"
     static final String DEFAULT_API_KEY_HEADER_NAME = "api_key"
+    static final String DEFAULT_TIME_ZONE = "UTC"
 
     private static final JsonSlurper JSON_SLURPER = new JsonSlurper()
     private static final Closure DEFAULT_HTTP_CLIENT = { Map request -> executeHttpRequest(request) }
@@ -42,6 +43,7 @@ class OmsRestSourceSupport {
 
         String baseUrl = normalize(config?.baseUrl)
         String ordersPath = normalize(config?.ordersPath) ?: DEFAULT_ORDERS_PATH
+        String timeZone = normalize(config?.timeZone) ?: DEFAULT_TIME_ZONE
         if (!baseUrl) errors.add("Base URL is required.")
 
         Map<String, String> headers = [:]
@@ -63,6 +65,7 @@ class OmsRestSourceSupport {
                         orderDate_thru: thruMillis,
                 ],
                 authType   : normalize(config?.authType)?.toUpperCase() ?: "NONE",
+                timeZone   : timeZone,
                 headerNames: safeHeaderNames(headers),
         ]
 
@@ -160,6 +163,7 @@ class OmsRestSourceSupport {
                 companyUserGroupId    : config.companyUserGroupId,
                 baseUrl               : sanitizeBaseUrl(config.baseUrl),
                 ordersPath            : normalize(config.ordersPath) ?: DEFAULT_ORDERS_PATH,
+                timeZone              : normalize(config.timeZone) ?: DEFAULT_TIME_ZONE,
                 authType              : normalize(config.authType)?.toUpperCase() ?: "NONE",
                 hasUsername           : !!normalize(config.username),
                 hasPassword           : !!normalize(config.password),

@@ -20,6 +20,7 @@ Required fields:
 - `omsRestSourceConfigId`
 - `baseUrl`, for example `https://dev-maarg.hotwax.io`. If an OMS base path or full orders endpoint is entered, the extractor avoids duplicating the configured orders path.
 - `ordersPath`, default `/rest/s1/oms/orders`
+- `timeZone`, default `UTC`, used by setup and source metadata displays for HotWax date-window interpretation
 - `canReadOrders`, default `Y`
 
 The dev OMS Swagger document describes the orders API at `/rest/s1/oms/orders`, with `GET /` used to list `OrderHeader` records and Basic or `api_key` header authentication available. Darpan uses that Swagger contract for setup metadata and keeps `/rest/s1/oms/orders` as the default orders path. At runtime the extractor retries the list route with a trailing slash if the first request returns `404`, matching Swagger implementations that require `/rest/s1/oms/orders/`.

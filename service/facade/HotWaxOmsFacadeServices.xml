@@ -32,6 +32,7 @@
             <parameter name="description"/>
             <parameter name="baseUrl" required="true"/>
             <parameter name="ordersPath" default-value="/rest/s1/oms/orders"/>
+            <parameter name="timeZone" default-value="UTC"/>
             <parameter name="authType" default-value="NONE">
                 <description>Supported values are NONE, BASIC, BEARER, and API_KEY. API_KEY sends the encrypted API token in the OMS Swagger-documented api_key header.</description>
             </parameter>

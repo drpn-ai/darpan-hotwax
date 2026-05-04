@@ -42,6 +42,7 @@ class OmsRestSourceSupportTests {
                         baseUrl              : "https://token@example.hotwax.io",
                         ordersPath           : "/rest/s1/oms/orders",
                         authType             : "BEARER",
+                        timeZone             : "America/Chicago",
                         apiToken             : "secret-token",
                         password             : "secret-password",
                         headersJson          : '{"X-Tenant":"KREWE","Authorization":"Bearer hidden"}',
@@ -61,6 +62,7 @@ class OmsRestSourceSupportTests {
         assertEquals("https://example.hotwax.io", filtered[0].baseUrl)
         assertTrue(filtered[0].hasApiToken as boolean)
         assertTrue(filtered[0].hasPassword as boolean)
+        assertEquals("America/Chicago", filtered[0].timeZone)
         assertFalse(filtered[0].canReadOrders as boolean)
         assertFalse(filtered[0].containsKey("apiToken"))
         assertFalse(filtered[0].containsKey("password"))

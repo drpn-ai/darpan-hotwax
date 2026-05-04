@@ -62,6 +62,7 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
             baseUrl              : "https://delete.hotwax.io",
             ordersPath           : "/rest/s1/oms/orders",
             authType             : "NONE",
+            timeZone             : "America/Chicago",
             connectTimeoutSeconds: 30,
             readTimeoutSeconds   : 60,
             isActive             : true,
@@ -70,6 +71,8 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
         assertTrue((Boolean) createResult.ok, createResult.errors?.toString())
         def createdConfig = findOne("GORJANA_DELETE_HOTWAX")
         assertEquals(GORJANA, createdConfig.companyUserGroupId)
+        assertEquals("America/Chicago", createdConfig.timeZone)
+        assertEquals("America/Chicago", ((Map<String, Object>) createResult.savedOmsRestSourceConfig).timeZone)
         assertEquals("N", createdConfig.canReadOrders)
         assertFalse(((Map<String, Object>) createResult.savedOmsRestSourceConfig).canReadOrders as boolean)
 

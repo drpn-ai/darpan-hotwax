@@ -6,6 +6,7 @@ String configIdValue = FacadeSupport.normalize(omsRestSourceConfigId)
 String descriptionValue = FacadeSupport.normalize(description)
 String baseUrlValue = FacadeSupport.normalize(baseUrl)
 String ordersPathValue = FacadeSupport.normalize(ordersPath) ?: OmsRestSourceSupport.DEFAULT_ORDERS_PATH
+String timeZoneValue = FacadeSupport.normalize(timeZone) ?: "UTC"
 String authTypeValue = FacadeSupport.normalize(authType)?.toUpperCase() ?: "NONE"
 String usernameValue = FacadeSupport.normalize(username)
 String passwordValue = FacadeSupport.normalize(password)
@@ -27,6 +28,8 @@ if (!TenantAccessSupport.requireActiveTenantWriteAccess(ec)) {
 
 if (!configIdValue) ec.message.addError("OMS REST Source Config ID is required.")
 if (!baseUrlValue) ec.message.addError("Base URL is required.")
+String timeZoneError = TenantAccessSupport.validateTimeZone(timeZoneValue)
+if (timeZoneError) ec.message.addError(timeZoneError)
 if (!["NONE", "BASIC", "BEARER", "API_KEY"].contains(authTypeValue)) {
     ec.message.addError("Auth Type must be NONE, BASIC, BEARER, or API_KEY.")
 }
@@ -79,6 +82,7 @@ if (!ec.message.hasError()) {
                 createdByUserId       : existingConfig?.createdByUserId ?: TenantAccessSupport.currentUserId(ec),
                 baseUrl               : baseUrlValue,
                 ordersPath            : ordersPathValue,
+                timeZone              : timeZoneValue,
                 authType              : authTypeValue,
                 username              : usernameValue,
                 headersJson           : headersJsonValue,
