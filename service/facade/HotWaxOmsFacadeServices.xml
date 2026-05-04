@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <service verb="list" noun="HotWaxOmsRestSourceConfigs" type="script" allow-remote="true" authenticate="true"
+            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/facade/settings/listOmsRestSourceConfigs.groovy">
+        <description>List OMS REST source configurations available to the active tenant.</description>
+        <in-parameters>
+            <parameter name="query"/>
+            <parameter name="pageIndex" type="Integer" default-value="0"/>
+            <parameter name="pageSize" type="Integer" default-value="20"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="messages" type="List"/>
+            <parameter name="errors" type="List"/>
+            <parameter name="omsRestSourceConfigs" type="List"/>
+            <parameter name="pagination" type="Map">
+                <parameter name="pageIndex" type="Integer"/>
+                <parameter name="pageSize" type="Integer"/>
+                <parameter name="totalCount" type="Integer"/>
+                <parameter name="pageCount" type="Integer"/>
+            </parameter>
+        </out-parameters>
+    </service>
+
+    <service verb="save" noun="HotWaxOmsRestSourceConfig" type="script" allow-remote="true" authenticate="true"
+            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/facade/settings/saveOmsRestSourceConfig.groovy">
+        <description>Create or update a tenant-owned OMS REST source configuration. Secret fields are stored encrypted and are never returned in clear text.</description>
+        <in-parameters>
+            <parameter name="omsRestSourceConfigId" required="true"/>
+            <parameter name="description"/>
+            <parameter name="baseUrl" required="true"/>
+            <parameter name="ordersPath" default-value="/rest/s1/oms/orders"/>
+            <parameter name="authType" default-value="NONE">
+                <description>Supported values are NONE, BASIC, BEARER, and API_KEY. API_KEY sends the encrypted API token in the OMS Swagger-documented api_key header.</description>
+            </parameter>
+            <parameter name="username"/>
+            <parameter name="password"/>
+            <parameter name="apiToken"/>
+            <parameter name="headersJson"/>
+            <parameter name="connectTimeoutSeconds" type="Integer" default-value="30"/>
+            <parameter name="readTimeoutSeconds" type="Integer" default-value="60"/>
+            <parameter name="isActive" type="Boolean" default-value="true"/>
+            <parameter name="canReadOrders" type="Boolean" default-value="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="messages" type="List"/>
+            <parameter name="errors" type="List"/>
+            <parameter name="savedOmsRestSourceConfig" type="Map"/>
+        </out-parameters>
+    </service>
+
+    <service verb="delete" noun="HotWaxOmsRestSourceConfig" type="script" allow-remote="true" authenticate="true"
+            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/facade/settings/deleteOmsRestSourceConfig.groovy">
+        <description>Delete one tenant-owned HotWax OMS REST source configuration.</description>
+        <in-parameters>
+            <parameter name="omsRestSourceConfigId" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="messages" type="List"/>
+            <parameter name="errors" type="List"/>
+            <parameter name="deleted" type="Boolean"/>
+            <parameter name="deletedOmsRestSourceConfigId"/>
+        </out-parameters>
+    </service>
+
+</services>

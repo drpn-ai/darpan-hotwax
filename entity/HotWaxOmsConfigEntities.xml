@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<entities xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/entity-definition-3.xsd">
+
+    <entity entity-name="HotWaxOmsRestSourceConfig" package="darpan.hotwax" use="configuration">
+        <description>Tenant-owned HotWax OMS REST source configuration for order extraction.</description>
+        <field name="omsRestSourceConfigId" type="id" is-pk="true"/>
+        <field name="description" type="text-medium"/>
+        <field name="companyUserGroupId" type="id" not-null="true"/>
+        <field name="createdByUserId" type="id"/>
+        <field name="baseUrl" type="text-long" cannot-be-null="true"/>
+        <field name="ordersPath" type="text-long" default="'/rest/s1/oms/orders'"/>
+        <field name="authType" type="text-short" default="'NONE'"/>
+        <field name="username" type="text-medium"/>
+        <field name="password" type="text-medium" encrypt="true"/>
+        <field name="apiToken" type="text-long" encrypt="true"/>
+        <field name="headersJson" type="text-long"/>
+        <field name="connectTimeoutSeconds" type="number-integer" default="30"/>
+        <field name="readTimeoutSeconds" type="number-integer" default="60"/>
+        <field name="isActive" type="text-indicator" default="'Y'"/>
+        <field name="canReadOrders" type="text-indicator" default="'Y'"/>
+        <field name="createdDate" type="date-time"/>
+        <field name="lastUpdatedDate" type="date-time"/>
+
+        <relationship type="one" title="Company" related="moqui.security.UserGroup">
+            <key-map field-name="companyUserGroupId" related-field-name="userGroupId"/>
+        </relationship>
+        <relationship type="one" title="CreatedBy" related="moqui.security.UserAccount">
+            <key-map field-name="createdByUserId" related-field-name="userId"/>
+        </relationship>
+    </entity>
+
+</entities>
