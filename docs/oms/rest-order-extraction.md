@@ -34,10 +34,14 @@ Service: `reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrders`
 The extractor calls:
 
 ```text
-GET {baseUrl}{ordersPath}?orderDate_from=<startEpochMillis>&orderDate_thru=<endEpochMillis>
+GET {baseUrl}{ordersPath}?orderDate_from=<startEpochMillis>&orderDate_thru=<endEpochMillis>&pageSize=<n>&pageIndex=<n>
 ```
 
 `windowStart` and `windowEnd` accept `Timestamp`, `Date`, ISO-8601 text, SQL timestamp text emitted by Moqui service serialization, or epoch milliseconds. Both parameters are always sent as epoch milliseconds.
+
+The extractor paginates order reads before writing the normalized source file. It first uses `pageIndex`/`pageSize`, then falls back to `viewIndex`/`viewSize`, and then `offset`/`limit` if an OMS environment exposes a different list contract. Pagination stops when the next page is empty, repeats the previous page, or is shorter than the previous page. The default requested page size is 500, with a high safety ceiling to avoid runaway loops while still allowing month-scale reconciliation runs.
+
+After pagination completes, the extractor keeps only HotWax orders with `orderTypeId` equal to `SALES_ORDER` and excludes orders that contain an order item association with `orderItemAssocTypeId` equal to `EXCHANGE`. Non-sales orders and exchange orders are not written to the normalized source file and are therefore not compared against Shopify orders. Output metadata includes `filters.excludedNonSalesOrderCount` and `filters.excludedExchangeOrderCount` so the run can distinguish fetched HotWax records from comparison-eligible records.
 
 The output is normalized JSON:
 
@@ -50,6 +54,19 @@ The output is normalized JSON:
     "queryParams": {
       "orderDate_from": 1777573800000,
       "orderDate_thru": 1777577400000
+    },
+    "pagination": {
+      "pageSize": 500,
+      "pageCount": 1,
+      "strategy": "pageIndexPageSize",
+      "totalFetched": 2,
+      "truncated": false
+    },
+    "filters": {
+      "requiredOrderTypeId": "SALES_ORDER",
+      "excludedNonSalesOrderCount": 0,
+      "excludedOrderItemAssocTypeIds": ["EXCHANGE"],
+      "excludedExchangeOrderCount": 0
     },
     "extractedRecordCount": 2
   },

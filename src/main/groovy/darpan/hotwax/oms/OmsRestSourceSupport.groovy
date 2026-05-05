@@ -17,6 +17,12 @@ class OmsRestSourceSupport {
     static final String DEFAULT_FILE_NAME_PREFIX = "oms-orders"
     static final String DEFAULT_API_KEY_HEADER_NAME = "api_key"
     static final String DEFAULT_TIME_ZONE = "UTC"
+    static final String SALES_ORDER_TYPE_ID = "SALES_ORDER"
+    static final String EXCHANGE_ORDER_ASSOC_TYPE_ID = "EXCHANGE"
+    static final String ORDER_TYPE_ID_FIELD = "orderTypeId"
+    static final String ORDER_ITEM_ASSOC_TYPE_ID_FIELD = "orderItemAssocTypeId"
+    static final int DEFAULT_ORDERS_PAGE_SIZE = 500
+    static final int MAX_ORDERS_PAGE_COUNT = 20000
 
     private static final JsonSlurper JSON_SLURPER = new JsonSlurper()
     private static final Closure DEFAULT_HTTP_CLIENT = { Map request -> executeHttpRequest(request) }
@@ -55,7 +61,7 @@ class OmsRestSourceSupport {
             }
         }
 
-        String requestUrl = null
+        String endpointUrl = null
         Map<String, Object> requestMetadata = [
                 method     : "GET",
                 baseUrl    : sanitizeBaseUrl(baseUrl),
@@ -67,10 +73,16 @@ class OmsRestSourceSupport {
                 authType   : normalize(config?.authType)?.toUpperCase() ?: "NONE",
                 timeZone   : timeZone,
                 headerNames: safeHeaderNames(headers),
+                pagination : [
+                        pageSize    : resolveOrdersPageSize(config),
+                        pageCount   : 0,
+                        strategy    : null,
+                        totalFetched: 0,
+                ],
         ]
 
         if (!errors) {
-            requestUrl = buildOrdersUrl(baseUrl, ordersPath, fromMillis, thruMillis)
+            endpointUrl = buildOrdersEndpointUrl(baseUrl, ordersPath)
         }
 
         Map<String, Object> baseResult = [
@@ -86,46 +98,27 @@ class OmsRestSourceSupport {
         ]
         if (errors) return baseResult
 
-        Map response
-        try {
-            response = callOmsEndpoint(requestUrl, headers, config)
-            Integer firstStatusCode = normalizeInt(response.statusCode, 0)
-            if (firstStatusCode == 404) {
-                String retryUrl = trailingSlashBeforeQuery(requestUrl)
-                if (retryUrl && retryUrl != requestUrl) {
-                    response = callOmsEndpoint(retryUrl, headers, config)
-                    requestMetadata.attemptCount = 2
-                    requestMetadata.retriedWithTrailingSlash = true
-                }
-            }
-        } catch (Exception e) {
-            errors.add("OMS REST request failed: ${e.message}")
+        Map extraction = extractAllOrderPages(endpointUrl, fromMillis, thruMillis, headers, config, warnings)
+        requestMetadata.statusCode = extraction.statusCode
+        requestMetadata.attemptCount = extraction.attemptCount ?: 0
+        if (extraction.retriedWithTrailingSlash) requestMetadata.retriedWithTrailingSlash = true
+        requestMetadata.pagination = extraction.pagination ?: requestMetadata.pagination
+        if (extraction.errors) {
+            errors.addAll((List) extraction.errors)
             return baseResult
         }
 
-        Integer statusCode = normalizeInt(response.statusCode, 0)
-        requestMetadata.statusCode = statusCode
-        requestMetadata.attemptCount = requestMetadata.attemptCount ?: 1
-        if (statusCode < 200 || statusCode >= 300) {
-            errors.add("OMS REST request failed with status ${statusCode}.")
-            return baseResult
-        }
-
-        Object parsed
-        String body = response.body?.toString()
-        if (!body) {
-            parsed = [orders: []]
-            warnings.add("OMS REST response body was empty.")
-        } else {
-            try {
-                parsed = JSON_SLURPER.parseText(body)
-            } catch (Exception e) {
-                errors.add("OMS REST response was not valid JSON: ${e.message}")
-                return baseResult
-            }
-        }
-
-        List records = extractOrderRecords(parsed, warnings)
+        List fetchedRecords = extraction.records ?: []
+        List salesOrderRecords = retainSalesOrders(fetchedRecords)
+        List records = excludeExchangeOrders(salesOrderRecords)
+        int excludedNonSalesOrderCount = fetchedRecords.size() - salesOrderRecords.size()
+        int excludedExchangeOrderCount = salesOrderRecords.size() - records.size()
+        requestMetadata.filters = [
+                requiredOrderTypeId          : SALES_ORDER_TYPE_ID,
+                excludedNonSalesOrderCount   : excludedNonSalesOrderCount,
+                excludedOrderItemAssocTypeIds: [EXCHANGE_ORDER_ASSOC_TYPE_ID],
+                excludedExchangeOrderCount   : excludedExchangeOrderCount,
+        ]
         Map outputDocument = [
                 metadata: requestMetadata + [
                         sourceType              : "HOTWAX_OMS_REST_ORDERS",
@@ -252,9 +245,17 @@ class OmsRestSourceSupport {
     }
 
     protected static String buildOrdersUrl(String baseUrl, String ordersPath, Long fromMillis, Long thruMillis) {
-        String endpointUrl = buildOrdersEndpointUrl(baseUrl, ordersPath)
+        return buildOrdersUrl(buildOrdersEndpointUrl(baseUrl, ordersPath), fromMillis, thruMillis, [:])
+    }
+
+    protected static String buildOrdersUrl(String endpointUrl, Long fromMillis, Long thruMillis,
+                                           Map<String, Object> extraQueryParams) {
         String separator = endpointUrl.contains("?") ? "&" : "?"
-        return "${endpointUrl}${separator}orderDate_from=${fromMillis}&orderDate_thru=${thruMillis}"
+        Map<String, Object> queryParams = new LinkedHashMap<>()
+        queryParams.orderDate_from = fromMillis
+        queryParams.orderDate_thru = thruMillis
+        queryParams.putAll(extraQueryParams ?: [:])
+        return "${endpointUrl}${separator}${queryParams.collect { key, value -> "${key}=${value}" }.join("&")}"
     }
 
     protected static String buildOrdersEndpointUrl(String baseUrl, String ordersPath) {
@@ -348,6 +349,252 @@ class OmsRestSourceSupport {
         ]) ?: [:]) as Map<String, Object>
     }
 
+    protected static Map<String, Object> extractAllOrderPages(String endpointUrl, Long fromMillis, Long thruMillis,
+                                                              Map<String, String> headers, Map config,
+                                                              List<String> warnings) {
+        int pageSize = resolveOrdersPageSize(config)
+        int maxPageCount = Math.max(1, normalizeInt(config?.maxOrdersPageCount, MAX_ORDERS_PAGE_COUNT))
+        Map<String, Object> fallbackPage = null
+
+        for (Map<String, Object> strategy : paginationStrategies()) {
+            Map<String, Object> firstPage = fetchOrdersPage(endpointUrl, fromMillis, thruMillis,
+                    pageQueryParams(strategy, 0, pageSize), headers, config, warnings)
+            if (!firstPage.success) {
+                fallbackPage = firstPage
+                if (isRecoverablePaginationFailure(firstPage.statusCode)) continue
+                return failedPageResult(firstPage)
+            }
+
+            List firstRecords = firstPage.records ?: []
+            if (firstRecords.isEmpty()) return successfulPageResult(strategy, pageSize, [firstPage], [])
+            if (!shouldProbeSecondPage(firstRecords, pageSize)) {
+                return successfulPageResult(strategy, pageSize, [firstPage], firstRecords)
+            }
+
+            Map<String, Object> secondPage = fetchOrdersPage(endpointUrl, fromMillis, thruMillis,
+                    pageQueryParams(strategy, 1, pageSize), headers, config, warnings)
+            if (!secondPage.success) {
+                fallbackPage = secondPage
+                if (isRecoverablePaginationFailure(secondPage.statusCode)) continue
+                return failedPageResult(secondPage, [firstPage])
+            }
+
+            List secondRecords = secondPage.records ?: []
+            if (secondRecords.isEmpty()) return successfulPageResult(strategy, pageSize, [firstPage, secondPage], firstRecords)
+            if (samePageRecords(firstRecords, secondRecords)) {
+                warnings.add("OMS REST pagination strategy ${strategy.name} did not advance beyond the first page.")
+                fallbackPage = firstPage
+                continue
+            }
+
+            List<Map<String, Object>> pages = [firstPage, secondPage]
+            List records = []
+            records.addAll(firstRecords)
+            records.addAll(secondRecords)
+            List previousRecords = secondRecords
+            int pageIndex = 2
+            while (pageIndex < maxPageCount) {
+                Map<String, Object> page = fetchOrdersPage(endpointUrl, fromMillis, thruMillis,
+                        pageQueryParams(strategy, pageIndex, pageSize), headers, config, warnings)
+                pages.add(page)
+                if (!page.success) return failedPageResult(page, pages)
+
+                List pageRecords = page.records ?: []
+                if (pageRecords.isEmpty()) break
+                if (samePageRecords(previousRecords, pageRecords)) {
+                    warnings.add("OMS REST pagination strategy ${strategy.name} stopped because page ${pageIndex} repeated the previous page.")
+                    break
+                }
+
+                records.addAll(pageRecords)
+                if (pageRecords.size() < previousRecords.size()) break
+                previousRecords = pageRecords
+                pageIndex++
+            }
+
+            if (pageIndex >= maxPageCount) {
+                return [
+                        errors    : ["OMS REST pagination exceeded ${maxPageCount} pages for the selected time period."],
+                        records   : records,
+                        statusCode: latestStatusCode(pages),
+                        attemptCount: totalAttemptCount(pages),
+                        retriedWithTrailingSlash: anyTrailingSlashRetry(pages),
+                        pagination: paginationMetadata(strategy, pageSize, pages, records.size(), true),
+                ]
+            }
+
+            return successfulPageResult(strategy, pageSize, pages, records)
+        }
+
+        Map<String, Object> unpaginatedPage = fetchOrdersPage(endpointUrl, fromMillis, thruMillis, [:], headers, config, warnings)
+        if (!unpaginatedPage.success) return failedPageResult(unpaginatedPage ?: fallbackPage)
+        warnings.add("OMS REST pagination parameters did not advance; extracted the first unpaginated response only.")
+        return successfulPageResult([name: "unpaginated"], pageSize, [unpaginatedPage], unpaginatedPage.records ?: [])
+    }
+
+    protected static Map<String, Object> fetchOrdersPage(String endpointUrl, Long fromMillis, Long thruMillis,
+                                                         Map<String, Object> pageParams,
+                                                         Map<String, String> headers, Map config,
+                                                         List<String> warnings) {
+        String requestUrl = buildOrdersUrl(endpointUrl, fromMillis, thruMillis, pageParams)
+        Map response
+        boolean retriedWithTrailingSlash = false
+        int attemptCount = 1
+        try {
+            response = callOmsEndpoint(requestUrl, headers, config)
+            Integer firstStatusCode = normalizeInt(response.statusCode, 0)
+            if (firstStatusCode == 404) {
+                String retryUrl = trailingSlashBeforeQuery(requestUrl)
+                if (retryUrl && retryUrl != requestUrl) {
+                    response = callOmsEndpoint(retryUrl, headers, config)
+                    attemptCount = 2
+                    retriedWithTrailingSlash = true
+                }
+            }
+        } catch (Exception e) {
+            return [
+                    success   : false,
+                    statusCode: 0,
+                    attemptCount: attemptCount,
+                    retriedWithTrailingSlash: retriedWithTrailingSlash,
+                    errors    : ["OMS REST request failed: ${e.message}"],
+            ]
+        }
+
+        Integer statusCode = normalizeInt(response.statusCode, 0)
+        if (statusCode < 200 || statusCode >= 300) {
+            return [
+                    success   : false,
+                    statusCode: statusCode,
+                    attemptCount: attemptCount,
+                    retriedWithTrailingSlash: retriedWithTrailingSlash,
+                    errors    : ["OMS REST request failed with status ${statusCode}."],
+            ]
+        }
+
+        Object parsed
+        String body = response.body?.toString()
+        if (!body) {
+            parsed = [orders: []]
+            warnings.add("OMS REST response body was empty.")
+        } else {
+            try {
+                parsed = JSON_SLURPER.parseText(body)
+            } catch (Exception e) {
+                return [
+                        success   : false,
+                        statusCode: statusCode,
+                        attemptCount: attemptCount,
+                        retriedWithTrailingSlash: retriedWithTrailingSlash,
+                        errors    : ["OMS REST response was not valid JSON: ${e.message}"],
+                ]
+            }
+        }
+
+        return [
+                success   : true,
+                statusCode: statusCode,
+                attemptCount: attemptCount,
+                retriedWithTrailingSlash: retriedWithTrailingSlash,
+                records   : extractOrderRecords(parsed, warnings),
+        ]
+    }
+
+    protected static List<Map<String, Object>> paginationStrategies() {
+        return [
+                [name: "pageIndexPageSize", indexParam: "pageIndex", sizeParam: "pageSize", offset: false],
+                [name: "viewIndexViewSize", indexParam: "viewIndex", sizeParam: "viewSize", offset: false],
+                [name: "offsetLimit", indexParam: "offset", sizeParam: "limit", offset: true],
+        ]
+    }
+
+    protected static Map<String, Object> pageQueryParams(Map<String, Object> strategy, int pageIndex, int pageSize) {
+        Map<String, Object> params = new LinkedHashMap<>()
+        params[(String) strategy.sizeParam] = pageSize
+        params[(String) strategy.indexParam] = strategy.offset ? pageIndex * pageSize : pageIndex
+        return params
+    }
+
+    protected static boolean shouldProbeSecondPage(List records, int pageSize) {
+        return records.size() >= pageSize || records.size() == 50
+    }
+
+    protected static boolean samePageRecords(List left, List right) {
+        if ((left?.size() ?: 0) != (right?.size() ?: 0)) return false
+        return pageFingerprint(left) == pageFingerprint(right)
+    }
+
+    protected static List<String> pageFingerprint(List records) {
+        return (records ?: []).collect { Object record ->
+            record instanceof Map ? JsonOutput.toJson(new TreeMap((Map) record)) : normalize(record)
+        }
+    }
+
+    protected static boolean isRecoverablePaginationFailure(Object statusCode) {
+        int status = normalizeInt(statusCode, 0)
+        return [400, 404, 405, 422].contains(status)
+    }
+
+    protected static Map<String, Object> successfulPageResult(Map<String, Object> strategy, int pageSize,
+                                                             List<Map<String, Object>> pages, List records) {
+        return [
+                errors    : [],
+                records   : records ?: [],
+                statusCode: latestStatusCode(pages),
+                attemptCount: totalAttemptCount(pages),
+                retriedWithTrailingSlash: anyTrailingSlashRetry(pages),
+                pagination: paginationMetadata(strategy, pageSize, pages, (records ?: []).size(), false),
+        ]
+    }
+
+    protected static Map<String, Object> failedPageResult(Map<String, Object> failedPage,
+                                                         List<Map<String, Object>> pages = []) {
+        List<Map<String, Object>> allPages = []
+        allPages.addAll(pages ?: [])
+        if (failedPage) allPages.add(failedPage)
+        return [
+                errors    : (failedPage?.errors ?: ["OMS REST request failed."]) as List,
+                records   : [],
+                statusCode: failedPage?.statusCode ?: latestStatusCode(allPages),
+                attemptCount: totalAttemptCount(allPages),
+                retriedWithTrailingSlash: anyTrailingSlashRetry(allPages),
+                pagination: [
+                        pageSize    : null,
+                        pageCount   : allPages.size(),
+                        strategy    : null,
+                        totalFetched: 0,
+                ],
+        ]
+    }
+
+    protected static Map<String, Object> paginationMetadata(Map<String, Object> strategy, int pageSize,
+                                                           List<Map<String, Object>> pages, int recordCount,
+                                                           boolean truncated) {
+        return [
+                pageSize    : pageSize,
+                pageCount   : pages?.size() ?: 0,
+                strategy    : strategy?.name,
+                totalFetched: recordCount,
+                truncated   : truncated,
+        ]
+    }
+
+    protected static int totalAttemptCount(List<Map<String, Object>> pages) {
+        return (pages ?: []).sum { Map page -> normalizeInt(page?.attemptCount, 0) } as int
+    }
+
+    protected static Integer latestStatusCode(List<Map<String, Object>> pages) {
+        return ((pages ?: []).reverse().find { it?.statusCode != null }?.statusCode ?: 0) as Integer
+    }
+
+    protected static boolean anyTrailingSlashRetry(List<Map<String, Object>> pages) {
+        return (pages ?: []).any { Map page -> page?.retriedWithTrailingSlash == true }
+    }
+
+    protected static int resolveOrdersPageSize(Map config) {
+        return Math.max(1, Math.min(1000, normalizeInt(config?.ordersPageSize ?: config?.pageSize, DEFAULT_ORDERS_PAGE_SIZE)))
+    }
+
     protected static Map<String, String> buildHeaders(Map config) {
         Map<String, String> headers = new LinkedHashMap<>()
         headers.put("Accept", "application/json")
@@ -417,6 +664,41 @@ class OmsRestSourceSupport {
 
         warnings.add("OMS REST response JSON root was not an object or array.")
         return []
+    }
+
+    protected static List excludeExchangeOrders(Collection records) {
+        return (records ?: []).findAll { Object record ->
+            !containsExchangeOrderAssociation(record)
+        }
+    }
+
+    protected static List retainSalesOrders(Collection records) {
+        return (records ?: []).findAll { Object record ->
+            isSalesOrder(record)
+        }
+    }
+
+    protected static boolean isSalesOrder(Object record) {
+        if (!(record instanceof Map)) return false
+        Object orderTypeId = ((Map) record).find { key, ignored ->
+            normalize(key) == ORDER_TYPE_ID_FIELD
+        }?.value
+        return normalize(orderTypeId)?.equalsIgnoreCase(SALES_ORDER_TYPE_ID)
+    }
+
+    protected static boolean containsExchangeOrderAssociation(Object value) {
+        if (value instanceof Map) {
+            Map record = (Map) value
+            Object assocTypeId = record.find { key, ignored ->
+                normalize(key) == ORDER_ITEM_ASSOC_TYPE_ID_FIELD
+            }?.value
+            if (normalize(assocTypeId)?.equalsIgnoreCase(EXCHANGE_ORDER_ASSOC_TYPE_ID)) return true
+            return record.values().any { Object child -> containsExchangeOrderAssociation(child) }
+        }
+        if (value instanceof Collection) {
+            return ((Collection) value).any { Object child -> containsExchangeOrderAssociation(child) }
+        }
+        return false
     }
 
     protected static Map<String, Object> executeHttpRequest(Map request) {

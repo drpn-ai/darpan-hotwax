@@ -95,7 +95,7 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
     void automationExtractionUsesAutomationTenantWhenActiveTenantDiffers() {
         ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
         OmsRestSourceSupport.setHttpClient { Map ignored ->
-            [statusCode: 200, body: '{"orders":[{"orderId":"O100"}]}']
+            [statusCode: 200, body: '{"orders":[{"orderId":"O100","orderTypeId":"SALES_ORDER"}]}']
         }
 
         try {
