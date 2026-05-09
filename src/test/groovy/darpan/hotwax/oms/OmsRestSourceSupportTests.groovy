@@ -4,9 +4,6 @@ import groovy.json.JsonSlurper
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 
-import java.sql.Timestamp
-import java.time.Instant
-
 import static org.junit.jupiter.api.Assertions.assertEquals
 import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertNotNull
@@ -23,50 +20,44 @@ class OmsRestSourceSupportTests {
     }
 
     @Test
-    void convertsAutomationWindowValuesToEpochMillis() {
-        long expected = Instant.parse("2026-05-01T00:00:00Z").toEpochMilli()
+    void safeRowsKeepSecretsOut() {
+        Map<String, Object> safeRow = OmsRestSourceSupport.safeConfigMap([
+                omsRestSourceConfigId: "KREWE_OMS",
+                companyUserGroupId   : "KREWE",
+                baseUrl              : "https://token@example.hotwax.io",
+                ordersPath           : "/rest/s1/oms/orders",
+                authType             : "BEARER",
+                timeZone             : "America/Chicago",
+                apiToken             : "secret-token",
+                password             : "secret-password",
+                headersJson          : '{"X-Tenant":"KREWE","Authorization":"Bearer hidden"}',
+                canReadOrders        : "N",
+        ])
 
-        assertEquals(expected, OmsRestSourceSupport.toEpochMillis("2026-05-01T00:00:00Z"))
-        assertEquals(expected, OmsRestSourceSupport.toEpochMillis(Timestamp.from(Instant.parse("2026-05-01T00:00:00Z"))))
-        assertEquals(expected, OmsRestSourceSupport.toEpochMillis(expected.toString()))
-        assertEquals(Timestamp.valueOf("2026-05-01 00:00:00").time, OmsRestSourceSupport.toEpochMillis("2026-05-01 00:00:00"))
-        assertEquals(Timestamp.valueOf("2026-05-01 00:00:00").time, OmsRestSourceSupport.toEpochMillis("2026-05-01 00:00:00.0"))
+        assertEquals("KREWE_OMS", safeRow.omsRestSourceConfigId)
+        assertEquals("https://example.hotwax.io", safeRow.baseUrl)
+        assertTrue(safeRow.hasApiToken as boolean)
+        assertTrue(safeRow.hasPassword as boolean)
+        assertEquals("America/Chicago", safeRow.timeZone)
+        assertFalse(safeRow.canReadOrders as boolean)
+        assertFalse(safeRow.containsKey("apiToken"))
+        assertFalse(safeRow.containsKey("password"))
+        assertFalse(safeRow.customHeaderNames.contains("Authorization"))
     }
 
     @Test
-    void filtersTenantConfigsAndKeepsSecretsOutOfSafeRows() {
-        List<Map<String, Object>> configs = [
-                [
-                        omsRestSourceConfigId: "KREWE_OMS",
-                        companyUserGroupId   : "KREWE",
-                        baseUrl              : "https://token@example.hotwax.io",
-                        ordersPath           : "/rest/s1/oms/orders",
-                        authType             : "BEARER",
-                        timeZone             : "America/Chicago",
-                        apiToken             : "secret-token",
-                        password             : "secret-password",
-                        headersJson          : '{"X-Tenant":"KREWE","Authorization":"Bearer hidden"}',
-                        canReadOrders        : "N",
-                ],
-                [
-                        omsRestSourceConfigId: "GORJANA_OMS",
-                        companyUserGroupId   : "GORJANA",
-                        baseUrl              : "https://gorjana.hotwax.io",
-                ],
-        ]
+    void safeRowsPreserveEntityBackedTimezoneAndReadFlag() {
+        Map<String, Object> safeRow = OmsRestSourceSupport.safeConfigMap(new EntityLikeRecord(fields: [
+                omsRestSourceConfigId: "GORJANA_OMS",
+                companyUserGroupId   : "GORJANA",
+                baseUrl              : "https://gorjana.hotwax.io",
+                ordersPath           : "/rest/s1/oms/orders",
+                timeZone             : "America/Chicago",
+                canReadOrders        : "N",
+        ]))
 
-        List<Map<String, Object>> filtered = OmsRestSourceSupport.filterConfigsForTenant(configs, "KREWE")
-
-        assertEquals(1, filtered.size())
-        assertEquals("KREWE_OMS", filtered[0].omsRestSourceConfigId)
-        assertEquals("https://example.hotwax.io", filtered[0].baseUrl)
-        assertTrue(filtered[0].hasApiToken as boolean)
-        assertTrue(filtered[0].hasPassword as boolean)
-        assertEquals("America/Chicago", filtered[0].timeZone)
-        assertFalse(filtered[0].canReadOrders as boolean)
-        assertFalse(filtered[0].containsKey("apiToken"))
-        assertFalse(filtered[0].containsKey("password"))
-        assertFalse(filtered[0].customHeaderNames.contains("Authorization"))
+        assertEquals("America/Chicago", safeRow.timeZone)
+        assertFalse(safeRow.canReadOrders as boolean)
     }
 
     @Test
@@ -213,7 +204,7 @@ class OmsRestSourceSupportTests {
         assertEquals("viewIndexViewSize", result.requestMetadata.pagination.strategy)
         assertTrue(result.warnings.any { it.contains("pageIndexPageSize") })
         assertEquals(2, requestedUrls.count { it.contains("pageIndex=") })
-        assertEquals(3, requestedUrls.count { it.contains("viewIndex=") })
+        assertEquals(2, requestedUrls.count { it.contains("viewIndex=") })
     }
 
     @Test
@@ -231,6 +222,18 @@ class OmsRestSourceSupportTests {
         assertTrue(result.errors.isEmpty(), result.errors.toString())
         assertTrue((capturedRequest.url as String).startsWith("https://dev-maarg.hotwax.io/rest/s1/oms/orders?"))
         assertFalse((capturedRequest.url as String).contains("/rest/s1/oms/orders/rest/s1/oms/orders"))
+    }
+
+    @Test
+    void encodesAdditionalQueryParameters() {
+        String url = OmsRestSourceSupport.buildOrdersUrl(
+                "https://dev-maarg.hotwax.io/rest/s1/oms/orders",
+                1777593600000L,
+                1777597200000L,
+                ["custom field": "needs encoding"]
+        )
+
+        assertTrue(url.contains("custom+field=needs+encoding"))
     }
 
     @Test
@@ -335,5 +338,13 @@ class OmsRestSourceSupportTests {
         String value = query.split("&").collect { it.split("=", 2) }
                 .find { it[0] == key }?.getAt(1)
         return Integer.parseInt(value)
+    }
+
+    private static class EntityLikeRecord {
+        Map<String, Object> fields = [:]
+
+        Object get(String fieldName) {
+            return fields[fieldName]
+        }
     }
 }

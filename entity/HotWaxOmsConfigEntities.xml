@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <entities xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/entity-definition-3.xsd">
 
-    <entity entity-name="HotWaxOmsRestSourceConfig" package="darpan.hotwax" use="configuration">
+    <entity entity-name="HotWaxOmsRestSourceConfig" package="darpan.hotwax" short-alias="hotWaxOmsRestSourceConfig" use="configuration">
         <description>Tenant-owned HotWax OMS REST source configuration for order extraction.</description>
         <field name="omsRestSourceConfigId" type="id" is-pk="true"/>
         <field name="description" type="text-medium"/>
@@ -24,10 +24,10 @@
         <field name="createdDate" type="date-time"/>
         <field name="lastUpdatedDate" type="date-time"/>
 
-        <relationship type="one" title="Company" related="moqui.security.UserGroup">
+        <relationship type="one" title="Company" related="moqui.security.UserGroup" short-alias="company">
             <key-map field-name="companyUserGroupId" related-field-name="userGroupId"/>
         </relationship>
-        <relationship type="one" title="CreatedBy" related="moqui.security.UserAccount">
+        <relationship type="one" title="CreatedBy" related="moqui.security.UserAccount" short-alias="createdByUser">
             <key-map field-name="createdByUserId" related-field-name="userId"/>
         </relationship>
     </entity>

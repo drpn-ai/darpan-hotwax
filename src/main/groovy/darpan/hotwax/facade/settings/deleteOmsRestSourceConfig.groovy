@@ -2,7 +2,9 @@ import darpan.facade.common.FacadeSupport
 import darpan.facade.common.TenantAccessSupport
 import darpan.hotwax.oms.OmsRestSourceSupport
 
-String configId = FacadeSupport.normalize(omsRestSourceConfigId)
+import static darpan.common.ValueSupport.normalize
+
+String configId = normalize(omsRestSourceConfigId)
 String activeTenantUserGroupId = TenantAccessSupport.currentActiveTenantUserGroupId(ec)
 deleted = false
 

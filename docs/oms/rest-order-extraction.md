@@ -39,7 +39,7 @@ GET {baseUrl}{ordersPath}?orderDate_from=<startEpochMillis>&orderDate_thru=<endE
 
 `windowStart` and `windowEnd` accept `Timestamp`, `Date`, ISO-8601 text, SQL timestamp text emitted by Moqui service serialization, or epoch milliseconds. Both parameters are always sent as epoch milliseconds.
 
-The extractor paginates order reads before writing the normalized source file. It first uses `pageIndex`/`pageSize`, then falls back to `viewIndex`/`viewSize`, and then `offset`/`limit` if an OMS environment exposes a different list contract. Pagination stops when the next page is empty, repeats the previous page, or is shorter than the previous page. The default requested page size is 500, with a high safety ceiling to avoid runaway loops while still allowing month-scale reconciliation runs.
+The extractor paginates order reads before writing the normalized source file. It first uses `pageIndex`/`pageSize`, then falls back to `viewIndex`/`viewSize` for OMS environments that expose that list contract. Pagination stops when the next page is empty, repeats the previous page, or is shorter than the previous page. The default requested page size is 500, with a high safety ceiling to avoid runaway loops while still allowing month-scale reconciliation runs.
 
 After pagination completes, the extractor keeps only HotWax orders with `orderTypeId` equal to `SALES_ORDER` and excludes orders that contain an order item association with `orderItemAssocTypeId` equal to `EXCHANGE`. Non-sales orders and exchange orders are not written to the normalized source file and are therefore not compared against Shopify orders. Output metadata includes `filters.excludedNonSalesOrderCount` and `filters.excludedExchangeOrderCount` so the run can distinguish fetched HotWax records from comparison-eligible records.
 
@@ -77,6 +77,16 @@ The output is normalized JSON:
 The default output folder is `runtime://datamanager/reconciliation-runs/{automationExecutionId}/{timestamp}/`. When `automationExecutionId` is omitted, the config id is used as the run folder token.
 
 The service returns `fileLocation`, `fileName`, `recordCount`, `requestMetadata`, `warnings`, and `errors`. Request metadata excludes credentials and authorization headers.
+
+## Groovy Justification
+
+Service XML owns the public contracts for this component. Groovy is retained only where XML actions would either hide non-trivial branching inside inline expressions or duplicate reusable integration logic.
+
+- `src/main/groovy/darpan/hotwax/oms/OmsRestSourceSupport.groovy`: retained for HTTP execution, auth-header construction, URL/path overlap handling, query encoding, pagination fallback across documented OMS list conventions, date parsing, safe metadata shaping, JSON parsing, and sales/exchange-order filtering. This is integration and transformation logic, not service orchestration.
+- `src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsOrders.groovy`: retained as the service edge that combines tenant-safe config access, extractor invocation, data-manager path resolution, safe file naming, and output writing. Keeping this in XML would push the same branching into dense action expressions while still depending on the Groovy extractor.
+- `src/main/groovy/darpan/hotwax/facade/settings/saveOmsRestSourceConfig.groovy`: retained for validation that depends on existing encrypted secret state, auth-mode-specific requirements, timezone validation, tenant writability checks, secret preservation on blank updates, and safe response shaping.
+- `src/main/groovy/darpan/hotwax/facade/settings/listOmsRestSourceConfigs.groovy`: retained for safe-row projection, credential redaction, tenant-scoped filtering, case-insensitive multi-field search, and bounded pagination. This keeps the XML service definition declarative and avoids repeating redaction logic in XML actions.
+- `src/main/groovy/darpan/hotwax/facade/settings/deleteOmsRestSourceConfig.groovy`: retained because delete is not a pure entity delete; it resolves the active tenant, verifies write access against the stored owner, returns the shared facade envelope, and emits the deletion result. Converting it to XML would duplicate tenant-safety checks already centralized in support code.
 
 ## Automation Integration
 

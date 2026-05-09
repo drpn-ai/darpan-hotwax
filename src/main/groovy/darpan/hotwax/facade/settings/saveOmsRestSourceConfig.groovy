@@ -2,20 +2,24 @@ import darpan.facade.common.FacadeSupport
 import darpan.facade.common.TenantAccessSupport
 import darpan.hotwax.oms.OmsRestSourceSupport
 
-String configIdValue = FacadeSupport.normalize(omsRestSourceConfigId)
-String descriptionValue = FacadeSupport.normalize(description)
-String baseUrlValue = FacadeSupport.normalize(baseUrl)
-String ordersPathValue = FacadeSupport.normalize(ordersPath) ?: OmsRestSourceSupport.DEFAULT_ORDERS_PATH
-String timeZoneValue = FacadeSupport.normalize(timeZone) ?: "UTC"
-String authTypeValue = FacadeSupport.normalize(authType)?.toUpperCase() ?: "NONE"
-String usernameValue = FacadeSupport.normalize(username)
-String passwordValue = FacadeSupport.normalize(password)
-String apiTokenValue = FacadeSupport.normalize(apiToken)
-String headersJsonValue = FacadeSupport.normalize(headersJson)
-Integer connectTimeoutValue = FacadeSupport.normalizeInt(connectTimeoutSeconds, 30)
-Integer readTimeoutValue = FacadeSupport.normalizeInt(readTimeoutSeconds, 60)
-String isActiveValue = FacadeSupport.normalizeBool(isActive, true) ? "Y" : "N"
-String canReadOrdersValue = FacadeSupport.normalizeBool(canReadOrders, true) ? "Y" : "N"
+import static darpan.common.ValueSupport.normalize
+import static darpan.common.ValueSupport.normalizeBool
+import static darpan.common.ValueSupport.normalizeInt
+
+String configIdValue = normalize(omsRestSourceConfigId)
+String descriptionValue = normalize(description)
+String baseUrlValue = normalize(baseUrl)
+String ordersPathValue = normalize(ordersPath) ?: OmsRestSourceSupport.DEFAULT_ORDERS_PATH
+String timeZoneValue = normalize(timeZone) ?: "UTC"
+String authTypeValue = normalize(authType)?.toUpperCase() ?: "NONE"
+String usernameValue = normalize(username)
+String passwordValue = normalize(password)
+String apiTokenValue = normalize(apiToken)
+String headersJsonValue = normalize(headersJson)
+Integer connectTimeoutValue = normalizeInt(connectTimeoutSeconds, 30)
+Integer readTimeoutValue = normalizeInt(readTimeoutSeconds, 60)
+String isActiveValue = normalizeBool(isActive, true) ? "Y" : "N"
+String canReadOrdersValue = normalizeBool(canReadOrders, true) ? "Y" : "N"
 String activeTenantUserGroupId = TenantAccessSupport.currentActiveTenantUserGroupId(ec)
 
 if (!TenantAccessSupport.requireActiveTenantWriteAccess(ec)) {

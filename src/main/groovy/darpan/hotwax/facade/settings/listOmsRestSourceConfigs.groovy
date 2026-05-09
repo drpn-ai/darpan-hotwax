@@ -2,8 +2,11 @@ import darpan.facade.common.FacadeSupport
 import darpan.facade.common.TenantAccessSupport
 import darpan.hotwax.oms.OmsRestSourceSupport
 
-int page = Math.max(0, FacadeSupport.normalizeInt(pageIndex, 0))
-int size = Math.max(1, Math.min(200, FacadeSupport.normalizeInt(pageSize, 20)))
+import static darpan.common.ValueSupport.normalize
+import static darpan.common.ValueSupport.normalizeInt
+
+int page = Math.max(0, normalizeInt(pageIndex, 0))
+int size = Math.max(1, Math.min(200, normalizeInt(pageSize, 20)))
 String activeTenantUserGroupId = TenantAccessSupport.currentActiveTenantUserGroupId(ec)
 
 List<Map<String, Object>> rows = []
@@ -19,7 +22,7 @@ if (!activeTenantUserGroupId) {
     rows = configs.collect { cfg -> OmsRestSourceSupport.safeConfigMap(cfg) }
 }
 
-String search = FacadeSupport.normalize(query)?.toLowerCase()
+String search = normalize(query)?.toLowerCase()
 List<Map<String, Object>> filtered = search ? rows.findAll { row ->
     [row.omsRestSourceConfigId, row.description, row.baseUrl, row.ordersPath, row.timeZone, row.authType].any {
         it?.toString()?.toLowerCase()?.contains(search)

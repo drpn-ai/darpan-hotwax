@@ -11,6 +11,7 @@ import java.time.LocalDateTime
 import java.time.OffsetDateTime
 import java.time.ZoneOffset
 import java.time.ZonedDateTime
+import java.net.URLEncoder
 
 class OmsRestSourceSupport {
     static final String DEFAULT_ORDERS_PATH = "/rest/s1/oms/orders"
@@ -25,6 +26,45 @@ class OmsRestSourceSupport {
     static final int MAX_ORDERS_PAGE_COUNT = 20000
 
     private static final JsonSlurper JSON_SLURPER = new JsonSlurper()
+    private static final List<String> CONFIG_FIELD_NAMES = [
+            "omsRestSourceConfigId",
+            "description",
+            "companyUserGroupId",
+            "createdByUserId",
+            "baseUrl",
+            "ordersPath",
+            "timeZone",
+            "authType",
+            "username",
+            "password",
+            "apiToken",
+            "headersJson",
+            "connectTimeoutSeconds",
+            "readTimeoutSeconds",
+            "ordersPageSize",
+            "pageSize",
+            "maxOrdersPageCount",
+            "isActive",
+            "canReadOrders",
+            "createdDate",
+            "lastUpdatedDate",
+    ]
+    private static final List<Closure<Long>> WINDOW_MILLIS_PARSERS = [
+            { String text -> Instant.parse(text).toEpochMilli() },
+            { String text -> OffsetDateTime.parse(text).toInstant().toEpochMilli() },
+            { String text -> ZonedDateTime.parse(text).toInstant().toEpochMilli() },
+            { String text -> Timestamp.valueOf(text).time },
+            { String text -> LocalDateTime.parse(text).toInstant(ZoneOffset.UTC).toEpochMilli() },
+            { String text -> LocalDate.parse(text).atStartOfDay().toInstant(ZoneOffset.UTC).toEpochMilli() },
+    ]
+    private static final List<Map<String, Object>> PAGINATION_STRATEGIES = [
+            [name: "pageIndexPageSize", indexParam: "pageIndex", sizeParam: "pageSize"],
+            [name: "viewIndexViewSize", indexParam: "viewIndex", sizeParam: "viewSize"],
+    ]
+    private static final Set<Integer> RECOVERABLE_PAGINATION_STATUS_CODES = [400, 404, 405, 422] as Set
+    private static final List<String> ORDER_LIST_KEYS = ["orders", "order", "data", "items", "records", "results"]
+    private static final Set<String> TRUE_VALUES = ["y", "yes", "true", "1", "on"] as Set
+    private static final Set<String> FALSE_VALUES = ["n", "no", "false", "0", "off"] as Set
     private static final Closure DEFAULT_HTTP_CLIENT = { Map request -> executeHttpRequest(request) }
     private static Closure httpClient = DEFAULT_HTTP_CLIENT
 
@@ -108,16 +148,13 @@ class OmsRestSourceSupport {
             return baseResult
         }
 
-        List fetchedRecords = extraction.records ?: []
-        List salesOrderRecords = retainSalesOrders(fetchedRecords)
-        List records = excludeExchangeOrders(salesOrderRecords)
-        int excludedNonSalesOrderCount = fetchedRecords.size() - salesOrderRecords.size()
-        int excludedExchangeOrderCount = salesOrderRecords.size() - records.size()
+        Map<String, Object> orderFilter = filterComparableOrderRecords(extraction.records ?: [])
+        List records = orderFilter.records as List
         requestMetadata.filters = [
                 requiredOrderTypeId          : SALES_ORDER_TYPE_ID,
-                excludedNonSalesOrderCount   : excludedNonSalesOrderCount,
+                excludedNonSalesOrderCount   : orderFilter.excludedNonSalesOrderCount,
                 excludedOrderItemAssocTypeIds: [EXCHANGE_ORDER_ASSOC_TYPE_ID],
-                excludedExchangeOrderCount   : excludedExchangeOrderCount,
+                excludedExchangeOrderCount   : orderFilter.excludedExchangeOrderCount,
         ]
         Map outputDocument = [
                 metadata: requestMetadata + [
@@ -141,15 +178,11 @@ class OmsRestSourceSupport {
         ]
     }
 
-    static Long toEpochMillis(Object rawValue) {
-        List<String> errors = []
-        Long millis = parseWindowMillis(rawValue, "value", errors)
-        if (errors) throw new IllegalArgumentException(errors.join(" "))
-        return millis
+    static Map<String, Object> safeConfigMap(def cfg) {
+        return safeConfigMapFromPlain(toPlainMap(cfg))
     }
 
-    static Map<String, Object> safeConfigMap(def cfg) {
-        Map config = toPlainMap(cfg)
+    private static Map<String, Object> safeConfigMapFromPlain(Map config) {
         return [
                 omsRestSourceConfigId : config.omsRestSourceConfigId,
                 description           : config.description,
@@ -169,15 +202,6 @@ class OmsRestSourceSupport {
                 createdDate           : config.createdDate,
                 lastUpdatedDate       : config.lastUpdatedDate,
         ]
-    }
-
-    static List<Map<String, Object>> filterConfigsForTenant(Collection configs, String activeTenantUserGroupId) {
-        String tenantId = normalize(activeTenantUserGroupId)
-        if (!tenantId) return []
-        return (configs ?: [])
-                .collect { toPlainMap(it) }
-                .findAll { normalize(it.companyUserGroupId) == tenantId }
-                .collect { safeConfigMap(it) }
     }
 
     static void requireWritableTenantConfig(Map existingConfig, String activeTenantUserGroupId, boolean canWrite) {
@@ -225,15 +249,7 @@ class OmsRestSourceSupport {
         }
         if (value ==~ /-?\d+/) return Long.parseLong(value)
 
-        List<Closure<Long>> parsers = [
-                { String text -> Instant.parse(text).toEpochMilli() },
-                { String text -> OffsetDateTime.parse(text).toInstant().toEpochMilli() },
-                { String text -> ZonedDateTime.parse(text).toInstant().toEpochMilli() },
-                { String text -> Timestamp.valueOf(text).time },
-                { String text -> LocalDateTime.parse(text).toInstant(ZoneOffset.UTC).toEpochMilli() },
-                { String text -> LocalDate.parse(text).atStartOfDay().toInstant(ZoneOffset.UTC).toEpochMilli() },
-        ]
-        for (Closure<Long> parser : parsers) {
+        for (Closure<Long> parser : WINDOW_MILLIS_PARSERS) {
             try {
                 return parser.call(value)
             } catch (Exception ignored) {
@@ -244,10 +260,6 @@ class OmsRestSourceSupport {
         return null
     }
 
-    protected static String buildOrdersUrl(String baseUrl, String ordersPath, Long fromMillis, Long thruMillis) {
-        return buildOrdersUrl(buildOrdersEndpointUrl(baseUrl, ordersPath), fromMillis, thruMillis, [:])
-    }
-
     protected static String buildOrdersUrl(String endpointUrl, Long fromMillis, Long thruMillis,
                                            Map<String, Object> extraQueryParams) {
         String separator = endpointUrl.contains("?") ? "&" : "?"
@@ -255,7 +267,7 @@ class OmsRestSourceSupport {
         queryParams.orderDate_from = fromMillis
         queryParams.orderDate_thru = thruMillis
         queryParams.putAll(extraQueryParams ?: [:])
-        return "${endpointUrl}${separator}${queryParams.collect { key, value -> "${key}=${value}" }.join("&")}"
+        return "${endpointUrl}${separator}${queryParams.collect { key, value -> "${encodeQueryComponent(key)}=${encodeQueryComponent(value)}" }.join("&")}"
     }
 
     protected static String buildOrdersEndpointUrl(String baseUrl, String ordersPath) {
@@ -356,7 +368,7 @@ class OmsRestSourceSupport {
         int maxPageCount = Math.max(1, normalizeInt(config?.maxOrdersPageCount, MAX_ORDERS_PAGE_COUNT))
         Map<String, Object> fallbackPage = null
 
-        for (Map<String, Object> strategy : paginationStrategies()) {
+        for (Map<String, Object> strategy : PAGINATION_STRATEGIES) {
             Map<String, Object> firstPage = fetchOrdersPage(endpointUrl, fromMillis, thruMillis,
                     pageQueryParams(strategy, 0, pageSize), headers, config, warnings)
             if (!firstPage.success) {
@@ -391,6 +403,8 @@ class OmsRestSourceSupport {
             List records = []
             records.addAll(firstRecords)
             records.addAll(secondRecords)
+            if (secondRecords.size() < firstRecords.size()) return successfulPageResult(strategy, pageSize, pages, records)
+
             List previousRecords = secondRecords
             int pageIndex = 2
             while (pageIndex < maxPageCount) {
@@ -500,18 +514,10 @@ class OmsRestSourceSupport {
         ]
     }
 
-    protected static List<Map<String, Object>> paginationStrategies() {
-        return [
-                [name: "pageIndexPageSize", indexParam: "pageIndex", sizeParam: "pageSize", offset: false],
-                [name: "viewIndexViewSize", indexParam: "viewIndex", sizeParam: "viewSize", offset: false],
-                [name: "offsetLimit", indexParam: "offset", sizeParam: "limit", offset: true],
-        ]
-    }
-
     protected static Map<String, Object> pageQueryParams(Map<String, Object> strategy, int pageIndex, int pageSize) {
         Map<String, Object> params = new LinkedHashMap<>()
         params[(String) strategy.sizeParam] = pageSize
-        params[(String) strategy.indexParam] = strategy.offset ? pageIndex * pageSize : pageIndex
+        params[(String) strategy.indexParam] = pageIndex
         return params
     }
 
@@ -521,18 +527,12 @@ class OmsRestSourceSupport {
 
     protected static boolean samePageRecords(List left, List right) {
         if ((left?.size() ?: 0) != (right?.size() ?: 0)) return false
-        return pageFingerprint(left) == pageFingerprint(right)
-    }
-
-    protected static List<String> pageFingerprint(List records) {
-        return (records ?: []).collect { Object record ->
-            record instanceof Map ? JsonOutput.toJson(new TreeMap((Map) record)) : normalize(record)
-        }
+        return (left ?: []) == (right ?: [])
     }
 
     protected static boolean isRecoverablePaginationFailure(Object statusCode) {
         int status = normalizeInt(statusCode, 0)
-        return [400, 404, 405, 422].contains(status)
+        return RECOVERABLE_PAGINATION_STATUS_CODES.contains(status)
     }
 
     protected static Map<String, Object> successfulPageResult(Map<String, Object> strategy, int pageSize,
@@ -655,8 +655,7 @@ class OmsRestSourceSupport {
         if (parsed == null) return []
         if (parsed instanceof List) return (List) parsed
         if (parsed instanceof Map) {
-            List<String> candidateKeys = ["orders", "order", "data", "items", "records", "results"]
-            String key = candidateKeys.find { String candidate -> ((Map) parsed).get(candidate) instanceof List }
+            String key = ORDER_LIST_KEYS.find { String candidate -> ((Map) parsed).get(candidate) instanceof List }
             if (key) return ((Map) parsed).get(key) as List
             warnings.add("OMS REST response JSON object did not contain an order list.")
             return []
@@ -666,16 +665,45 @@ class OmsRestSourceSupport {
         return []
     }
 
-    protected static List excludeExchangeOrders(Collection records) {
-        return (records ?: []).findAll { Object record ->
-            !containsExchangeOrderAssociation(record)
+    protected static Map<String, Object> filterComparableOrderRecords(Collection records) {
+        List filteredRecords = []
+        int excludedNonSalesOrderCount = 0
+        int excludedExchangeOrderCount = 0
+        (records ?: []).each { Object record ->
+            if (!isSalesOrder(record)) {
+                excludedNonSalesOrderCount++
+            } else if (containsExchangeOrderAssociation(record)) {
+                excludedExchangeOrderCount++
+            } else {
+                filteredRecords.add(record)
+            }
         }
+        return [
+                records                    : filteredRecords,
+                excludedNonSalesOrderCount : excludedNonSalesOrderCount,
+                excludedExchangeOrderCount : excludedExchangeOrderCount,
+        ]
     }
 
-    protected static List retainSalesOrders(Collection records) {
-        return (records ?: []).findAll { Object record ->
-            isSalesOrder(record)
+    protected static String encodeQueryComponent(Object value) {
+        return URLEncoder.encode(value == null ? "" : value.toString(), StandardCharsets.UTF_8.name())
+    }
+
+    protected static Map toPlainMap(def record) {
+        if (record == null) return [:]
+        if (record instanceof Map) return new LinkedHashMap(record as Map)
+        Map copy = [:]
+        CONFIG_FIELD_NAMES.each { String fieldName ->
+            try {
+                copy[fieldName] = record.get(fieldName)
+            } catch (Exception ignored) {
+                try {
+                    copy[fieldName] = record."${fieldName}"
+                } catch (Exception ignoredAgain) {
+                }
+            }
         }
+        return copy
     }
 
     protected static boolean isSalesOrder(Object record) {
@@ -730,40 +758,6 @@ class OmsRestSourceSupport {
         return value.replaceAll(/\/+$/, "")
     }
 
-    protected static Map toPlainMap(def record) {
-        if (record == null) return [:]
-        if (record instanceof Map) return new LinkedHashMap(record as Map)
-        Map copy = [:]
-        [
-                "omsRestSourceConfigId",
-                "description",
-                "companyUserGroupId",
-                "createdByUserId",
-                "baseUrl",
-                "ordersPath",
-                "authType",
-                "username",
-                "password",
-                "apiToken",
-                "headersJson",
-                "connectTimeoutSeconds",
-                "readTimeoutSeconds",
-                "isActive",
-                "createdDate",
-                "lastUpdatedDate",
-        ].each { String fieldName ->
-            try {
-                copy[fieldName] = record.get(fieldName)
-            } catch (Exception ignored) {
-                try {
-                    copy[fieldName] = record."${fieldName}"
-                } catch (Exception ignoredAgain) {
-                }
-            }
-        }
-        return copy
-    }
-
     protected static String normalize(Object value) {
         return value?.toString()?.trim()
     }
@@ -784,8 +778,8 @@ class OmsRestSourceSupport {
         if (value == null) return defaultValue
         if (value instanceof Boolean) return value as boolean
         String raw = normalize(value)?.toLowerCase()
-        if (["y", "yes", "true", "1", "on"].contains(raw)) return true
-        if (["n", "no", "false", "0", "off"].contains(raw)) return false
+        if (TRUE_VALUES.contains(raw)) return true
+        if (FALSE_VALUES.contains(raw)) return false
         return defaultValue
     }
 }
