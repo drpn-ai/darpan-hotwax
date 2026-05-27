@@ -4,6 +4,8 @@
 
 apply plugin: 'groovy'
 
+java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+
 def componentNode = parseComponent(project)
 version = componentNode.'@version'
 def jarBaseName = componentNode.'@name'
@@ -35,7 +37,9 @@ dependencies {
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.2'
     testImplementation project(':runtime:component:darpan').sourceSets.test.output
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.9.2'
-    testRuntimeOnly project(':runtime:component:moqui-atomikos')
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher:1.9.2' // Gradle 8/9 no longer auto-provides the launcher
+    testRuntimeOnly 'jakarta.servlet:jakarta.servlet-api:6.1.0' // Moqui 4 boots a jakarta servlet context; framework supplies it as provided
+    // moqui-atomikos retired: Moqui 4 embeds Bitronix as the default JTA TM.
 }
 
 check.dependsOn.clear()
@@ -57,9 +61,9 @@ task copyDependencies {
         copy {
             from (configurations.runtimeClasspath
                     - project(':framework').configurations.runtimeClasspath
-                    - project(':framework').jar.archivePath
+                    - project(':framework').tasks.named('jar').get().archiveFile.get().asFile
                     - project(':runtime:component:darpan').configurations.runtimeClasspath
-                    - project(':runtime:component:darpan').jar.archivePath)
+                    - project(':runtime:component:darpan').tasks.named('jar').get().archiveFile.get().asFile)
             into file(projectDir.absolutePath + '/lib')
         }
     }
