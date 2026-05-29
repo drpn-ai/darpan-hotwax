@@ -31,7 +31,17 @@ if (!TenantAccessSupport.requireActiveTenantWriteAccess(ec)) {
 }
 
 if (!configIdValue) ec.message.addError("OMS REST Source Config ID is required.")
-if (!baseUrlValue) ec.message.addError("Base URL is required.")
+if (!baseUrlValue) {
+    ec.message.addError("Base URL is required.")
+} else {
+    // SSRF defense (audit H5.1 / H6.4): a tenant could otherwise set baseUrl to AWS IMDS / 127.x /
+    // RFC1918 hosts and have Darpan fetch internal endpoints, returning the body as a
+    // downloadable reconciliation artifact. No HotWax host allow-list is enforced because
+    // customers run OMS on arbitrary self-hosted domains; OutboundHttpPolicy still requires
+    // https, blocks loopback, link-local, private, multicast, and cloud-metadata literals.
+    def __omsUrlCheck = darpan.facade.common.OutboundHttpPolicy.validate(baseUrlValue)
+    if (!__omsUrlCheck.ok) ec.message.addError("OMS Base URL is not allowed: " + __omsUrlCheck.error)
+}
 String timeZoneError = TenantAccessSupport.validateTimeZone(timeZoneValue)
 if (timeZoneError) ec.message.addError(timeZoneError)
 if (!["NONE", "BASIC", "BEARER", "API_KEY"].contains(authTypeValue)) {

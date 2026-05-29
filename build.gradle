@@ -15,7 +15,9 @@ def frameworkDir = file(moquiDir.absolutePath + '/framework')
 repositories {
     flatDir name: 'localLib', dirs: frameworkDir.absolutePath + '/lib'
     mavenCentral()
-    // jitpack removed: no declared dependency in this component resolves through it (supply-chain hygiene).
+    // jitpack is required to resolve the transitive `com.github.saasquatch:json-schema-inferrer:0.1.5`
+    // inherited via `:darpan`. Audit H11.8 (drop unused jitpack) was invalidated by transitive use.
+    maven { url 'https://jitpack.io' }
 }
 
 sourceSets {
