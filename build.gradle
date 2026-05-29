@@ -15,7 +15,7 @@ def frameworkDir = file(moquiDir.absolutePath + '/framework')
 repositories {
     flatDir name: 'localLib', dirs: frameworkDir.absolutePath + '/lib'
     mavenCentral()
-    maven { url 'https://jitpack.io' }
+    // jitpack removed: no declared dependency in this component resolves through it (supply-chain hygiene).
 }
 
 sourceSets {
