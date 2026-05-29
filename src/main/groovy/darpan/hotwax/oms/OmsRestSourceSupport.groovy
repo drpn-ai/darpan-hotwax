@@ -626,6 +626,18 @@ class OmsRestSourceSupport {
         throw new IllegalArgumentException("Auth Type must be NONE, BASIC, BEARER, or API_KEY.")
     }
 
+    // Audit M5.3 — block tenant-controlled headers that would override the auth handshake or smuggle
+    // routing. Authorization/Cookie/Host/Proxy-* are the classic SSRF-companion + credential-replay
+    // surface; X-Forwarded-* let a tenant claim an internal source IP. Header *values* with CR/LF are
+    // rejected to defeat HTTP-header splitting on permissive proxies.
+    private static final Set<String> BLOCKED_HEADER_NAMES = ([
+            "authorization", "cookie", "host", "proxy-authorization", "proxy-authenticate",
+            "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "forwarded",
+    ] as Set<String>).asImmutable()
+
+    private static final int MAX_HEADER_VALUE_LENGTH = 4096
+    private static final java.util.regex.Pattern HEADER_CONTROL_CHARS = java.util.regex.Pattern.compile("[\\x00-\\x1F\\x7F]")
+
     protected static Map<String, String> parseHeadersJson(Object rawHeadersJson) {
         String headersJson = normalize(rawHeadersJson)
         if (!headersJson) return [:]
@@ -640,14 +652,27 @@ class OmsRestSourceSupport {
         ((Map) parsed).each { key, value ->
             String headerName = normalize(key)
             String headerValue = normalize(value)
-            if (headerName && headerValue) headers.put(headerName, headerValue)
+            if (!headerName || !headerValue) return
+            String lower = headerName.toLowerCase(Locale.ROOT)
+            // Blocked header names (Authorization / Cookie / Host / Proxy-* / X-Forwarded-*) are
+            // silently dropped — the auth handshake sets Authorization on its own and any value the
+            // tenant supplies here would override that. We don't fail the save because legacy configs
+            // may already carry these names; we just refuse to send them upstream.
+            if (BLOCKED_HEADER_NAMES.contains(lower)) return
+            if (headerValue.length() > MAX_HEADER_VALUE_LENGTH) {
+                throw new IllegalArgumentException("Header '${headerName}' value exceeds ${MAX_HEADER_VALUE_LENGTH} chars.")
+            }
+            if (HEADER_CONTROL_CHARS.matcher(headerValue).find()) {
+                throw new IllegalArgumentException("Header '${headerName}' value contains control characters (potential header smuggling).")
+            }
+            headers.put(headerName, headerValue)
         }
         return headers
     }
 
     protected static List<String> safeHeaderNames(Map<String, String> headers) {
         return (headers ?: [:]).keySet()
-                .findAll { String headerName -> !headerName.equalsIgnoreCase("Authorization") }
+                .findAll { String headerName -> !BLOCKED_HEADER_NAMES.contains(headerName.toLowerCase(Locale.ROOT)) }
                 .sort()
     }
 
