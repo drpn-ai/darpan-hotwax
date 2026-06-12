@@ -17,7 +17,11 @@ repositories {
     mavenCentral()
     // jitpack is required to resolve the transitive `com.github.saasquatch:json-schema-inferrer:0.1.5`
     // inherited via `:darpan`. Audit H11.8 (drop unused jitpack) was invalidated by transitive use.
-    maven { url 'https://jitpack.io' }
+    // Scoped to that one module so jitpack cannot shadow anything else (dependency confusion).
+    maven {
+        url = 'https://jitpack.io'
+        content { includeModule('com.github.saasquatch', 'json-schema-inferrer') }
+    }
 }
 
 sourceSets {
