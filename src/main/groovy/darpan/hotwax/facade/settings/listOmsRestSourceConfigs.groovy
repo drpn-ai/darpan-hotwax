@@ -1,12 +1,14 @@
 import darpan.facade.common.FacadeSupport
+import darpan.facade.common.PaginationSupport
 import darpan.facade.common.TenantAccessSupport
 import darpan.hotwax.oms.OmsRestSourceSupport
 
+import static darpan.common.ValueSupport.boundedInt
 import static darpan.common.ValueSupport.normalize
 import static darpan.common.ValueSupport.normalizeInt
 
 int page = Math.max(0, normalizeInt(pageIndex, 0))
-int size = Math.max(1, Math.min(200, normalizeInt(pageSize, 20)))
+int size = boundedInt(pageSize, 20, 1, 200)
 String activeTenantUserGroupId = TenantAccessSupport.currentActiveTenantUserGroupId(ec)
 
 List<Map<String, Object>> rows = []
@@ -30,16 +32,8 @@ List<Map<String, Object>> filtered = search ? rows.findAll { row ->
 } : rows
 
 int totalCount = filtered.size()
-int fromIndex = Math.min(page * size, totalCount)
-int toIndex = Math.min(fromIndex + size, totalCount)
-omsRestSourceConfigs = filtered.subList(fromIndex, toIndex)
-
-pagination = [
-        pageIndex : page,
-        pageSize  : size,
-        totalCount: totalCount,
-        pageCount : Math.max(1, Math.ceil(totalCount / (double) size) as int)
-]
+omsRestSourceConfigs = PaginationSupport.pageRows(filtered, page, size)
+pagination = PaginationSupport.pagination(page, size, totalCount)
 
 Map envelope = FacadeSupport.envelope(ec)
 ok = envelope.ok

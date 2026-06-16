@@ -121,6 +121,223 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
         }
     }
 
+    @Test
+    void saveRejectsDisallowedBaseUrls() {
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
+
+        Map<String, Object> plaintext = saveFacade([
+            omsRestSourceConfigId: "GORJANA_SSRF_HTTP",
+            baseUrl              : "http://oms.example.com",
+            ordersPath           : "/rest/s1/oms/orders",
+            authType             : "NONE",
+            timeZone             : "America/Chicago",
+            connectTimeoutSeconds: 30,
+            readTimeoutSeconds   : 60,
+            isActive             : true,
+            canReadOrders        : true,
+        ])
+        assertFalse((Boolean) plaintext.ok)
+        assertTrue((plaintext.errors ?: []).join(" ").contains("OMS Base URL is not allowed"))
+        assertNull(findOne("GORJANA_SSRF_HTTP"))
+
+        ec.message.clearErrors()
+        Map<String, Object> metadataIp = saveFacade([
+            omsRestSourceConfigId: "GORJANA_SSRF_METADATA",
+            baseUrl              : "https://169.254.169.254/latest/meta-data",
+            ordersPath           : "/rest/s1/oms/orders",
+            authType             : "NONE",
+            timeZone             : "America/Chicago",
+            connectTimeoutSeconds: 30,
+            readTimeoutSeconds   : 60,
+            isActive             : true,
+            canReadOrders        : true,
+        ])
+        assertFalse((Boolean) metadataIp.ok)
+        assertTrue((metadataIp.errors ?: []).join(" ").contains("OMS Base URL is not allowed"))
+        assertNull(findOne("GORJANA_SSRF_METADATA"))
+    }
+
+    @Test
+    void listIsTenantScopedSearchableAndPaginated() {
+        upsertEntityValue(ENTITY_NAME, [omsRestSourceConfigId: "GORJANA_LIST_HOTWAX"], [
+            omsRestSourceConfigId: "GORJANA_LIST_HOTWAX",
+            description          : "Gorjana List",
+            companyUserGroupId   : GORJANA,
+            baseUrl              : "https://gorjana-list.hotwax.io",
+            ordersPath           : "/rest/s1/oms/orders",
+            authType             : "NONE",
+            isActive             : "Y",
+            canReadOrders        : "Y",
+            createdDate          : TEST_FROM_DATE,
+            lastUpdatedDate      : TEST_FROM_DATE,
+        ])
+        upsertEntityValue(ENTITY_NAME, [omsRestSourceConfigId: "KREWE_HOTWAX_2"], [
+            omsRestSourceConfigId: "KREWE_HOTWAX_2",
+            description          : "Krewe Second",
+            companyUserGroupId   : KREWE,
+            baseUrl              : "https://krewe2.hotwax.io",
+            ordersPath           : "/rest/s1/oms/orders",
+            authType             : "NONE",
+            isActive             : "Y",
+            canReadOrders        : "Y",
+            createdDate          : TEST_FROM_DATE,
+            lastUpdatedDate      : TEST_FROM_DATE,
+        ])
+
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, KREWE)
+        Map<String, Object> all = listFacade([:])
+        assertTrue((Boolean) all.ok, all.errors?.toString())
+        List rows = all.omsRestSourceConfigs as List
+        List ids = rows.collect { it.omsRestSourceConfigId }
+        assertTrue(ids.contains("KREWE_HOTWAX"))
+        assertTrue(ids.contains("KREWE_HOTWAX_2"))
+        assertFalse(ids.contains("GORJANA_LIST_HOTWAX"))
+        rows.each { row ->
+            assertTrue(row.containsKey("hasApiToken"))
+            assertTrue(row.containsKey("hasPassword"))
+            assertFalse(row.containsKey("apiToken"))
+            assertFalse(row.containsKey("password"))
+        }
+        int totalCount = (all.pagination as Map).totalCount as int
+        assertTrue(totalCount >= 2)
+
+        ec.message.clearErrors()
+        Map<String, Object> searched = listFacade([query: "second"])
+        List searchedIds = (searched.omsRestSourceConfigs as List).collect { it.omsRestSourceConfigId }
+        assertTrue(searchedIds.contains("KREWE_HOTWAX_2"))
+        assertFalse(searchedIds.contains("KREWE_HOTWAX"))
+
+        ec.message.clearErrors()
+        Map<String, Object> paged = listFacade([pageSize: 1])
+        Map pagination = paged.pagination as Map
+        assertEquals(totalCount, pagination.totalCount)
+        assertEquals(totalCount, pagination.pageCount)
+        assertEquals(1, (paged.omsRestSourceConfigs as List).size())
+
+        ec.message.clearErrors()
+        Map<String, Object> beyond = listFacade([pageIndex: 99, pageSize: 1])
+        assertTrue((Boolean) beyond.ok)
+        assertTrue((beyond.omsRestSourceConfigs as List).isEmpty())
+    }
+
+    @Test
+    void preservesSecretsOnBlankUpdateAndRequiresSecretForNewBearer() {
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
+
+        Map<String, Object> created = saveFacade([
+            omsRestSourceConfigId: "GORJANA_BEARER_HOTWAX",
+            description          : "Bearer One",
+            baseUrl              : "https://bearer.hotwax.io",
+            ordersPath           : "/rest/s1/oms/orders",
+            authType             : "BEARER",
+            apiToken             : "tok-12345",
+            timeZone             : "America/Chicago",
+            connectTimeoutSeconds: 30,
+            readTimeoutSeconds   : 60,
+            isActive             : true,
+            canReadOrders        : true,
+        ])
+        assertTrue((Boolean) created.ok, created.errors?.toString())
+
+        ec.message.clearErrors()
+        Map<String, Object> updated = saveFacade([
+            omsRestSourceConfigId: "GORJANA_BEARER_HOTWAX",
+            description          : "Bearer One Updated",
+            baseUrl              : "https://bearer.hotwax.io",
+            ordersPath           : "/rest/s1/oms/orders",
+            authType             : "BEARER",
+            timeZone             : "America/Chicago",
+            connectTimeoutSeconds: 30,
+            readTimeoutSeconds   : 60,
+            isActive             : true,
+            canReadOrders        : true,
+        ])
+        assertTrue((Boolean) updated.ok, updated.errors?.toString())
+        def stored = findOne("GORJANA_BEARER_HOTWAX")
+        assertEquals("Bearer One Updated", stored.description)
+        assertEquals("tok-12345", stored.apiToken?.toString())
+
+        ec.message.clearErrors()
+        Map<String, Object> rejected = saveFacade([
+            omsRestSourceConfigId: "GORJANA_BEARER_MISSING",
+            baseUrl              : "https://bearer2.hotwax.io",
+            ordersPath           : "/rest/s1/oms/orders",
+            authType             : "BEARER",
+            timeZone             : "America/Chicago",
+            connectTimeoutSeconds: 30,
+            readTimeoutSeconds   : 60,
+            isActive             : true,
+            canReadOrders        : true,
+        ])
+        assertFalse((Boolean) rejected.ok)
+        assertTrue((rejected.errors ?: []).join(" ").contains("API token is required for BEARER auth."))
+        assertNull(findOne("GORJANA_BEARER_MISSING"))
+    }
+
+    @Test
+    void deleteReportsNotFoundForMissingConfig() {
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
+        Map<String, Object> result = deleteFacade("GORJANA_DOES_NOT_EXIST")
+        assertFalse((Boolean) result.ok)
+        assertTrue((result.errors ?: []).join(" ").contains("was not found"))
+        assertEquals(false, result.deleted)
+    }
+
+    @Test
+    void extractionBlocksInactiveConfigAndAutomationTenantMismatch() {
+        Map<String, Object> mismatch = (Map<String, Object>) ec.service.sync()
+            .name("reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrders")
+            .parameters([
+                omsRestSourceConfigId: "KREWE_HOTWAX",
+                companyUserGroupId   : GORJANA,
+                windowStart          : Timestamp.valueOf("2026-05-01 00:00:00"),
+                windowEnd            : Timestamp.valueOf("2026-05-02 00:00:00"),
+            ])
+            .disableAuthz()
+            .call()
+        assertTrue((mismatch.errors ?: []).join(" ").contains("not available in this automation tenant"))
+        assertFalse(mismatch.dataAvailable as boolean)
+        assertEquals(0, mismatch.recordCount)
+        assertNull(mismatch.fileLocation)
+
+        // Clear the mismatch error before the next service call: Moqui skips a service invocation when
+        // ec.message already has errors, which would otherwise return null for the inactive-config call.
+        ec.message.clearErrors()
+        upsertEntityValue(ENTITY_NAME, [omsRestSourceConfigId: "KREWE_INACTIVE_HOTWAX"], [
+            omsRestSourceConfigId: "KREWE_INACTIVE_HOTWAX",
+            description          : "Krewe Inactive",
+            companyUserGroupId   : KREWE,
+            baseUrl              : "https://krewe-inactive.hotwax.io",
+            ordersPath           : "/rest/s1/oms/orders",
+            authType             : "NONE",
+            isActive             : "N",
+            canReadOrders        : "Y",
+            createdDate          : TEST_FROM_DATE,
+            lastUpdatedDate      : TEST_FROM_DATE,
+        ])
+        Map<String, Object> inactive = (Map<String, Object>) ec.service.sync()
+            .name("reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrders")
+            .parameters([
+                omsRestSourceConfigId: "KREWE_INACTIVE_HOTWAX",
+                companyUserGroupId   : KREWE,
+                windowStart          : Timestamp.valueOf("2026-05-01 00:00:00"),
+                windowEnd            : Timestamp.valueOf("2026-05-02 00:00:00"),
+            ])
+            .disableAuthz()
+            .call()
+        assertTrue((inactive.errors ?: []).join(" ").contains("is inactive"))
+        assertFalse(inactive.dataAvailable as boolean)
+        assertEquals(0, inactive.recordCount)
+    }
+
+    private Map<String, Object> listFacade(Map<String, Object> parameters) {
+        return (Map<String, Object>) ec.service.sync()
+            .name("facade.HotWaxOmsFacadeServices.list#HotWaxOmsRestSourceConfigs")
+            .parameters(parameters)
+            .disableAuthz()
+            .call()
+    }
+
     private Map<String, Object> saveFacade(Map<String, Object> parameters) {
         return (Map<String, Object>) ec.service.sync()
             .name("facade.HotWaxOmsFacadeServices.save#HotWaxOmsRestSourceConfig")

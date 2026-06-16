@@ -2,7 +2,7 @@
 <services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
         xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
 
-    <service verb="list" noun="HotWaxOmsRestSourceConfigs" type="script" allow-remote="true" authenticate="true"
+    <service verb="list" noun="HotWaxOmsRestSourceConfigs" type="script" authz-action="view" allow-remote="true" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/facade/settings/listOmsRestSourceConfigs.groovy">
         <description>List OMS REST source configurations available to the active tenant.</description>
         <in-parameters>

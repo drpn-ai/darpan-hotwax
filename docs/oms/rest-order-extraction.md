@@ -12,6 +12,9 @@ Facade services:
 
 - `facade.HotWaxOmsFacadeServices.list#HotWaxOmsRestSourceConfigs`
 - `facade.HotWaxOmsFacadeServices.save#HotWaxOmsRestSourceConfig`
+- `facade.HotWaxOmsFacadeServices.delete#HotWaxOmsRestSourceConfig`
+
+Delete is allow-remote and authenticated, and like save it requires active-tenant write access and verifies the stored config's owner before removing it.
 
 Configs are scoped by `companyUserGroupId`. Save operations require active-tenant write access and preserve existing encrypted secrets when blank secret inputs are sent on update. List/save responses return safe metadata only: secret fields are represented as boolean flags and are not returned in clear text. `canReadOrders` controls whether the orders endpoint is advertised to the UI for the selected HotWax config; it defaults to enabled for existing configs.
 
@@ -74,6 +77,8 @@ The output is normalized JSON:
 }
 ```
 
+The `metadata` block above is illustrative; the extractor always also emits the request shape it derived (`method`, `baseUrl`, `authType`, `timeZone`, `headerNames`, `statusCode`, `attemptCount`, and `windowStart/EndEpochMillis`). Credentials and authorization header values are never included — only header names.
+
 The default output folder is `runtime://datamanager/reconciliation-runs/{automationExecutionId}/{timestamp}/`. When `automationExecutionId` is omitted, the config id is used as the run folder token.
 
 The service returns `fileLocation`, `fileName`, `recordCount`, `requestMetadata`, `warnings`, and `errors`. Request metadata excludes credentials and authorization headers.
@@ -84,7 +89,7 @@ Service XML owns the public contracts for this component. Groovy is retained onl
 
 - `src/main/groovy/darpan/hotwax/oms/OmsRestSourceSupport.groovy`: retained for HTTP execution, auth-header construction, URL/path overlap handling, query encoding, pagination fallback across documented OMS list conventions, date parsing, safe metadata shaping, JSON parsing, and sales/exchange-order filtering. This is integration and transformation logic, not service orchestration.
 - `src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsOrders.groovy`: retained as the service edge that combines tenant-safe config access, extractor invocation, data-manager path resolution, safe file naming, and output writing. Keeping this in XML would push the same branching into dense action expressions while still depending on the Groovy extractor.
-- `src/main/groovy/darpan/hotwax/facade/settings/saveOmsRestSourceConfig.groovy`: retained for validation that depends on existing encrypted secret state, auth-mode-specific requirements, timezone validation, tenant writability checks, secret preservation on blank updates, and safe response shaping.
+- `src/main/groovy/darpan/hotwax/facade/settings/saveOmsRestSourceConfig.groovy`: retained for validation that depends on existing encrypted secret state, auth-mode-specific requirements, timezone validation, outbound-URL (SSRF) policy checks, headers-JSON validation (rejecting invalid or non-object JSON, oversized header values, and control-character / header-smuggling attempts), tenant writability checks, secret preservation on blank updates, and safe response shaping.
 - `src/main/groovy/darpan/hotwax/facade/settings/listOmsRestSourceConfigs.groovy`: retained for safe-row projection, credential redaction, tenant-scoped filtering, case-insensitive multi-field search, and bounded pagination. This keeps the XML service definition declarative and avoids repeating redaction logic in XML actions.
 - `src/main/groovy/darpan/hotwax/facade/settings/deleteOmsRestSourceConfig.groovy`: retained because delete is not a pure entity delete; it resolves the active tenant, verifies write access against the stored owner, returns the shared facade envelope, and emits the deletion result. Converting it to XML would duplicate tenant-safety checks already centralized in support code.
 

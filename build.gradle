@@ -48,6 +48,8 @@ dependencies {
     // moqui-atomikos retired: Moqui 4 embeds Bitronix as the default JTA TM.
 }
 
+// by default the Java plugin runs test on build; change to not do that (only run tests on demand).
+// Mirrors the :darpan sibling so component builds stay fast and tests are an explicit task.
 check.dependsOn.clear()
 
 test {

@@ -52,7 +52,7 @@ if (readTimeoutValue <= 0) readTimeoutValue = 60
 
 if (headersJsonValue) {
     try {
-        OmsRestSourceSupport.safeConfigMap([headersJson: headersJsonValue])
+        OmsRestSourceSupport.validateHeadersJson(headersJsonValue)
     } catch (IllegalArgumentException e) {
         ec.message.addError(e.message)
     }

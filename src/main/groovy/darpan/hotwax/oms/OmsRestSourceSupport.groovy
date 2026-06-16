@@ -3,6 +3,11 @@ package darpan.hotwax.oms
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 
+import static darpan.common.ValueSupport.boundedInt
+import static darpan.common.ValueSupport.normalize
+import static darpan.common.ValueSupport.normalizeBool
+import static darpan.common.ValueSupport.normalizeInt
+
 import java.nio.charset.StandardCharsets
 import java.sql.Timestamp
 import java.time.Instant
@@ -24,6 +29,9 @@ class OmsRestSourceSupport {
     static final String ORDER_ITEM_ASSOC_TYPE_ID_FIELD = "orderItemAssocTypeId"
     static final int DEFAULT_ORDERS_PAGE_SIZE = 500
     static final int MAX_ORDERS_PAGE_COUNT = 20000
+    // Some OMS list endpoints silently cap a page at 50 records regardless of the requested pageSize;
+    // a 50-record first page is therefore treated as "maybe truncated" and triggers a second-page probe.
+    static final int OMS_DEFAULT_SERVER_PAGE_SIZE = 50
 
     private static final JsonSlurper JSON_SLURPER = new JsonSlurper()
     private static final List<String> CONFIG_FIELD_NAMES = [
@@ -41,9 +49,6 @@ class OmsRestSourceSupport {
             "headersJson",
             "connectTimeoutSeconds",
             "readTimeoutSeconds",
-            "ordersPageSize",
-            "pageSize",
-            "maxOrdersPageCount",
             "isActive",
             "canReadOrders",
             "createdDate",
@@ -63,8 +68,6 @@ class OmsRestSourceSupport {
     ]
     private static final Set<Integer> RECOVERABLE_PAGINATION_STATUS_CODES = [400, 404, 405, 422] as Set
     private static final List<String> ORDER_LIST_KEYS = ["orders", "order", "data", "items", "records", "results"]
-    private static final Set<String> TRUE_VALUES = ["y", "yes", "true", "1", "on"] as Set
-    private static final Set<String> FALSE_VALUES = ["n", "no", "false", "0", "off"] as Set
     private static final Closure DEFAULT_HTTP_CLIENT = { Map request -> executeHttpRequest(request) }
     private static Closure httpClient = DEFAULT_HTTP_CLIENT
 
@@ -247,7 +250,14 @@ class OmsRestSourceSupport {
             errors.add("${label} is required.")
             return null
         }
-        if (value ==~ /-?\d+/) return Long.parseLong(value)
+        if (value ==~ /-?\d+/) {
+            try {
+                return Long.parseLong(value)
+            } catch (NumberFormatException ignored) {
+                errors.add("${label} must be a Timestamp, Date, ISO-8601 value, or epoch milliseconds.")
+                return null
+            }
+        }
 
         for (Closure<Long> parser : WINDOW_MILLIS_PARSERS) {
             try {
@@ -279,7 +289,10 @@ class OmsRestSourceSupport {
             URI uri = new URI(normalizedBase)
             if (uri.scheme && uri.host) {
                 String joinedPath = joinPathWithOverlap(uri.path, normalizedPath)
-                return new URI(uri.scheme, uri.userInfo, uri.host, uri.port, joinedPath, uri.query, uri.fragment).toString()
+                // Drop any userInfo (basic-auth embedded in the URL) from the live request URL so
+                // credentials cannot leak into request paths, logs, or connection-failure error text.
+                // URL-embedded auth is not a supported mode here — use username/password/apiToken.
+                return new URI(uri.scheme, null, uri.host, uri.port, joinedPath, uri.query, uri.fragment).toString()
             }
         } catch (Exception ignored) {
         }
@@ -366,13 +379,11 @@ class OmsRestSourceSupport {
                                                               List<String> warnings) {
         int pageSize = resolveOrdersPageSize(config)
         int maxPageCount = Math.max(1, normalizeInt(config?.maxOrdersPageCount, MAX_ORDERS_PAGE_COUNT))
-        Map<String, Object> fallbackPage = null
 
         for (Map<String, Object> strategy : PAGINATION_STRATEGIES) {
             Map<String, Object> firstPage = fetchOrdersPage(endpointUrl, fromMillis, thruMillis,
                     pageQueryParams(strategy, 0, pageSize), headers, config, warnings)
             if (!firstPage.success) {
-                fallbackPage = firstPage
                 if (isRecoverablePaginationFailure(firstPage.statusCode)) continue
                 return failedPageResult(firstPage)
             }
@@ -386,7 +397,6 @@ class OmsRestSourceSupport {
             Map<String, Object> secondPage = fetchOrdersPage(endpointUrl, fromMillis, thruMillis,
                     pageQueryParams(strategy, 1, pageSize), headers, config, warnings)
             if (!secondPage.success) {
-                fallbackPage = secondPage
                 if (isRecoverablePaginationFailure(secondPage.statusCode)) continue
                 return failedPageResult(secondPage, [firstPage])
             }
@@ -395,7 +405,6 @@ class OmsRestSourceSupport {
             if (secondRecords.isEmpty()) return successfulPageResult(strategy, pageSize, [firstPage, secondPage], firstRecords)
             if (samePageRecords(firstRecords, secondRecords)) {
                 warnings.add("OMS REST pagination strategy ${strategy.name} did not advance beyond the first page.")
-                fallbackPage = firstPage
                 continue
             }
 
@@ -441,7 +450,7 @@ class OmsRestSourceSupport {
         }
 
         Map<String, Object> unpaginatedPage = fetchOrdersPage(endpointUrl, fromMillis, thruMillis, [:], headers, config, warnings)
-        if (!unpaginatedPage.success) return failedPageResult(unpaginatedPage ?: fallbackPage)
+        if (!unpaginatedPage.success) return failedPageResult(unpaginatedPage)
         warnings.add("OMS REST pagination parameters did not advance; extracted the first unpaginated response only.")
         return successfulPageResult([name: "unpaginated"], pageSize, [unpaginatedPage], unpaginatedPage.records ?: [])
     }
@@ -466,24 +475,12 @@ class OmsRestSourceSupport {
                 }
             }
         } catch (Exception e) {
-            return [
-                    success   : false,
-                    statusCode: 0,
-                    attemptCount: attemptCount,
-                    retriedWithTrailingSlash: retriedWithTrailingSlash,
-                    errors    : ["OMS REST request failed: ${e.message}"],
-            ]
+            return pageFailure(0, attemptCount, retriedWithTrailingSlash, "OMS REST request failed: ${e.message}")
         }
 
         Integer statusCode = normalizeInt(response.statusCode, 0)
         if (statusCode < 200 || statusCode >= 300) {
-            return [
-                    success   : false,
-                    statusCode: statusCode,
-                    attemptCount: attemptCount,
-                    retriedWithTrailingSlash: retriedWithTrailingSlash,
-                    errors    : ["OMS REST request failed with status ${statusCode}."],
-            ]
+            return pageFailure(statusCode, attemptCount, retriedWithTrailingSlash, "OMS REST request failed with status ${statusCode}.")
         }
 
         Object parsed
@@ -495,13 +492,7 @@ class OmsRestSourceSupport {
             try {
                 parsed = JSON_SLURPER.parseText(body)
             } catch (Exception e) {
-                return [
-                        success   : false,
-                        statusCode: statusCode,
-                        attemptCount: attemptCount,
-                        retriedWithTrailingSlash: retriedWithTrailingSlash,
-                        errors    : ["OMS REST response was not valid JSON: ${e.message}"],
-                ]
+                return pageFailure(statusCode, attemptCount, retriedWithTrailingSlash, "OMS REST response was not valid JSON: ${e.message}")
             }
         }
 
@@ -514,6 +505,16 @@ class OmsRestSourceSupport {
         ]
     }
 
+    private static Map<String, Object> pageFailure(int statusCode, int attemptCount, boolean retriedWithTrailingSlash, String error) {
+        return [
+                success                 : false,
+                statusCode              : statusCode,
+                attemptCount            : attemptCount,
+                retriedWithTrailingSlash: retriedWithTrailingSlash,
+                errors                  : [error],
+        ]
+    }
+
     protected static Map<String, Object> pageQueryParams(Map<String, Object> strategy, int pageIndex, int pageSize) {
         Map<String, Object> params = new LinkedHashMap<>()
         params[(String) strategy.sizeParam] = pageSize
@@ -522,7 +523,7 @@ class OmsRestSourceSupport {
     }
 
     protected static boolean shouldProbeSecondPage(List records, int pageSize) {
-        return records.size() >= pageSize || records.size() == 50
+        return records.size() >= pageSize || records.size() == OMS_DEFAULT_SERVER_PAGE_SIZE
     }
 
     protected static boolean samePageRecords(List left, List right) {
@@ -592,7 +593,7 @@ class OmsRestSourceSupport {
     }
 
     protected static int resolveOrdersPageSize(Map config) {
-        return Math.max(1, Math.min(1000, normalizeInt(config?.ordersPageSize ?: config?.pageSize, DEFAULT_ORDERS_PAGE_SIZE)))
+        return boundedInt(config?.ordersPageSize, DEFAULT_ORDERS_PAGE_SIZE, 1, 1000)
     }
 
     protected static Map<String, String> buildHeaders(Map config) {
@@ -637,6 +638,10 @@ class OmsRestSourceSupport {
 
     private static final int MAX_HEADER_VALUE_LENGTH = 4096
     private static final java.util.regex.Pattern HEADER_CONTROL_CHARS = java.util.regex.Pattern.compile("[\\x00-\\x1F\\x7F]")
+
+    static void validateHeadersJson(Object rawHeadersJson) {
+        parseHeadersJson(rawHeadersJson)
+    }
 
     protected static Map<String, String> parseHeadersJson(Object rawHeadersJson) {
         String headersJson = normalize(rawHeadersJson)
@@ -755,6 +760,14 @@ class OmsRestSourceSupport {
     }
 
     protected static Map<String, Object> executeHttpRequest(Map request) {
+        // Audit 2026-06-11 #15: re-validate the resolved endpoint at request time, not only at
+        // config-save time. A baseUrl mutated out-of-band (direct DB write, data import, or a row
+        // created before the save guard shipped) would otherwise reach the HTTP client unchecked and
+        // could target loopback / link-local / RFC1918 / cloud-metadata addresses (SSRF). No host
+        // allow-list — customers self-host OMS on arbitrary domains, matching the save-path decision.
+        // Runs only on the real network path; tests inject their own client via setHttpClient.
+        def __urlCheck = darpan.facade.common.OutboundHttpPolicy.validate(request.url as String)
+        if (!__urlCheck.ok) throw new IllegalStateException("OMS endpoint URL blocked by outbound policy: ${__urlCheck.error}")
         HttpURLConnection connection = (HttpURLConnection) new URL(request.url as String).openConnection()
         connection.requestMethod = request.method as String
         connection.connectTimeout = normalizeInt(request.connectTimeoutSeconds, 30) * 1000
@@ -781,30 +794,5 @@ class OmsRestSourceSupport {
         } catch (Exception ignored) {
         }
         return value.replaceAll(/\/+$/, "")
-    }
-
-    protected static String normalize(Object value) {
-        return value?.toString()?.trim()
-    }
-
-    protected static Integer normalizeInt(Object value, Integer defaultValue) {
-        if (value == null) return defaultValue
-        if (value instanceof Number) return ((Number) value).intValue()
-        String raw = normalize(value)
-        if (!raw) return defaultValue
-        try {
-            return Integer.parseInt(raw)
-        } catch (Exception ignored) {
-            return defaultValue
-        }
-    }
-
-    protected static boolean normalizeBool(Object value, boolean defaultValue) {
-        if (value == null) return defaultValue
-        if (value instanceof Boolean) return value as boolean
-        String raw = normalize(value)?.toLowerCase()
-        if (TRUE_VALUES.contains(raw)) return true
-        if (FALSE_VALUES.contains(raw)) return false
-        return defaultValue
     }
 }
