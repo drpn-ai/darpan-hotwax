@@ -162,7 +162,9 @@ class OmsRestSourceSupportTests {
         }
 
         Map result = OmsRestSourceSupport.extractOrders(baseConfig([
-                ordersPageSize: 2,
+                ordersPageSize        : 2,
+                // Pin sequential mode: this test asserts the exact request cadence.
+                ordersFetchConcurrency: 1,
         ]), "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z")
 
         assertTrue(result.errors.isEmpty(), result.errors.toString())

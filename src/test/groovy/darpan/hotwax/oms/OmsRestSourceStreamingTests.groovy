@@ -39,7 +39,8 @@ class OmsRestSourceStreamingTests {
             return [statusCode: 200, body: JsonOutput.toJson([orders: orders])]
         }
 
-        Map result = OmsRestSourceSupport.extractOrdersToFile(baseConfig([ordersPageSize: 2]),
+        // Pin sequential mode: the on-disk cadence assertions below describe sequential fetching.
+        Map result = OmsRestSourceSupport.extractOrdersToFile(baseConfig([ordersPageSize: 2, ordersFetchConcurrency: 1]),
                 "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z", target)
 
         assertTrue(result.errors.isEmpty(), result.errors.toString())
@@ -134,7 +135,7 @@ class OmsRestSourceStreamingTests {
             return [statusCode: 200, body: JsonOutput.toJson([orders: orders])]
         }
 
-        Map result = OmsRestSourceSupport.extractOrdersToFile(baseConfig([ordersPageSize: 2]),
+        Map result = OmsRestSourceSupport.extractOrdersToFile(baseConfig([ordersPageSize: 2, ordersFetchConcurrency: 1]),
                 "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z", target)
 
         assertTrue(result.errors.any { it.contains("status 500") }, result.errors.toString())

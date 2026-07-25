@@ -17,6 +17,11 @@ import java.time.OffsetDateTime
 import java.time.ZoneOffset
 import java.time.ZonedDateTime
 import java.net.URLEncoder
+import java.util.concurrent.Callable
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.zip.GZIPInputStream
 
 class OmsRestSourceSupport {
     static final String DEFAULT_ORDERS_PATH = "/rest/s1/oms/orders"
@@ -29,6 +34,10 @@ class OmsRestSourceSupport {
     static final String ORDER_ITEM_ASSOC_TYPE_ID_FIELD = "orderItemAssocTypeId"
     static final int DEFAULT_ORDERS_PAGE_SIZE = 500
     static final int MAX_ORDERS_PAGE_COUNT = 20000
+    // Default prefetch window after the pagination strategy commits. Two keeps one page in
+    // flight while the previous is consumed — chosen for memory-constrained production hosts;
+    // raise per config (ordersFetchConcurrency, capped at 4) where the box has headroom.
+    static final int DEFAULT_ORDERS_FETCH_CONCURRENCY = 2
     // Some OMS list endpoints silently cap a page at 50 records regardless of the requested pageSize;
     // a 50-record first page is therefore treated as "maybe truncated" and triggers a second-page probe.
     static final int OMS_DEFAULT_SERVER_PAGE_SIZE = 50
@@ -83,12 +92,13 @@ class OmsRestSourceSupport {
         // In-memory variant kept for tests and small interactive windows. The automation path must
         // use extractOrdersToFile so month-scale windows never materialize whole in heap.
         StringWriter buffer = new StringWriter()
-        List collectedRecords = []
         Map<String, Object> result = extractOrdersInternal(rawConfig, windowStart, windowEnd,
-                new OrdersDocumentSink({ -> buffer }), collectedRecords)
+                new OrdersDocumentSink({ -> buffer }))
         if (!(result.errors as List)) {
-            result.outputText = buffer.toString()
-            result.records = collectedRecords
+            String outputText = buffer.toString()
+            result.outputText = outputText
+            // Convenience for in-memory callers only; the streaming pipeline never retains records.
+            result.records = ((JSON_SLURPER.parseText(outputText) as Map).records as List) ?: []
         }
         return result
     }
@@ -101,7 +111,7 @@ class OmsRestSourceSupport {
         })
         Map<String, Object> result
         try {
-            result = extractOrdersInternal(rawConfig, windowStart, windowEnd, sink, null)
+            result = extractOrdersInternal(rawConfig, windowStart, windowEnd, sink)
         } catch (Exception e) {
             sink.abort()
             targetFile.delete()
@@ -116,9 +126,10 @@ class OmsRestSourceSupport {
     }
 
     private static Map<String, Object> extractOrdersInternal(Object rawConfig, Object windowStart, Object windowEnd,
-                                                             OrdersDocumentSink sink, List collectedRecords) {
+                                                             OrdersDocumentSink sink) {
         Map config = toPlainMap(rawConfig)
-        List<String> warnings = []
+        // Synchronized: page-preparation runs on fetch-pool worker threads under concurrency.
+        List<String> warnings = Collections.synchronizedList(new ArrayList<String>())
         List<String> errors = []
 
         Long fromMillis = parseWindowMillis(windowStart, "windowStart", errors)
@@ -181,16 +192,14 @@ class OmsRestSourceSupport {
         int excludedNonSalesOrderCount = 0
         int excludedExchangeOrderCount = 0
         int extractedRecordCount = 0
-        Closure pageConsumer = { List pageRecords ->
-            // Filter and persist page by page: once this closure returns, the page's surviving
-            // records are flushed through the sink and nothing here keeps a reference to them.
-            Map<String, Object> pageFilter = filterComparableOrderRecords(pageRecords)
-            List filtered = (List) pageFilter.records
-            excludedNonSalesOrderCount += (int) pageFilter.excludedNonSalesOrderCount
-            excludedExchangeOrderCount += (int) pageFilter.excludedExchangeOrderCount
-            if (filtered) sink.writePage(filtered)
-            extractedRecordCount += filtered.size()
-            if (collectedRecords != null) collectedRecords.addAll(filtered)
+        Closure pageConsumer = { Map<String, Object> pageBundle ->
+            // Pages arrive as pre-filtered, pre-serialized bundles (built on the fetch thread),
+            // so consuming a page is an append plus counter bumps — no parsed graphs retained.
+            excludedNonSalesOrderCount += (int) pageBundle.excludedNonSalesOrderCount
+            excludedExchangeOrderCount += (int) pageBundle.excludedExchangeOrderCount
+            int filteredCount = (int) pageBundle.filteredCount
+            if (filteredCount > 0) sink.writeSerializedPage((String) pageBundle.serializedRecords, filteredCount)
+            extractedRecordCount += filteredCount
         }
 
         Map extraction
@@ -205,6 +214,9 @@ class OmsRestSourceSupport {
         requestMetadata.attemptCount = extraction.attemptCount ?: 0
         if (extraction.retriedWithTrailingSlash) requestMetadata.retriedWithTrailingSlash = true
         requestMetadata.pagination = extraction.pagination ?: requestMetadata.pagination
+        if (requestMetadata.pagination instanceof Map) {
+            ((Map) requestMetadata.pagination).fetchConcurrency = resolveOrdersFetchConcurrency(config)
+        }
         if (extraction.errors) {
             sink.abort()
             errors.addAll((List) extraction.errors)
@@ -262,13 +274,12 @@ class OmsRestSourceSupport {
             }
         }
 
-        void writePage(List records) {
+        void writeSerializedPage(String serializedRecords, int recordCount) {
+            if (recordCount <= 0) return
             ensureOpen()
-            for (Object record : records) {
-                if (writtenRecordCount > 0) writer.write(',')
-                writer.write(JsonOutput.toJson(record))
-                writtenRecordCount++
-            }
+            if (writtenRecordCount > 0) writer.write(',')
+            writer.write(serializedRecords)
+            writtenRecordCount += recordCount
             writer.flush()
         }
 
@@ -476,11 +487,13 @@ class OmsRestSourceSupport {
         return pathPart + "/" + (queryIndex >= 0 ? url.substring(queryIndex) : "")
     }
 
-    protected static Map<String, Object> callOmsEndpoint(String requestUrl, Map<String, String> headers, Map config) {
+    protected static Map<String, Object> callOmsEndpoint(String requestUrl, Map<String, String> headers, Map config,
+                                                         boolean acceptGzip = true) {
         return (httpClient.call([
                 method               : "GET",
                 url                  : requestUrl,
                 headers              : headers,
+                acceptGzip           : acceptGzip,
                 connectTimeoutSeconds: normalizeInt(config?.connectTimeoutSeconds, 30),
                 readTimeoutSeconds   : normalizeInt(config?.readTimeoutSeconds, 60),
         ]) ?: [:]) as Map<String, Object>
@@ -491,98 +504,160 @@ class OmsRestSourceSupport {
                                                               List<String> warnings, Closure pageConsumer) {
         int pageSize = resolveOrdersPageSize(config)
         int maxPageCount = Math.max(1, normalizeInt(config?.maxOrdersPageCount, MAX_ORDERS_PAGE_COUNT))
+        int fetchConcurrency = resolveOrdersFetchConcurrency(config)
 
         for (Map<String, Object> strategy : PAGINATION_STRATEGIES) {
-            Map<String, Object> firstPage = fetchOrdersPage(endpointUrl, fromMillis, thruMillis,
+            Map<String, Object> firstPage = prepareOrdersPage(endpointUrl, fromMillis, thruMillis,
                     pageQueryParams(strategy, 0, pageSize), headers, config, warnings)
             if (!firstPage.success) {
                 if (isRecoverablePaginationFailure(firstPage.statusCode)) continue
                 return failedPageResult(firstPage)
             }
 
-            List firstRecords = firstPage.records ?: []
             List<Map<String, Object>> pageMetas = [pageMeta(firstPage)]
-            firstPage = null
-            if (firstRecords.isEmpty()) return successfulPageResult(strategy, pageSize, pageMetas, 0)
-            if (!shouldProbeSecondPage(firstRecords, pageSize)) {
-                pageConsumer.call(firstRecords)
-                return successfulPageResult(strategy, pageSize, pageMetas, firstRecords.size())
+            if ((int) firstPage.rawCount == 0) return successfulPageResult(strategy, pageSize, pageMetas, 0)
+            if (!shouldProbeSecondPage((int) firstPage.rawCount, pageSize)) {
+                pageConsumer.call(firstPage)
+                return successfulPageResult(strategy, pageSize, pageMetas, (int) firstPage.rawCount)
             }
 
-            Map<String, Object> secondPage = fetchOrdersPage(endpointUrl, fromMillis, thruMillis,
+            Map<String, Object> secondPage = prepareOrdersPage(endpointUrl, fromMillis, thruMillis,
                     pageQueryParams(strategy, 1, pageSize), headers, config, warnings)
             if (!secondPage.success) {
                 if (isRecoverablePaginationFailure(secondPage.statusCode)) continue
                 return failedPageResult(secondPage, pageMetas)
             }
 
-            List secondRecords = secondPage.records ?: []
             pageMetas.add(pageMeta(secondPage))
-            secondPage = null
-            if (secondRecords.isEmpty()) {
-                pageConsumer.call(firstRecords)
-                return successfulPageResult(strategy, pageSize, pageMetas, firstRecords.size())
+            if ((int) secondPage.rawCount == 0) {
+                pageConsumer.call(firstPage)
+                return successfulPageResult(strategy, pageSize, pageMetas, (int) firstPage.rawCount)
             }
-            if (samePageRecords(firstRecords, secondRecords)) {
+            if (sameOrderPageBundles(firstPage, secondPage)) {
                 warnings.add("OMS REST pagination strategy ${strategy.name} did not advance beyond the first page.")
                 continue
             }
 
-            // Strategy committed: the probe pages go to the consumer now, and from here on each
-            // page streams out as soon as it is fetched. Only the previous page is retained (for
-            // the repeated-page guard) so heap stays bounded at ~one page regardless of window size.
-            pageConsumer.call(firstRecords)
-            pageConsumer.call(secondRecords)
-            int rawFetchedCount = firstRecords.size() + secondRecords.size()
-            boolean secondPageShrank = secondRecords.size() < firstRecords.size()
-            List previousRecords = secondRecords
-            firstRecords = null
-            secondRecords = null
+            // Strategy committed: consume the probe pages, then stream the remainder through a
+            // small prefetch window. Worker threads carry fetch+parse+filter+serialize and hand
+            // back only compact serialized text, so with window W the steady-state overhead is
+            // ~W serialized pages — sized for resource-constrained production hosts.
+            pageConsumer.call(firstPage)
+            pageConsumer.call(secondPage)
+            int rawFetchedCount = ((int) firstPage.rawCount) + ((int) secondPage.rawCount)
+            boolean secondPageShrank = ((int) secondPage.rawCount) < ((int) firstPage.rawCount)
+            Map<String, Object> previousPage = secondPage
+            firstPage = null
+            secondPage = null
             if (secondPageShrank) return successfulPageResult(strategy, pageSize, pageMetas, rawFetchedCount)
 
-            int pageIndex = 2
-            while (pageIndex < maxPageCount) {
-                Map<String, Object> page = fetchOrdersPage(endpointUrl, fromMillis, thruMillis,
-                        pageQueryParams(strategy, pageIndex, pageSize), headers, config, warnings)
-                pageMetas.add(pageMeta(page))
-                if (!page.success) return failedPageResult(page, pageMetas)
+            ExecutorService fetchPool = fetchConcurrency > 1 ? Executors.newFixedThreadPool(fetchConcurrency) : null
+            try {
+                Map<Integer, Future<Map<String, Object>>> inFlightPages = new LinkedHashMap<>()
+                int nextPageToRequest = 2
+                int pageIndex = 2
+                while (pageIndex < maxPageCount) {
+                    while (fetchPool != null && nextPageToRequest < maxPageCount && inFlightPages.size() < fetchConcurrency) {
+                        int requestIndex = nextPageToRequest++
+                        inFlightPages.put(requestIndex, fetchPool.submit({ ->
+                            prepareOrdersPage(endpointUrl, fromMillis, thruMillis,
+                                    pageQueryParams(strategy, requestIndex, pageSize), headers, config, warnings)
+                        } as Callable<Map<String, Object>>))
+                    }
 
-                List pageRecords = page.records ?: []
-                page = null
-                if (pageRecords.isEmpty()) break
-                if (samePageRecords(previousRecords, pageRecords)) {
-                    warnings.add("OMS REST pagination strategy ${strategy.name} stopped because page ${pageIndex} repeated the previous page.")
-                    break
+                    Map<String, Object> page = fetchPool != null ?
+                            inFlightPages.remove(pageIndex).get() :
+                            prepareOrdersPage(endpointUrl, fromMillis, thruMillis,
+                                    pageQueryParams(strategy, pageIndex, pageSize), headers, config, warnings)
+                    pageMetas.add(pageMeta(page))
+                    if (!page.success) return failedPageResult(page, pageMetas)
+
+                    if ((int) page.rawCount == 0) break
+                    if (sameOrderPageBundles(previousPage, page)) {
+                        warnings.add("OMS REST pagination strategy ${strategy.name} stopped because page ${pageIndex} repeated the previous page.")
+                        break
+                    }
+
+                    pageConsumer.call(page)
+                    rawFetchedCount += (int) page.rawCount
+                    boolean pageShrank = ((int) page.rawCount) < ((int) previousPage.rawCount)
+                    previousPage = page
+                    if (pageShrank) break
+                    pageIndex++
                 }
 
-                pageConsumer.call(pageRecords)
-                rawFetchedCount += pageRecords.size()
-                boolean pageShrank = pageRecords.size() < previousRecords.size()
-                previousRecords = pageRecords
-                if (pageShrank) break
-                pageIndex++
-            }
+                if (pageIndex >= maxPageCount) {
+                    return [
+                            errors    : ["OMS REST pagination exceeded ${maxPageCount} pages for the selected time period."],
+                            statusCode: latestStatusCode(pageMetas),
+                            attemptCount: totalAttemptCount(pageMetas),
+                            retriedWithTrailingSlash: anyTrailingSlashRetry(pageMetas),
+                            pagination: paginationMetadata(strategy, pageSize, pageMetas, rawFetchedCount, true),
+                    ]
+                }
 
-            if (pageIndex >= maxPageCount) {
-                return [
-                        errors    : ["OMS REST pagination exceeded ${maxPageCount} pages for the selected time period."],
-                        statusCode: latestStatusCode(pageMetas),
-                        attemptCount: totalAttemptCount(pageMetas),
-                        retriedWithTrailingSlash: anyTrailingSlashRetry(pageMetas),
-                        pagination: paginationMetadata(strategy, pageSize, pageMetas, rawFetchedCount, true),
-                ]
+                return successfulPageResult(strategy, pageSize, pageMetas, rawFetchedCount)
+            } finally {
+                // Ends speculative fetches on every exit path (success, failure, truncation).
+                fetchPool?.shutdownNow()
             }
-
-            return successfulPageResult(strategy, pageSize, pageMetas, rawFetchedCount)
         }
 
-        Map<String, Object> unpaginatedPage = fetchOrdersPage(endpointUrl, fromMillis, thruMillis, [:], headers, config, warnings)
+        Map<String, Object> unpaginatedPage = prepareOrdersPage(endpointUrl, fromMillis, thruMillis, [:], headers, config, warnings)
         if (!unpaginatedPage.success) return failedPageResult(unpaginatedPage)
         warnings.add("OMS REST pagination parameters did not advance; extracted the first unpaginated response only.")
-        List unpaginatedRecords = unpaginatedPage.records ?: []
         List<Map<String, Object>> unpaginatedMetas = [pageMeta(unpaginatedPage)]
-        if (unpaginatedRecords) pageConsumer.call(unpaginatedRecords)
-        return successfulPageResult([name: "unpaginated"], pageSize, unpaginatedMetas, unpaginatedRecords.size())
+        int unpaginatedRawCount = (int) unpaginatedPage.rawCount
+        if (unpaginatedRawCount > 0) pageConsumer.call(unpaginatedPage)
+        return successfulPageResult([name: "unpaginated"], pageSize, unpaginatedMetas, unpaginatedRawCount)
+    }
+
+    /**
+     * Fetches one page and converts it to a compact "page bundle" on the calling thread:
+     * pre-filtered records serialized to comma-joined JSON text, plus counts and a raw-content
+     * hash for the repeated-page guard. The parsed record graph never leaves this method, which
+     * is what keeps concurrent prefetching cheap on memory: an in-flight page costs roughly its
+     * serialized text, not a parsed object graph.
+     */
+    protected static Map<String, Object> prepareOrdersPage(String endpointUrl, Long fromMillis, Long thruMillis,
+                                                           Map<String, Object> pageParams,
+                                                           Map<String, String> headers, Map config,
+                                                           List<String> warnings) {
+        Map<String, Object> page = fetchOrdersPage(endpointUrl, fromMillis, thruMillis, pageParams, headers, config, warnings)
+        if (!page.success) return page
+        List rawRecords = page.records ?: []
+        Map<String, Object> pageFilter = filterComparableOrderRecords(rawRecords)
+        List filtered = (List) pageFilter.records
+        StringBuilder serialized = new StringBuilder(Math.max(16, filtered.size() * 512))
+        boolean firstRecord = true
+        for (Object record : filtered) {
+            if (!firstRecord) serialized.append(',')
+            serialized.append(JsonOutput.toJson(record))
+            firstRecord = false
+        }
+        return [
+                success                   : true,
+                statusCode                : page.statusCode,
+                attemptCount              : page.attemptCount,
+                retriedWithTrailingSlash  : page.retriedWithTrailingSlash,
+                rawCount                  : rawRecords.size(),
+                rawHash                   : rawRecords.hashCode(),
+                filteredCount             : filtered.size(),
+                excludedNonSalesOrderCount: pageFilter.excludedNonSalesOrderCount,
+                excludedExchangeOrderCount: pageFilter.excludedExchangeOrderCount,
+                serializedRecords         : serialized.toString(),
+        ]
+    }
+
+    // Repeated-page detection without retaining parsed pages: raw count + deep hash of the raw
+    // records + filtered serialization must all match. A true server repeat matches all three;
+    // a false positive needs a raw-content hash collision on adjacent pages with identical
+    // filtered text, which is negligible for this warning-and-stop heuristic.
+    private static boolean sameOrderPageBundles(Map<String, Object> left, Map<String, Object> right) {
+        if (left == null || right == null) return false
+        return left.rawCount == right.rawCount &&
+                left.rawHash == right.rawHash &&
+                Objects.equals(left.serializedRecords, right.serializedRecords)
     }
 
     /** Per-page bookkeeping kept after a page's records are consumed — never the records themselves. */
@@ -601,15 +676,27 @@ class OmsRestSourceSupport {
         String requestUrl = buildOrdersUrl(endpointUrl, fromMillis, thruMillis, pageParams)
         Map response
         boolean retriedWithTrailingSlash = false
+        boolean retriedWithoutCompression = false
         int attemptCount = 1
         try {
-            response = callOmsEndpoint(requestUrl, headers, config)
+            try {
+                response = callOmsEndpoint(requestUrl, headers, config)
+            } catch (SocketTimeoutException timeoutException) {
+                // A gzip-buffering proxy may hold the entire response until page generation
+                // completes, so first-byte can exceed the read timeout even though the server is
+                // healthy. Retry the page once with compression disabled: a plain streamed
+                // response trickles bytes continuously and keeps the read timer alive.
+                warnings.add("OMS REST page request timed out (${timeoutException.message}); retrying once without compression.".toString())
+                attemptCount = 2
+                retriedWithoutCompression = true
+                response = callOmsEndpoint(requestUrl, headers, config, false)
+            }
             Integer firstStatusCode = normalizeInt(response.statusCode, 0)
             if (firstStatusCode == 404) {
                 String retryUrl = trailingSlashBeforeQuery(requestUrl)
                 if (retryUrl && retryUrl != requestUrl) {
-                    response = callOmsEndpoint(retryUrl, headers, config)
-                    attemptCount = 2
+                    response = callOmsEndpoint(retryUrl, headers, config, !retriedWithoutCompression)
+                    attemptCount++
                     retriedWithTrailingSlash = true
                 }
             }
@@ -629,7 +716,8 @@ class OmsRestSourceSupport {
             warnings.add("OMS REST response body was empty.")
         } else {
             try {
-                parsed = JSON_SLURPER.parseText(body)
+                // Fresh parser per call: pages parse on fetch-pool worker threads under concurrency.
+                parsed = new JsonSlurper().parseText(body)
             } catch (Exception e) {
                 return pageFailure(statusCode, attemptCount, retriedWithTrailingSlash, "OMS REST response was not valid JSON: ${e.message}")
             }
@@ -661,13 +749,8 @@ class OmsRestSourceSupport {
         return params
     }
 
-    protected static boolean shouldProbeSecondPage(List records, int pageSize) {
-        return records.size() >= pageSize || records.size() == OMS_DEFAULT_SERVER_PAGE_SIZE
-    }
-
-    protected static boolean samePageRecords(List left, List right) {
-        if ((left?.size() ?: 0) != (right?.size() ?: 0)) return false
-        return (left ?: []) == (right ?: [])
+    protected static boolean shouldProbeSecondPage(int rawCount, int pageSize) {
+        return rawCount >= pageSize || rawCount == OMS_DEFAULT_SERVER_PAGE_SIZE
     }
 
     protected static boolean isRecoverablePaginationFailure(Object statusCode) {
@@ -731,6 +814,12 @@ class OmsRestSourceSupport {
 
     protected static int resolveOrdersPageSize(Map config) {
         return boundedInt(config?.ordersPageSize, DEFAULT_ORDERS_PAGE_SIZE, 1, 1000)
+    }
+
+    // Bounded 1..4: production hosts are resource-constrained, and each additional in-flight
+    // page costs one serialized page of heap plus one transient parse on a worker thread.
+    protected static int resolveOrdersFetchConcurrency(Map config) {
+        return boundedInt(config?.ordersFetchConcurrency, DEFAULT_ORDERS_FETCH_CONCURRENCY, 1, 4)
     }
 
     protected static Map<String, String> buildHeaders(Map config) {
@@ -912,11 +1001,23 @@ class OmsRestSourceSupport {
         ((Map<String, String>) (request.headers ?: [:])).each { String name, String value ->
             connection.setRequestProperty(name, value)
         }
+        // Set after tenant headers so it cannot be overridden: we only know how to decode gzip.
+        // JSON page bodies compress ~8-10x, which multiplies effective throughput on the
+        // window-limited long-haul connections OMS extracts run over. Callers may disable it
+        // (acceptGzip=false) when retrying a page whose compressed response starved the read
+        // timeout behind a buffering proxy.
+        if (request.acceptGzip != false) connection.setRequestProperty("Accept-Encoding", "gzip")
 
         int statusCode = connection.responseCode
         InputStream stream = statusCode >= 400 ? connection.errorStream : connection.inputStream
-        String body = stream != null ? stream.getText(StandardCharsets.UTF_8.name()) : ""
+        String body = readResponseBody(stream, connection.getContentEncoding())
         return [statusCode: statusCode, body: body, headers: connection.headerFields]
+    }
+
+    protected static String readResponseBody(InputStream stream, String contentEncoding) {
+        if (stream == null) return ""
+        InputStream decoded = "gzip".equalsIgnoreCase(normalize(contentEncoding) ?: "") ? new GZIPInputStream(stream) : stream
+        return decoded.getText(StandardCharsets.UTF_8.name())
     }
 
     protected static String sanitizeBaseUrl(Object rawBaseUrl) {
