@@ -45,26 +45,40 @@ if (ec.message.hasError()) {
     return
 }
 
-Map extraction = OmsRestSourceSupport.extractOrders(sourceConfig, windowStart, windowEnd)
-warnings = extraction.warnings ?: []
-errors = extraction.errors ?: []
-requestMetadata = extraction.requestMetadata ?: [:]
-recordCount = extraction.recordCount ?: 0
-dataAvailable = extraction.dataAvailable == true
-
-if (errors) {
-    fileLocation = null
-    fileName = null
-    return
-}
-
 String timestamp = DataManagerSupport.formatRunTimestamp(ec)
 String outputBaseLocation = outputLocation ?: DataManagerSupport.resolveReconciliationRunLocation(
         ec,
         automationExecutionId ?: configIdValue,
         timestamp
 )
-String outputFileName = OmsRestSourceSupport.safeFileName(fileName ?: extraction.fileName)
-fileName = outputFileName
-fileLocation = DataManagerSupport.childLocation(outputBaseLocation, outputFileName)
-DataManagerSupport.writeText(ec, fileLocation as String, extraction.outputText)
+
+// Stream the extraction page by page into a work file (in the output directory when it is
+// file-backed, so the final move is an atomic same-volume rename) and only move it into place
+// after the whole window succeeded. The window is never materialized in heap, and a mid-window
+// failure never leaves a partial file where reconciliation could read it.
+File outputDirectory = DataManagerSupport.resolveDirectoryFile(ec, outputBaseLocation, true)
+File workFile = outputDirectory != null
+        ? File.createTempFile("oms-orders-extract-", ".partial", outputDirectory)
+        : File.createTempFile("oms-orders-extract-", ".partial")
+
+try {
+    Map extraction = OmsRestSourceSupport.extractOrdersToFile(sourceConfig, windowStart, windowEnd, workFile)
+    warnings = extraction.warnings ?: []
+    errors = extraction.errors ?: []
+    requestMetadata = extraction.requestMetadata ?: [:]
+    recordCount = extraction.recordCount ?: 0
+    dataAvailable = extraction.dataAvailable == true
+
+    if (errors) {
+        fileLocation = null
+        fileName = null
+        return
+    }
+
+    String outputFileName = OmsRestSourceSupport.safeFileName(fileName ?: extraction.fileName)
+    fileName = outputFileName
+    fileLocation = DataManagerSupport.childLocation(outputBaseLocation, outputFileName)
+    DataManagerSupport.moveIntoLocation(ec, workFile, fileLocation as String)
+} finally {
+    if (workFile.exists()) workFile.delete()
+}

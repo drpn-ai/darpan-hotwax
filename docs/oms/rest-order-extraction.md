@@ -44,12 +44,15 @@ GET {baseUrl}{ordersPath}?orderDate_from=<startEpochMillis>&orderDate_thru=<endE
 
 The extractor paginates order reads before writing the normalized source file. It first uses `pageIndex`/`pageSize`, then falls back to `viewIndex`/`viewSize` for OMS environments that expose that list contract. Pagination stops when the next page is empty, repeats the previous page, or is shorter than the previous page. The default requested page size is 500, with a high safety ceiling to avoid runaway loops while still allowing month-scale reconciliation runs.
 
-After pagination completes, the extractor keeps only HotWax orders with `orderTypeId` equal to `SALES_ORDER` and excludes orders that contain an order item association with `orderItemAssocTypeId` equal to `EXCHANGE`. Non-sales orders and exchange orders are not written to the normalized source file and are therefore not compared against Shopify orders. Output metadata includes `filters.excludedNonSalesOrderCount` and `filters.excludedExchangeOrderCount` so the run can distinguish fetched HotWax records from comparison-eligible records.
+Each fetched page is filtered and appended to the output file on disk before the next page is requested; the extractor never holds more than roughly one page of orders in memory, so month-scale windows do not scale heap usage. The extractor keeps only HotWax orders with `orderTypeId` equal to `SALES_ORDER` and excludes orders that contain an order item association with `orderItemAssocTypeId` equal to `EXCHANGE`. Non-sales orders and exchange orders are not written to the normalized source file and are therefore not compared against Shopify orders. Output metadata includes `filters.excludedNonSalesOrderCount` and `filters.excludedExchangeOrderCount` so the run can distinguish fetched HotWax records from comparison-eligible records.
 
-The output is normalized JSON:
+The extractor streams into a `.partial` work file in the run folder and moves it to its final name only after the whole window succeeds, so a mid-window failure never leaves a partial extract where reconciliation could read it.
+
+The output is normalized compact JSON. `records` is written first (pages are appended as they arrive) and `metadata` last, once counts and pagination are known; consumers read the file with JSON parsers (Spark multiLine JSON, JSONPath), so object key order is not part of the contract:
 
 ```json
 {
+  "records": [],
   "metadata": {
     "sourceType": "HOTWAX_OMS_REST_ORDERS",
     "omsRestSourceConfigId": "KREWE_OMS",
@@ -72,8 +75,7 @@ The output is normalized JSON:
       "excludedExchangeOrderCount": 0
     },
     "extractedRecordCount": 2
-  },
-  "records": []
+  }
 }
 ```
 

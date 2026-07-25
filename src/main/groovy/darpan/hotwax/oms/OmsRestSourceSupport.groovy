@@ -80,6 +80,43 @@ class OmsRestSourceSupport {
     }
 
     static Map<String, Object> extractOrders(Object rawConfig, Object windowStart, Object windowEnd) {
+        // In-memory variant kept for tests and small interactive windows. The automation path must
+        // use extractOrdersToFile so month-scale windows never materialize whole in heap.
+        StringWriter buffer = new StringWriter()
+        List collectedRecords = []
+        Map<String, Object> result = extractOrdersInternal(rawConfig, windowStart, windowEnd,
+                new OrdersDocumentSink({ -> buffer }), collectedRecords)
+        if (!(result.errors as List)) {
+            result.outputText = buffer.toString()
+            result.records = collectedRecords
+        }
+        return result
+    }
+
+    static Map<String, Object> extractOrdersToFile(Object rawConfig, Object windowStart, Object windowEnd,
+                                                   File targetFile) {
+        OrdersDocumentSink sink = new OrdersDocumentSink({ ->
+            targetFile.getParentFile()?.mkdirs()
+            return new BufferedWriter(new OutputStreamWriter(new FileOutputStream(targetFile), StandardCharsets.UTF_8))
+        })
+        Map<String, Object> result
+        try {
+            result = extractOrdersInternal(rawConfig, windowStart, windowEnd, sink, null)
+        } catch (Exception e) {
+            sink.abort()
+            targetFile.delete()
+            throw e
+        }
+        if (result.errors) {
+            sink.abort()
+            targetFile.delete()
+        }
+        result.remove("records")
+        return result
+    }
+
+    private static Map<String, Object> extractOrdersInternal(Object rawConfig, Object windowStart, Object windowEnd,
+                                                             OrdersDocumentSink sink, List collectedRecords) {
         Map config = toPlainMap(rawConfig)
         List<String> warnings = []
         List<String> errors = []
@@ -141,44 +178,119 @@ class OmsRestSourceSupport {
         ]
         if (errors) return baseResult
 
-        Map extraction = extractAllOrderPages(endpointUrl, fromMillis, thruMillis, headers, config, warnings)
+        int excludedNonSalesOrderCount = 0
+        int excludedExchangeOrderCount = 0
+        int extractedRecordCount = 0
+        Closure pageConsumer = { List pageRecords ->
+            // Filter and persist page by page: once this closure returns, the page's surviving
+            // records are flushed through the sink and nothing here keeps a reference to them.
+            Map<String, Object> pageFilter = filterComparableOrderRecords(pageRecords)
+            List filtered = (List) pageFilter.records
+            excludedNonSalesOrderCount += (int) pageFilter.excludedNonSalesOrderCount
+            excludedExchangeOrderCount += (int) pageFilter.excludedExchangeOrderCount
+            if (filtered) sink.writePage(filtered)
+            extractedRecordCount += filtered.size()
+            if (collectedRecords != null) collectedRecords.addAll(filtered)
+        }
+
+        Map extraction
+        try {
+            extraction = extractAllOrderPages(endpointUrl, fromMillis, thruMillis, headers, config, warnings, pageConsumer)
+        } catch (IOException e) {
+            sink.abort()
+            errors.add("Failed writing OMS extract output: ${e.message}".toString())
+            return baseResult
+        }
         requestMetadata.statusCode = extraction.statusCode
         requestMetadata.attemptCount = extraction.attemptCount ?: 0
         if (extraction.retriedWithTrailingSlash) requestMetadata.retriedWithTrailingSlash = true
         requestMetadata.pagination = extraction.pagination ?: requestMetadata.pagination
         if (extraction.errors) {
+            sink.abort()
             errors.addAll((List) extraction.errors)
             return baseResult
         }
 
-        Map<String, Object> orderFilter = filterComparableOrderRecords(extraction.records ?: [])
-        List records = orderFilter.records as List
         requestMetadata.filters = [
                 requiredOrderTypeId          : SALES_ORDER_TYPE_ID,
-                excludedNonSalesOrderCount   : orderFilter.excludedNonSalesOrderCount,
+                excludedNonSalesOrderCount   : excludedNonSalesOrderCount,
                 excludedOrderItemAssocTypeIds: [EXCHANGE_ORDER_ASSOC_TYPE_ID],
-                excludedExchangeOrderCount   : orderFilter.excludedExchangeOrderCount,
+                excludedExchangeOrderCount   : excludedExchangeOrderCount,
         ]
-        Map outputDocument = [
-                metadata: requestMetadata + [
-                        sourceType              : "HOTWAX_OMS_REST_ORDERS",
-                        omsRestSourceConfigId    : normalize(config?.omsRestSourceConfigId),
-                        windowStartEpochMillis   : fromMillis,
-                        windowEndEpochMillis     : thruMillis,
-                        extractedRecordCount     : records.size(),
-                ],
-                records : records,
+        Map documentMetadata = requestMetadata + [
+                sourceType            : "HOTWAX_OMS_REST_ORDERS",
+                omsRestSourceConfigId : normalize(config?.omsRestSourceConfigId),
+                windowStartEpochMillis: fromMillis,
+                windowEndEpochMillis  : thruMillis,
+                extractedRecordCount  : extractedRecordCount,
         ]
-
-        String outputText = JsonOutput.prettyPrint(JsonOutput.toJson(outputDocument))
+        try {
+            sink.finish(documentMetadata)
+        } catch (IOException e) {
+            sink.abort()
+            errors.add("Failed writing OMS extract output: ${e.message}".toString())
+            return baseResult
+        }
         return baseResult + [
-                dataAvailable: records.size() > 0,
-                recordCount  : records.size(),
-                records      : records,
-                outputText   : outputText,
+                dataAvailable: extractedRecordCount > 0,
+                recordCount  : extractedRecordCount,
                 warnings     : warnings,
                 errors       : errors,
         ]
+    }
+
+    /**
+     * Streams the extract document as {"records":[...],"metadata":{...}} — records first so pages
+     * can be appended as they arrive and the metadata (counts, pagination) written once at the
+     * end. Key order is irrelevant to consumers: the file is read by JSON parsers (Spark multiLine
+     * JSON + JSONPath), never positionally. The writer is opened lazily so rejected requests never
+     * create a file, and flushed per page so committed pages live on disk, not in heap.
+     */
+    protected static class OrdersDocumentSink {
+        private final Closure<Writer> writerFactory
+        private Writer writer
+        private int writtenRecordCount = 0
+
+        OrdersDocumentSink(Closure<Writer> writerFactory) {
+            this.writerFactory = writerFactory
+        }
+
+        private void ensureOpen() {
+            if (writer == null) {
+                writer = writerFactory.call()
+                writer.write('{"records":[')
+            }
+        }
+
+        void writePage(List records) {
+            ensureOpen()
+            for (Object record : records) {
+                if (writtenRecordCount > 0) writer.write(',')
+                writer.write(JsonOutput.toJson(record))
+                writtenRecordCount++
+            }
+            writer.flush()
+        }
+
+        void finish(Map metadata) {
+            ensureOpen()
+            writer.write('],"metadata":')
+            writer.write(JsonOutput.toJson(metadata))
+            writer.write('}')
+            writer.flush()
+            writer.close()
+            writer = null
+        }
+
+        void abort() {
+            if (writer != null) {
+                try {
+                    writer.close()
+                } catch (IOException ignored) {
+                }
+                writer = null
+            }
+        }
     }
 
     static Map<String, Object> safeConfigMap(def cfg) {
@@ -376,7 +488,7 @@ class OmsRestSourceSupport {
 
     protected static Map<String, Object> extractAllOrderPages(String endpointUrl, Long fromMillis, Long thruMillis,
                                                               Map<String, String> headers, Map config,
-                                                              List<String> warnings) {
+                                                              List<String> warnings, Closure pageConsumer) {
         int pageSize = resolveOrdersPageSize(config)
         int maxPageCount = Math.max(1, normalizeInt(config?.maxOrdersPageCount, MAX_ORDERS_PAGE_COUNT))
 
@@ -389,70 +501,97 @@ class OmsRestSourceSupport {
             }
 
             List firstRecords = firstPage.records ?: []
-            if (firstRecords.isEmpty()) return successfulPageResult(strategy, pageSize, [firstPage], [])
+            List<Map<String, Object>> pageMetas = [pageMeta(firstPage)]
+            firstPage = null
+            if (firstRecords.isEmpty()) return successfulPageResult(strategy, pageSize, pageMetas, 0)
             if (!shouldProbeSecondPage(firstRecords, pageSize)) {
-                return successfulPageResult(strategy, pageSize, [firstPage], firstRecords)
+                pageConsumer.call(firstRecords)
+                return successfulPageResult(strategy, pageSize, pageMetas, firstRecords.size())
             }
 
             Map<String, Object> secondPage = fetchOrdersPage(endpointUrl, fromMillis, thruMillis,
                     pageQueryParams(strategy, 1, pageSize), headers, config, warnings)
             if (!secondPage.success) {
                 if (isRecoverablePaginationFailure(secondPage.statusCode)) continue
-                return failedPageResult(secondPage, [firstPage])
+                return failedPageResult(secondPage, pageMetas)
             }
 
             List secondRecords = secondPage.records ?: []
-            if (secondRecords.isEmpty()) return successfulPageResult(strategy, pageSize, [firstPage, secondPage], firstRecords)
+            pageMetas.add(pageMeta(secondPage))
+            secondPage = null
+            if (secondRecords.isEmpty()) {
+                pageConsumer.call(firstRecords)
+                return successfulPageResult(strategy, pageSize, pageMetas, firstRecords.size())
+            }
             if (samePageRecords(firstRecords, secondRecords)) {
                 warnings.add("OMS REST pagination strategy ${strategy.name} did not advance beyond the first page.")
                 continue
             }
 
-            List<Map<String, Object>> pages = [firstPage, secondPage]
-            List records = []
-            records.addAll(firstRecords)
-            records.addAll(secondRecords)
-            if (secondRecords.size() < firstRecords.size()) return successfulPageResult(strategy, pageSize, pages, records)
-
+            // Strategy committed: the probe pages go to the consumer now, and from here on each
+            // page streams out as soon as it is fetched. Only the previous page is retained (for
+            // the repeated-page guard) so heap stays bounded at ~one page regardless of window size.
+            pageConsumer.call(firstRecords)
+            pageConsumer.call(secondRecords)
+            int rawFetchedCount = firstRecords.size() + secondRecords.size()
+            boolean secondPageShrank = secondRecords.size() < firstRecords.size()
             List previousRecords = secondRecords
+            firstRecords = null
+            secondRecords = null
+            if (secondPageShrank) return successfulPageResult(strategy, pageSize, pageMetas, rawFetchedCount)
+
             int pageIndex = 2
             while (pageIndex < maxPageCount) {
                 Map<String, Object> page = fetchOrdersPage(endpointUrl, fromMillis, thruMillis,
                         pageQueryParams(strategy, pageIndex, pageSize), headers, config, warnings)
-                pages.add(page)
-                if (!page.success) return failedPageResult(page, pages)
+                pageMetas.add(pageMeta(page))
+                if (!page.success) return failedPageResult(page, pageMetas)
 
                 List pageRecords = page.records ?: []
+                page = null
                 if (pageRecords.isEmpty()) break
                 if (samePageRecords(previousRecords, pageRecords)) {
                     warnings.add("OMS REST pagination strategy ${strategy.name} stopped because page ${pageIndex} repeated the previous page.")
                     break
                 }
 
-                records.addAll(pageRecords)
-                if (pageRecords.size() < previousRecords.size()) break
+                pageConsumer.call(pageRecords)
+                rawFetchedCount += pageRecords.size()
+                boolean pageShrank = pageRecords.size() < previousRecords.size()
                 previousRecords = pageRecords
+                if (pageShrank) break
                 pageIndex++
             }
 
             if (pageIndex >= maxPageCount) {
                 return [
                         errors    : ["OMS REST pagination exceeded ${maxPageCount} pages for the selected time period."],
-                        records   : records,
-                        statusCode: latestStatusCode(pages),
-                        attemptCount: totalAttemptCount(pages),
-                        retriedWithTrailingSlash: anyTrailingSlashRetry(pages),
-                        pagination: paginationMetadata(strategy, pageSize, pages, records.size(), true),
+                        statusCode: latestStatusCode(pageMetas),
+                        attemptCount: totalAttemptCount(pageMetas),
+                        retriedWithTrailingSlash: anyTrailingSlashRetry(pageMetas),
+                        pagination: paginationMetadata(strategy, pageSize, pageMetas, rawFetchedCount, true),
                 ]
             }
 
-            return successfulPageResult(strategy, pageSize, pages, records)
+            return successfulPageResult(strategy, pageSize, pageMetas, rawFetchedCount)
         }
 
         Map<String, Object> unpaginatedPage = fetchOrdersPage(endpointUrl, fromMillis, thruMillis, [:], headers, config, warnings)
         if (!unpaginatedPage.success) return failedPageResult(unpaginatedPage)
         warnings.add("OMS REST pagination parameters did not advance; extracted the first unpaginated response only.")
-        return successfulPageResult([name: "unpaginated"], pageSize, [unpaginatedPage], unpaginatedPage.records ?: [])
+        List unpaginatedRecords = unpaginatedPage.records ?: []
+        List<Map<String, Object>> unpaginatedMetas = [pageMeta(unpaginatedPage)]
+        if (unpaginatedRecords) pageConsumer.call(unpaginatedRecords)
+        return successfulPageResult([name: "unpaginated"], pageSize, unpaginatedMetas, unpaginatedRecords.size())
+    }
+
+    /** Per-page bookkeeping kept after a page's records are consumed — never the records themselves. */
+    private static Map<String, Object> pageMeta(Map<String, Object> page) {
+        return [
+                statusCode              : page?.statusCode,
+                attemptCount            : page?.attemptCount,
+                retriedWithTrailingSlash: page?.retriedWithTrailingSlash,
+        ]
     }
 
     protected static Map<String, Object> fetchOrdersPage(String endpointUrl, Long fromMillis, Long thruMillis,
@@ -537,14 +676,13 @@ class OmsRestSourceSupport {
     }
 
     protected static Map<String, Object> successfulPageResult(Map<String, Object> strategy, int pageSize,
-                                                             List<Map<String, Object>> pages, List records) {
+                                                             List<Map<String, Object>> pageMetas, int rawFetchedCount) {
         return [
                 errors    : [],
-                records   : records ?: [],
-                statusCode: latestStatusCode(pages),
-                attemptCount: totalAttemptCount(pages),
-                retriedWithTrailingSlash: anyTrailingSlashRetry(pages),
-                pagination: paginationMetadata(strategy, pageSize, pages, (records ?: []).size(), false),
+                statusCode: latestStatusCode(pageMetas),
+                attemptCount: totalAttemptCount(pageMetas),
+                retriedWithTrailingSlash: anyTrailingSlashRetry(pageMetas),
+                pagination: paginationMetadata(strategy, pageSize, pageMetas, rawFetchedCount, false),
         ]
     }
 
@@ -555,7 +693,6 @@ class OmsRestSourceSupport {
         if (failedPage) allPages.add(failedPage)
         return [
                 errors    : (failedPage?.errors ?: ["OMS REST request failed."]) as List,
-                records   : [],
                 statusCode: failedPage?.statusCode ?: latestStatusCode(allPages),
                 attemptCount: totalAttemptCount(allPages),
                 retriedWithTrailingSlash: anyTrailingSlashRetry(allPages),
