@@ -88,12 +88,13 @@ class OmsRestSourceSupport {
         httpClient = DEFAULT_HTTP_CLIENT
     }
 
-    static Map<String, Object> extractOrders(Object rawConfig, Object windowStart, Object windowEnd) {
+    static Map<String, Object> extractOrders(Object rawConfig, Object windowStart, Object windowEnd,
+                                             List keepRecordFields = null, Closure pageProgressListener = null) {
         // In-memory variant kept for tests and small interactive windows. The automation path must
         // use extractOrdersToFile so month-scale windows never materialize whole in heap.
         StringWriter buffer = new StringWriter()
         Map<String, Object> result = extractOrdersInternal(rawConfig, windowStart, windowEnd,
-                new OrdersDocumentSink({ -> buffer }))
+                new OrdersDocumentSink({ -> buffer }), keepRecordFields, pageProgressListener)
         if (!(result.errors as List)) {
             String outputText = buffer.toString()
             result.outputText = outputText
@@ -104,14 +105,15 @@ class OmsRestSourceSupport {
     }
 
     static Map<String, Object> extractOrdersToFile(Object rawConfig, Object windowStart, Object windowEnd,
-                                                   File targetFile) {
+                                                   File targetFile, List keepRecordFields = null,
+                                                   Closure pageProgressListener = null) {
         OrdersDocumentSink sink = new OrdersDocumentSink({ ->
             targetFile.getParentFile()?.mkdirs()
             return new BufferedWriter(new OutputStreamWriter(new FileOutputStream(targetFile), StandardCharsets.UTF_8))
         })
         Map<String, Object> result
         try {
-            result = extractOrdersInternal(rawConfig, windowStart, windowEnd, sink)
+            result = extractOrdersInternal(rawConfig, windowStart, windowEnd, sink, keepRecordFields, pageProgressListener)
         } catch (Exception e) {
             sink.abort()
             targetFile.delete()
@@ -126,7 +128,9 @@ class OmsRestSourceSupport {
     }
 
     private static Map<String, Object> extractOrdersInternal(Object rawConfig, Object windowStart, Object windowEnd,
-                                                             OrdersDocumentSink sink) {
+                                                             OrdersDocumentSink sink, List keepRecordFields = null,
+                                                             Closure pageProgressListener = null) {
+        Set<String> keepFieldSet = normalizeKeepFields(keepRecordFields)
         Map config = toPlainMap(rawConfig)
         // Synchronized: page-preparation runs on fetch-pool worker threads under concurrency.
         List<String> warnings = Collections.synchronizedList(new ArrayList<String>())
@@ -192,6 +196,7 @@ class OmsRestSourceSupport {
         int excludedNonSalesOrderCount = 0
         int excludedExchangeOrderCount = 0
         int extractedRecordCount = 0
+        int consumedRawCount = 0
         Closure pageConsumer = { Map<String, Object> pageBundle ->
             // Pages arrive as pre-filtered, pre-serialized bundles (built on the fetch thread),
             // so consuming a page is an append plus counter bumps — no parsed graphs retained.
@@ -200,11 +205,24 @@ class OmsRestSourceSupport {
             int filteredCount = (int) pageBundle.filteredCount
             if (filteredCount > 0) sink.writeSerializedPage((String) pageBundle.serializedRecords, filteredCount)
             extractedRecordCount += filteredCount
+            consumedRawCount += (int) pageBundle.rawCount
+            if (pageProgressListener != null) {
+                // Progress is advisory: a listener failure must never fail the extraction.
+                try {
+                    pageProgressListener.call(consumedRawCount)
+                } catch (Exception ignored) {
+                }
+            }
+        }
+
+        if (keepFieldSet) {
+            requestMetadata.projection = [keepRecordFields: keepFieldSet.sort()]
         }
 
         Map extraction
         try {
-            extraction = extractAllOrderPages(endpointUrl, fromMillis, thruMillis, headers, config, warnings, pageConsumer)
+            extraction = extractAllOrderPages(endpointUrl, fromMillis, thruMillis, headers, config, warnings,
+                    pageConsumer, keepFieldSet)
         } catch (IOException e) {
             sink.abort()
             errors.add("Failed writing OMS extract output: ${e.message}".toString())
@@ -501,14 +519,15 @@ class OmsRestSourceSupport {
 
     protected static Map<String, Object> extractAllOrderPages(String endpointUrl, Long fromMillis, Long thruMillis,
                                                               Map<String, String> headers, Map config,
-                                                              List<String> warnings, Closure pageConsumer) {
+                                                              List<String> warnings, Closure pageConsumer,
+                                                              Set<String> keepFieldSet = null) {
         int pageSize = resolveOrdersPageSize(config)
         int maxPageCount = Math.max(1, normalizeInt(config?.maxOrdersPageCount, MAX_ORDERS_PAGE_COUNT))
         int fetchConcurrency = resolveOrdersFetchConcurrency(config)
 
         for (Map<String, Object> strategy : PAGINATION_STRATEGIES) {
             Map<String, Object> firstPage = prepareOrdersPage(endpointUrl, fromMillis, thruMillis,
-                    pageQueryParams(strategy, 0, pageSize), headers, config, warnings)
+                    pageQueryParams(strategy, 0, pageSize), headers, config, warnings, keepFieldSet)
             if (!firstPage.success) {
                 if (isRecoverablePaginationFailure(firstPage.statusCode)) continue
                 return failedPageResult(firstPage)
@@ -522,7 +541,7 @@ class OmsRestSourceSupport {
             }
 
             Map<String, Object> secondPage = prepareOrdersPage(endpointUrl, fromMillis, thruMillis,
-                    pageQueryParams(strategy, 1, pageSize), headers, config, warnings)
+                    pageQueryParams(strategy, 1, pageSize), headers, config, warnings, keepFieldSet)
             if (!secondPage.success) {
                 if (isRecoverablePaginationFailure(secondPage.statusCode)) continue
                 return failedPageResult(secondPage, pageMetas)
@@ -561,14 +580,14 @@ class OmsRestSourceSupport {
                         int requestIndex = nextPageToRequest++
                         inFlightPages.put(requestIndex, fetchPool.submit({ ->
                             prepareOrdersPage(endpointUrl, fromMillis, thruMillis,
-                                    pageQueryParams(strategy, requestIndex, pageSize), headers, config, warnings)
+                                    pageQueryParams(strategy, requestIndex, pageSize), headers, config, warnings, keepFieldSet)
                         } as Callable<Map<String, Object>>))
                     }
 
                     Map<String, Object> page = fetchPool != null ?
                             inFlightPages.remove(pageIndex).get() :
                             prepareOrdersPage(endpointUrl, fromMillis, thruMillis,
-                                    pageQueryParams(strategy, pageIndex, pageSize), headers, config, warnings)
+                                    pageQueryParams(strategy, pageIndex, pageSize), headers, config, warnings, keepFieldSet)
                     pageMetas.add(pageMeta(page))
                     if (!page.success) return failedPageResult(page, pageMetas)
 
@@ -603,7 +622,7 @@ class OmsRestSourceSupport {
             }
         }
 
-        Map<String, Object> unpaginatedPage = prepareOrdersPage(endpointUrl, fromMillis, thruMillis, [:], headers, config, warnings)
+        Map<String, Object> unpaginatedPage = prepareOrdersPage(endpointUrl, fromMillis, thruMillis, [:], headers, config, warnings, keepFieldSet)
         if (!unpaginatedPage.success) return failedPageResult(unpaginatedPage)
         warnings.add("OMS REST pagination parameters did not advance; extracted the first unpaginated response only.")
         List<Map<String, Object>> unpaginatedMetas = [pageMeta(unpaginatedPage)]
@@ -622,15 +641,18 @@ class OmsRestSourceSupport {
     protected static Map<String, Object> prepareOrdersPage(String endpointUrl, Long fromMillis, Long thruMillis,
                                                            Map<String, Object> pageParams,
                                                            Map<String, String> headers, Map config,
-                                                           List<String> warnings) {
+                                                           List<String> warnings, Set<String> keepFieldSet = null) {
         Map<String, Object> page = fetchOrdersPage(endpointUrl, fromMillis, thruMillis, pageParams, headers, config, warnings)
         if (!page.success) return page
         List rawRecords = page.records ?: []
         Map<String, Object> pageFilter = filterComparableOrderRecords(rawRecords)
         List filtered = (List) pageFilter.records
-        StringBuilder serialized = new StringBuilder(Math.max(16, filtered.size() * 512))
+        // Projection happens after filtering (the EXCHANGE scan needs the full record) and before
+        // serialization, so a trimmed extract writes ~90x less than the full order documents.
+        List outputRecords = keepFieldSet ? filtered.collect { Object record -> trimRecord(record, keepFieldSet) } : filtered
+        StringBuilder serialized = new StringBuilder(Math.max(16, outputRecords.size() * 512))
         boolean firstRecord = true
-        for (Object record : filtered) {
+        for (Object record : outputRecords) {
             if (!firstRecord) serialized.append(',')
             serialized.append(JsonOutput.toJson(record))
             firstRecord = false
@@ -647,6 +669,25 @@ class OmsRestSourceSupport {
                 excludedExchangeOrderCount: pageFilter.excludedExchangeOrderCount,
                 serializedRecords         : serialized.toString(),
         ]
+    }
+
+    protected static Set<String> normalizeKeepFields(List keepRecordFields) {
+        if (!keepRecordFields) return null
+        Set<String> keepFieldSet = new LinkedHashSet<String>()
+        keepRecordFields.each { Object field ->
+            String name = normalize(field)
+            if (name) keepFieldSet.add(name)
+        }
+        return keepFieldSet ?: null
+    }
+
+    protected static Map trimRecord(Object record, Set<String> keepFieldSet) {
+        if (!(record instanceof Map)) return [:]
+        Map trimmed = new LinkedHashMap()
+        ((Map) record).each { Object key, Object value ->
+            if (keepFieldSet.contains(key?.toString()?.trim())) trimmed.put(key, value)
+        }
+        return trimmed
     }
 
     // Repeated-page detection without retaining parsed pages: raw count + deep hash of the raw

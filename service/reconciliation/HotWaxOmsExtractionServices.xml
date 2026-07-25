@@ -27,6 +27,22 @@
             <parameter name="fileName">
                 <description>Optional output file name. Defaults to oms-orders-{fromMillis}-{thruMillis}.json.</description>
             </parameter>
+            <parameter name="keepRecordFields" type="List">
+                <parameter name="fieldName"/>
+                <description>Optional projection: top-level record fields to keep in the output file. When
+                    present, each order is trimmed to these fields after reconciliation filtering and before
+                    writing (callers compute the list from the rule set's join-key and rule fields plus the
+                    display fields). Absent means full untrimmed records (backward compatible).</description>
+            </parameter>
+            <parameter name="reconciliationRunResultId">
+                <description>Optional observability run id. With expectedRecordCount, the extractor
+                    heartbeats page-by-page progress (recordCount + progressPercent) onto the run's
+                    RUNNING extract step so the UI can show live percent. Advisory only.</description>
+            </parameter>
+            <parameter name="expectedRecordCount" type="Integer">
+                <description>Optional expected total for progress percent — typically the other side's
+                    extracted record count for the same window.</description>
+            </parameter>
         </in-parameters>
         <out-parameters>
             <parameter name="dataAvailable" type="Boolean"/>

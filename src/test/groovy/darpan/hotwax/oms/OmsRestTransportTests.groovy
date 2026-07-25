@@ -155,6 +155,54 @@ class OmsRestTransportTests {
     }
 
     @Test
+    void reportsCumulativeRawCountAfterEachConsumedPage() {
+        OmsRestSourceSupport.setHttpClient { Map request ->
+            int pageIndex = Integer.parseInt((request.url =~ /pageIndex=(\d+)/)[0][1] as String)
+            List<List> pages = [
+                    [[externalId: "O1", orderTypeId: "SALES_ORDER"], [externalId: "O2", orderTypeId: "SALES_ORDER"]],
+                    [[externalId: "O3", orderTypeId: "SALES_ORDER"], [externalId: "O4", orderTypeId: "SALES_ORDER"]],
+                    [[externalId: "O5", orderTypeId: "SALES_ORDER"]],
+            ]
+            List orders = pageIndex < pages.size() ? pages[pageIndex] : []
+            return [statusCode: 200, body: JsonOutput.toJson([orders: orders])]
+        }
+
+        List<Integer> reported = Collections.synchronizedList([])
+        Map result = OmsRestSourceSupport.extractOrders([
+                omsRestSourceConfigId : "KREWE_OMS",
+                companyUserGroupId    : "KREWE",
+                baseUrl               : "https://dev-maarg.hotwax.io",
+                authType              : "NONE",
+                ordersPageSize        : 2,
+                ordersFetchConcurrency: 1,
+        ], "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z", null, { Object cumulativeRawCount ->
+            reported.add(cumulativeRawCount as Integer)
+        })
+
+        assertTrue(result.errors.isEmpty(), result.errors.toString())
+        assertEquals([2, 4, 5], reported)
+    }
+
+    @Test
+    void progressListenerFailuresNeverFailTheExtraction() {
+        OmsRestSourceSupport.setHttpClient { Map ignored ->
+            [statusCode: 200, body: '{"orders":[{"externalId":"O1","orderTypeId":"SALES_ORDER"}]}']
+        }
+
+        Map result = OmsRestSourceSupport.extractOrders([
+                omsRestSourceConfigId: "KREWE_OMS",
+                companyUserGroupId   : "KREWE",
+                baseUrl              : "https://dev-maarg.hotwax.io",
+                authType             : "NONE",
+        ], "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z", null, { Object ignored ->
+            throw new IllegalStateException("listener blew up")
+        })
+
+        assertTrue(result.errors.isEmpty(), result.errors.toString())
+        assertEquals(1, result.recordCount)
+    }
+
+    @Test
     void midWindowFailureStillFailsTheExtractionUnderConcurrency() {
         OmsRestSourceSupport.setHttpClient { Map request ->
             String url = request.url as String

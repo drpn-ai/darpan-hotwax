@@ -1,5 +1,6 @@
 import darpan.facade.common.DataManagerSupport
 import darpan.facade.common.TenantAccessSupport
+import darpan.facade.reconciliation.RunObservability
 import darpan.hotwax.oms.OmsRestSourceSupport
 
 String configIdValue = omsRestSourceConfigId?.toString()?.trim()
@@ -61,8 +62,32 @@ File workFile = outputDirectory != null
         ? File.createTempFile("oms-orders-extract-", ".partial", outputDirectory)
         : File.createTempFile("oms-orders-extract-", ".partial")
 
+// Live progress (advisory): with a run id + expected total, heartbeat percent onto the RUNNING
+// extract step as pages are consumed, throttled to percent changes. Never fails the extraction.
+Closure pageProgressListener = null
+String progressRunId = reconciliationRunResultId?.toString()?.trim()
+Integer progressExpectedTotal = null
 try {
-    Map extraction = OmsRestSourceSupport.extractOrdersToFile(sourceConfig, windowStart, windowEnd, workFile)
+    progressExpectedTotal = expectedRecordCount != null ? (expectedRecordCount as Integer) : null
+} catch (Exception ignored) {
+}
+if (progressRunId && progressExpectedTotal != null && progressExpectedTotal > 0) {
+    int lastReportedPercent = -1
+    int expectedTotal = progressExpectedTotal
+    pageProgressListener = { Object cumulativeRawCount ->
+        int percent = Math.min(99, (int) Math.floor(((cumulativeRawCount as Integer) * 100.0d) / expectedTotal))
+        if (percent != lastReportedPercent) {
+            lastReportedPercent = percent
+            RunObservability.heartbeatStageProgress(ec, progressRunId, RunObservability.STAGE_EXTRACT_FILE2,
+                    cumulativeRawCount, expectedTotal)
+        }
+    }
+}
+
+try {
+    List keepRecordFieldsValue = (keepRecordFields instanceof List) ? (List) keepRecordFields : null
+    Map extraction = OmsRestSourceSupport.extractOrdersToFile(sourceConfig, windowStart, windowEnd, workFile,
+            keepRecordFieldsValue, pageProgressListener)
     warnings = extraction.warnings ?: []
     errors = extraction.errors ?: []
     requestMetadata = extraction.requestMetadata ?: [:]

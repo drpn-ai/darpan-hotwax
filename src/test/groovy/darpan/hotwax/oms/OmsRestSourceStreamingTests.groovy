@@ -163,6 +163,53 @@ class OmsRestSourceStreamingTests {
     }
 
     @Test
+    void trimsRecordsToKeepFieldsBeforeWriting() {
+        OmsRestSourceSupport.setHttpClient { Map ignored ->
+            [statusCode: 200, body: JsonOutput.toJson([orders: [
+                    [orderId: "OID1", orderName: "GOR-1", externalId: "E1", orderTypeId: "SALES_ORDER",
+                     grandTotal: 42.5, orderDate: 1784955159000L, statusId: "ORDER_COMPLETED",
+                     shipGroups: [[huge: "blob"]], contactMechs: [[addr: "..."]], roles: [[r: 1]]],
+                    [orderId: "OID2", externalId: "E2", orderTypeId: "SALES_ORDER",
+                     orderItemAssocs: [[orderItemAssocTypeId: "EXCHANGE"]], shipGroups: [[huge: "blob"]]],
+            ]])]
+        }
+
+        File target = new File(tempDir, "trimmed.json")
+        Map result = OmsRestSourceSupport.extractOrdersToFile(baseConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z", target,
+                ["orderId", "orderName", "externalId", "grandTotal", "orderDate", "statusId"])
+
+        assertTrue(result.errors.isEmpty(), result.errors.toString())
+        // The exchange filter still sees the full record (its assoc field is outside the keep list).
+        assertEquals(1, result.recordCount)
+        assertEquals(1, result.requestMetadata.filters.excludedExchangeOrderCount)
+
+        Map output = JSON_SLURPER.parseText(target.getText("UTF-8")) as Map
+        Map record = ((List) output.records)[0] as Map
+        assertEquals(["orderId", "orderName", "externalId", "grandTotal", "orderDate", "statusId"] as Set, record.keySet())
+        assertEquals("E1", record.externalId)
+        assertFalse(target.getText("UTF-8").contains("shipGroups"))
+        assertEquals(["externalId", "grandTotal", "orderDate", "orderId", "orderName", "statusId"],
+                output.metadata.projection.keepRecordFields)
+    }
+
+    @Test
+    void keepsFullRecordsWhenNoKeepFieldsGiven() {
+        OmsRestSourceSupport.setHttpClient { Map ignored ->
+            [statusCode: 200, body: '{"orders":[{"orderId":"O1","orderTypeId":"SALES_ORDER","shipGroups":[{"a":1}]}]}']
+        }
+
+        File target = new File(tempDir, "untrimmed.json")
+        Map result = OmsRestSourceSupport.extractOrdersToFile(baseConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z", target)
+
+        assertTrue(result.errors.isEmpty(), result.errors.toString())
+        assertTrue(target.getText("UTF-8").contains("shipGroups"))
+        Map output = JSON_SLURPER.parseText(target.getText("UTF-8")) as Map
+        assertFalse(((Map) output.metadata).containsKey("projection"))
+    }
+
+    @Test
     void writesValidEmptyDocumentWhenNoOrders() {
         OmsRestSourceSupport.setHttpClient { Map ignored -> [statusCode: 200, body: '{"orders":[]}'] }
 
