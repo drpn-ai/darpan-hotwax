@@ -108,11 +108,15 @@ try {
     exchangeManifestFileLocation = null
     List exchangeManifestValue = (List) (extraction.exchangeManifest ?: [])
     if (exchangeManifestValue) {
-        String manifestFileName = OmsRestSourceSupport.exchangeManifestFileName(outputFileName)
-        File manifestWorkFile = outputDirectory != null
-                ? File.createTempFile("oms-exchange-manifest-", ".partial", outputDirectory)
-                : File.createTempFile("oms-exchange-manifest-", ".partial")
+        // The sidecar is advisory: it unlocks exchange-pair verification but the primary extract
+        // above already succeeded, so a sidecar failure (including temp-file creation) must never
+        // fail the extraction — degrade to a warning and move on.
+        File manifestWorkFile = null
         try {
+            String manifestFileName = OmsRestSourceSupport.exchangeManifestFileName(outputFileName)
+            manifestWorkFile = outputDirectory != null
+                    ? File.createTempFile("oms-exchange-manifest-", ".partial", outputDirectory)
+                    : File.createTempFile("oms-exchange-manifest-", ".partial")
             manifestWorkFile.text = groovy.json.JsonOutput.toJson([
                     manifest: exchangeManifestValue,
                     truncated: extraction.exchangeManifestTruncated == true,
@@ -121,8 +125,10 @@ try {
             String manifestLocation = DataManagerSupport.childLocation(outputBaseLocation, manifestFileName)
             DataManagerSupport.moveIntoLocation(ec, manifestWorkFile, manifestLocation as String)
             exchangeManifestFileLocation = manifestLocation
+        } catch (Exception e) {
+            warnings = (warnings ?: []) + ["Exchange manifest sidecar could not be written: ${e.message} — exchange pair verification will be unavailable for this run.".toString()]
         } finally {
-            if (manifestWorkFile.exists()) manifestWorkFile.delete()
+            if (manifestWorkFile != null && manifestWorkFile.exists()) manifestWorkFile.delete()
         }
     }
 } finally {

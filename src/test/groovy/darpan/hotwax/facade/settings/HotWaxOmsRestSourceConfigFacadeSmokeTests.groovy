@@ -3,6 +3,7 @@ package darpan.hotwax.facade.settings
 import darpan.facade.common.TenantAccessSupport
 import darpan.hotwax.oms.OmsRestSourceSupport
 import darpan.reconciliation.support.ReconciliationSmokeTestSupport
+import groovy.json.JsonSlurper
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.BeforeEach
@@ -22,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class HotWaxOmsRestSourceConfigFacadeSmokeTests {
+    private static final JsonSlurper JSON_SLURPER = new JsonSlurper()
     private static final String ENTITY_NAME = "darpan.hotwax.HotWaxOmsRestSourceConfig"
     private static final String TEST_USER_ID = "TEST_CUSTOMER_USER"
     private static final String KREWE = "KREWE"
@@ -116,6 +118,64 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
             assertTrue(result.dataAvailable as boolean)
             assertEquals(1, result.recordCount)
             assertTrue((result.fileLocation as String).contains("hotwax-automation-extraction-test"))
+        } finally {
+            OmsRestSourceSupport.resetHttpClient()
+        }
+    }
+
+    @Test
+    void automationExtractionWritesExchangeManifestSidecarWhenWindowHasExchangeOrders() {
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
+        OmsRestSourceSupport.setHttpClient { Map ignored ->
+            [statusCode: 200, body: groovy.json.JsonOutput.toJson([orders: [
+                    [orderId: "O100", externalId: "E100", orderTypeId: "SALES_ORDER"],
+                    [orderId: "M750653", externalId: "6941645013123", orderName: "EXC-#GOR196990495-1",
+                            orderTypeId: "SALES_ORDER", statusId: "ORDER_COMPLETED", grandTotal: 50.0,
+                            orderDate: 1785260782199L,
+                            itemAssocs: [[orderItemAssocTypeId: "EXCHANGE", toOrderId: "M686331"]]],
+            ]])]
+        }
+
+        try {
+            Map<String, Object> result = (Map<String, Object>) ec.service.sync()
+                .name("reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrders")
+                .parameters([
+                    omsRestSourceConfigId: "KREWE_HOTWAX",
+                    companyUserGroupId   : KREWE,
+                    automationExecutionId: "AUTO_EXEC_KREWE_EXCHANGE",
+                    windowStart          : Timestamp.valueOf("2026-05-01 00:00:00"),
+                    windowEnd            : Timestamp.valueOf("2026-05-02 00:00:00"),
+                    outputLocation        : "runtime://tmp/hotwax-automation-exchange-manifest-test",
+                ])
+                .disableAuthz()
+                .call()
+
+            assertTrue((result.errors ?: []).isEmpty(), result.errors?.toString())
+            assertTrue(result.dataAvailable as boolean)
+            assertEquals(1, result.recordCount)
+
+            // The kept sales order is written to the primary extract file; the exchange order is
+            // excluded from it (unchanged exclusion behavior) but captured into the sidecar below.
+            File extractFile = ec.resource.getLocationReference(result.fileLocation as String).getFile()
+            String extractText = extractFile.text
+            assertTrue(extractText.contains("O100"))
+            assertFalse(extractText.contains("M750653"))
+
+            assertNotNull(result.exchangeManifestFileLocation)
+            String manifestLocation = result.exchangeManifestFileLocation as String
+            assertTrue(manifestLocation.contains("hotwax-automation-exchange-manifest-test"))
+            File manifestFile = ec.resource.getLocationReference(manifestLocation).getFile()
+            assertNotNull(manifestFile)
+            assertTrue(manifestFile.exists())
+
+            Map manifestDoc = JSON_SLURPER.parseText(manifestFile.text) as Map
+            List manifest = manifestDoc.manifest as List
+            assertEquals(1, manifest.size())
+            assertEquals("M750653", manifest[0].omsOrderId)
+            assertEquals("6941645013123", manifest[0].externalId)
+            assertEquals("M686331", manifest[0].toOrderId)
+            assertFalse(manifestDoc.truncated as boolean)
+            assertEquals(result.fileName, manifestDoc.sourceFileName)
         } finally {
             OmsRestSourceSupport.resetHttpClient()
         }
