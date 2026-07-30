@@ -417,7 +417,21 @@ class OmsRestSourceSupport {
             } catch (Exception e) {
                 return [ok: false, ordersByExternalId: [:], errors: ["OMS pair lookup for ${externalId} returned unparseable JSON: ${e.message}".toString()]]
             }
-            ordersByExternalId.put(externalId, records.findAll { it instanceof Map }.collect { summarizePairOrder((Map) it) })
+            // Echo validation: a tenant-configured OMS endpoint that ignores the (possibly unknown)
+            // externalId= query param would otherwise return arbitrary window orders, producing false
+            // "original present" evidence and garbage pair sums. Records whose own externalId field
+            // does not echo the id we asked for are dropped. If the endpoint returned records at all
+            // but NONE echoed the requested id, the filter is evidently unsupported — that is proof
+            // the response is not trustworthy for this id, so the whole lookup fails rather than
+            // risking a confidently-wrong diff row. A genuinely empty response (zero records) is left
+            // alone: that is valid evidence of "no such order," not a sign the filter was ignored.
+            List<Map> rawMapRecords = records.findAll { it instanceof Map } as List<Map>
+            List<Map> echoedRecords = rawMapRecords.findAll { Map record -> normalize(record.get('externalId')) == externalId }
+            if (rawMapRecords && !echoedRecords) {
+                return [ok: false, ordersByExternalId: [:],
+                        errors: ["OMS pair lookup for ${externalId} failed: endpoint did not honor externalId filter (no returned record echoed externalId ${externalId}).".toString()]]
+            }
+            ordersByExternalId.put(externalId, echoedRecords.collect { Map record -> summarizePairOrder(record) })
         }
         return [ok: true, ordersByExternalId: ordersByExternalId, errors: errors]
     }
