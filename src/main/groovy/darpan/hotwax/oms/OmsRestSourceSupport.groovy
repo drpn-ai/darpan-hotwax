@@ -367,6 +367,74 @@ class OmsRestSourceSupport {
         }
     }
 
+    static final int PAIR_LOOKUP_MAX_IDS = 100
+
+    /**
+     * Point lookup of full order groups by Shopify externalId — escapes run windows by construction
+     * (callers pass a wide orderDate window). Conservative: any per-id failure fails the whole call.
+     */
+    static Map<String, Object> lookupOrdersByExternalId(Map rawConfig, Collection externalIds,
+                                                        Long fromMillis, Long thruMillis) {
+        Map config = safeConfigMapFromPlain(toPlainMap(rawConfig))
+        List<String> errors = []
+        Map<String, Object> ordersByExternalId = [:]
+        List<String> ids = (externalIds ?: []).collect { normalize(it) }.findAll { it }.unique()
+        if (!ids) return [ok: false, ordersByExternalId: [:], errors: ["No externalIds provided for OMS pair lookup."]]
+        if (ids.size() > PAIR_LOOKUP_MAX_IDS) {
+            return [ok: false, ordersByExternalId: [:],
+                    errors: ["OMS pair lookup requested ${ids.size()} ids, above the ${PAIR_LOOKUP_MAX_IDS}-id cap.".toString()]]
+        }
+        Map<String, String> headers
+        String endpointUrl
+        try {
+            headers = buildHeaders(config)
+            endpointUrl = buildOrdersEndpointUrl(config.baseUrl as String, config.ordersPath as String)
+        } catch (Exception e) {
+            return [ok: false, ordersByExternalId: [:], errors: ["OMS pair lookup setup failed: ${e.message}".toString()]]
+        }
+        for (String externalId : ids) {
+            String url = buildOrdersUrl(endpointUrl, fromMillis, thruMillis,
+                    [externalId: externalId, pageSize: 50, pageIndex: 0])
+            Map response
+            try {
+                response = callOmsEndpoint(url, headers, config)
+            } catch (Exception e) {
+                return [ok: false, ordersByExternalId: [:], errors: ["OMS pair lookup for ${externalId} failed: ${e.message}".toString()]]
+            }
+            int statusCode = (response?.statusCode ?: 0) as int
+            if (statusCode < 200 || statusCode >= 300) {
+                return [ok: false, ordersByExternalId: [:], errors: ["OMS pair lookup for ${externalId} failed with HTTP ${statusCode}.".toString()]]
+            }
+            List records = []
+            try {
+                def parsed = JSON_SLURPER.parseText((response.body ?: "null") as String)
+                if (parsed instanceof List) records = (List) parsed
+                else if (parsed instanceof Map) {
+                    Object ordersValue = ((Map) parsed).get('orders')
+                    records = ordersValue instanceof List ? (List) ordersValue
+                            : (((Map) parsed).values().find { it instanceof List } ?: []) as List
+                }
+            } catch (Exception e) {
+                return [ok: false, ordersByExternalId: [:], errors: ["OMS pair lookup for ${externalId} returned unparseable JSON: ${e.message}".toString()]]
+            }
+            ordersByExternalId.put(externalId, records.findAll { it instanceof Map }.collect { summarizePairOrder((Map) it) })
+        }
+        return [ok: true, ordersByExternalId: ordersByExternalId, errors: errors]
+    }
+
+    protected static Map<String, Object> summarizePairOrder(Map record) {
+        return [
+                omsOrderId      : normalize(record.get('orderId')),
+                externalId      : normalize(record.get('externalId')),
+                orderName       : normalize(record.get('orderName')),
+                orderTypeId     : normalize(record.get('orderTypeId')),
+                statusId        : normalize(record.get('statusId')),
+                grandTotal      : record.get('grandTotal'),
+                orderDate       : record.get('orderDate'),
+                hasExchangeAssoc: containsExchangeOrderAssociation(record),
+        ]
+    }
+
     static String safeFileName(Object rawName, String fallback = null) {
         String normalized = normalize(rawName)
         String fileName = normalized ? normalized.tokenize("/\\").last() : normalize(fallback)

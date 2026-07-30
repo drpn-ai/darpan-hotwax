@@ -59,4 +59,27 @@
         </out-parameters>
     </service>
 
+    <service verb="lookup" noun="HotWaxOmsOrdersByExternalId" type="script" transaction="ignore"
+            allow-remote="false" authenticate="true"
+            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/lookup/lookupOmsOrdersByExternalId.groovy">
+        <description>Point lookup of OMS order groups by Shopify externalId for the exchange pair verify
+            stage. Escapes run windows via a wide orderDate window. A failed lookup returns ok=false with an
+            empty map — it never classifies anything.</description>
+        <in-parameters>
+            <parameter name="omsRestSourceConfigId" required="true"/>
+            <parameter name="externalIds" type="List" required="true"/>
+            <parameter name="companyUserGroupId">
+                <description>Trusted run owner tenant; when present, config access is checked against it
+                    instead of a user-session active tenant.</description>
+            </parameter>
+            <parameter name="windowStartMillis" type="Long"/>
+            <parameter name="windowEndMillis" type="Long"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="ordersByExternalId" type="Map"/>
+            <parameter name="errors" type="List"/>
+        </out-parameters>
+    </service>
+
 </services>
