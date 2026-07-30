@@ -30,6 +30,7 @@ class OmsRestSourceSupport {
     static final String DEFAULT_TIME_ZONE = "UTC"
     static final String SALES_ORDER_TYPE_ID = "SALES_ORDER"
     static final String EXCHANGE_ORDER_ASSOC_TYPE_ID = "EXCHANGE"
+    static final int EXCHANGE_MANIFEST_MAX_ENTRIES = 500
     static final String ORDER_TYPE_ID_FIELD = "orderTypeId"
     static final String ORDER_ITEM_ASSOC_TYPE_ID_FIELD = "orderItemAssocTypeId"
     static final int DEFAULT_ORDERS_PAGE_SIZE = 500
@@ -197,11 +198,17 @@ class OmsRestSourceSupport {
         int excludedExchangeOrderCount = 0
         int extractedRecordCount = 0
         int consumedRawCount = 0
+        List exchangeManifest = []
+        boolean exchangeManifestTruncated = false
         Closure pageConsumer = { Map<String, Object> pageBundle ->
             // Pages arrive as pre-filtered, pre-serialized bundles (built on the fetch thread),
             // so consuming a page is an append plus counter bumps — no parsed graphs retained.
             excludedNonSalesOrderCount += (int) pageBundle.excludedNonSalesOrderCount
             excludedExchangeOrderCount += (int) pageBundle.excludedExchangeOrderCount
+            for (Object entry : (List) (pageBundle.excludedExchangeOrders ?: [])) {
+                if (exchangeManifest.size() >= EXCHANGE_MANIFEST_MAX_ENTRIES) { exchangeManifestTruncated = true; break }
+                exchangeManifest.add(entry)
+            }
             int filteredCount = (int) pageBundle.filteredCount
             if (filteredCount > 0) sink.writeSerializedPage((String) pageBundle.serializedRecords, filteredCount)
             extractedRecordCount += filteredCount
@@ -246,6 +253,7 @@ class OmsRestSourceSupport {
                 excludedNonSalesOrderCount   : excludedNonSalesOrderCount,
                 excludedOrderItemAssocTypeIds: [EXCHANGE_ORDER_ASSOC_TYPE_ID],
                 excludedExchangeOrderCount   : excludedExchangeOrderCount,
+                exchangeManifestTruncated    : exchangeManifestTruncated,
         ]
         Map documentMetadata = requestMetadata + [
                 sourceType            : "HOTWAX_OMS_REST_ORDERS",
@@ -266,6 +274,8 @@ class OmsRestSourceSupport {
                 recordCount  : extractedRecordCount,
                 warnings     : warnings,
                 errors       : errors,
+                exchangeManifest         : exchangeManifest,
+                exchangeManifestTruncated: exchangeManifestTruncated,
         ]
     }
 
@@ -667,6 +677,7 @@ class OmsRestSourceSupport {
                 filteredCount             : filtered.size(),
                 excludedNonSalesOrderCount: pageFilter.excludedNonSalesOrderCount,
                 excludedExchangeOrderCount: pageFilter.excludedExchangeOrderCount,
+                excludedExchangeOrders    : pageFilter.excludedExchangeOrders,
                 serializedRecords         : serialized.toString(),
         ]
     }
@@ -964,6 +975,7 @@ class OmsRestSourceSupport {
 
     protected static Map<String, Object> filterComparableOrderRecords(Collection records) {
         List filteredRecords = []
+        List excludedExchangeOrders = []
         int excludedNonSalesOrderCount = 0
         int excludedExchangeOrderCount = 0
         (records ?: []).each { Object record ->
@@ -971,6 +983,7 @@ class OmsRestSourceSupport {
                 excludedNonSalesOrderCount++
             } else if (containsExchangeOrderAssociation(record)) {
                 excludedExchangeOrderCount++
+                excludedExchangeOrders.add(exchangeManifestEntry((Map) record))
             } else {
                 filteredRecords.add(record)
             }
@@ -979,7 +992,47 @@ class OmsRestSourceSupport {
                 records                    : filteredRecords,
                 excludedNonSalesOrderCount : excludedNonSalesOrderCount,
                 excludedExchangeOrderCount : excludedExchangeOrderCount,
+                excludedExchangeOrders     : excludedExchangeOrders,
         ]
+    }
+
+    /** Identity summary of an excluded exchange order — ids and amounts only, no customer fields. */
+    protected static Map<String, Object> exchangeManifestEntry(Map record) {
+        return [
+                omsOrderId: normalize(record.get('orderId')),
+                externalId: normalize(record.get('externalId')),
+                orderName : normalize(record.get('orderName')),
+                toOrderId : firstExchangeAssocToOrderId(record),
+                grandTotal: record.get('grandTotal'),
+                orderDate : record.get('orderDate'),
+                statusId  : normalize(record.get('statusId')),
+        ]
+    }
+
+    /** toOrderId of the first EXCHANGE assoc anywhere in the document (same scan shape as the exclusion filter). */
+    protected static String firstExchangeAssocToOrderId(Object value) {
+        if (value instanceof Map) {
+            Map record = (Map) value
+            Object assocTypeId = record.find { key, ignored -> normalize(key) == ORDER_ITEM_ASSOC_TYPE_ID_FIELD }?.value
+            if (normalize(assocTypeId)?.equalsIgnoreCase(EXCHANGE_ORDER_ASSOC_TYPE_ID)) return normalize(record.get('toOrderId'))
+            for (Object child : record.values()) {
+                String hit = firstExchangeAssocToOrderId(child)
+                if (hit) return hit
+            }
+            return null
+        }
+        if (value instanceof Collection) {
+            for (Object child : (Collection) value) {
+                String hit = firstExchangeAssocToOrderId(child)
+                if (hit) return hit
+            }
+        }
+        return null
+    }
+
+    static String exchangeManifestFileName(Object orderFileName) {
+        String name = normalize(orderFileName) ?: "oms-orders.json"
+        return name.replaceAll(/(?i)\.json$/, "") + ".exchange-manifest.json"
     }
 
     protected static String encodeQueryComponent(Object value) {

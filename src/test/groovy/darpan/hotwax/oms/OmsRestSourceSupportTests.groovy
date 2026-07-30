@@ -516,6 +516,59 @@ class OmsRestSourceSupportTests {
         assertFalse(result.requestMetadata.toString().contains("oms-pass"))
     }
 
+    @Test
+    void buildsExchangeManifestEntriesForExcludedExchangeOrders() {
+        Map topLevelAssoc = [orderId: "M750653", externalId: "6941645013123", orderName: "EXC-#GOR196990495-1",
+                orderTypeId: "SALES_ORDER", statusId: "ORDER_COMPLETED", grandTotal: 50.0, orderDate: 1785260782199L,
+                itemAssocs: [[orderItemAssocTypeId: "EXCHANGE", toOrderId: "M686331", orderItemSeqId: "01", toOrderItemSeqId: "_NA_"]]]
+        Map nestedAssocOnly = [orderId: "M900001", externalId: "7000000000001", orderName: "EXC-#GOR2-1",
+                orderTypeId: "SALES_ORDER", statusId: "ORDER_CANCELLED", grandTotal: 10.0, orderDate: 1785260782199L,
+                shipGroups: [[items: [[assocs: [[orderItemAssocTypeId: "exchange", toOrderId: "M900000"]]]]]]]
+        Map keptOrder = [orderId: "M686331", externalId: "6941645013123", orderTypeId: "SALES_ORDER"]
+
+        Map result = OmsRestSourceSupport.filterComparableOrderRecords([topLevelAssoc, nestedAssocOnly, keptOrder])
+
+        assertEquals(["M686331"], ((List) result.records).collect { it.orderId })
+        assertEquals(2, result.excludedExchangeOrderCount)
+        List manifest = (List) result.excludedExchangeOrders
+        assertEquals(2, manifest.size())
+        assertEquals("M750653", manifest[0].omsOrderId)
+        assertEquals("6941645013123", manifest[0].externalId)
+        assertEquals("EXC-#GOR196990495-1", manifest[0].orderName)
+        assertEquals("M686331", manifest[0].toOrderId)          // from top-level itemAssocs
+        assertEquals("ORDER_COMPLETED", manifest[0].statusId)
+        assertEquals(50.0, manifest[0].grandTotal)
+        assertEquals("M900000", manifest[1].toOrderId)          // from nested shipGroups.items.assocs, case-insensitive type
+    }
+
+    @Test
+    void exchangeManifestFlowsThroughExtractionWithCapAndTruncation() {
+        List orders = []
+        501.times { int i ->
+            orders.add([orderId: "MEX${i}".toString(), externalId: "EXT${i}".toString(), orderTypeId: "SALES_ORDER",
+                    itemAssocs: [[orderItemAssocTypeId: "EXCHANGE", toOrderId: "MOR${i}".toString()]]])
+        }
+        orders.add([orderId: "MKEEP", externalId: "EKEEP", orderTypeId: "SALES_ORDER"])
+        OmsRestSourceSupport.setHttpClient { Map ignored ->
+            [statusCode: 200, body: groovy.json.JsonOutput.toJson([orders: orders])]
+        }
+
+        Map result = OmsRestSourceSupport.extractOrders(baseConfig(), "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z")
+
+        assertEquals(1, result.recordCount)
+        assertEquals(501, result.requestMetadata.filters.excludedExchangeOrderCount)
+        assertEquals(500, ((List) result.exchangeManifest).size())
+        assertTrue(result.exchangeManifestTruncated as boolean)
+        assertTrue(result.requestMetadata.filters.exchangeManifestTruncated as boolean)
+    }
+
+    @Test
+    void exchangeManifestFileNameSwapsJsonSuffixCaseInsensitively() {
+        assertEquals("oms-orders-1-2.exchange-manifest.json", OmsRestSourceSupport.exchangeManifestFileName("oms-orders-1-2.json"))
+        assertEquals("weird.exchange-manifest.json", OmsRestSourceSupport.exchangeManifestFileName("weird.JSON"))
+        assertEquals("noext.exchange-manifest.json", OmsRestSourceSupport.exchangeManifestFileName("noext"))
+    }
+
     private static Map<String, Object> baseConfig(Map<String, Object> overrides = [:]) {
         return [
                 omsRestSourceConfigId  : "KREWE_OMS",

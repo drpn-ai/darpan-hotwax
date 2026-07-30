@@ -104,6 +104,27 @@ try {
     fileName = outputFileName
     fileLocation = DataManagerSupport.childLocation(outputBaseLocation, outputFileName)
     DataManagerSupport.moveIntoLocation(ec, workFile, fileLocation as String)
+
+    exchangeManifestFileLocation = null
+    List exchangeManifestValue = (List) (extraction.exchangeManifest ?: [])
+    if (exchangeManifestValue) {
+        String manifestFileName = OmsRestSourceSupport.exchangeManifestFileName(outputFileName)
+        File manifestWorkFile = outputDirectory != null
+                ? File.createTempFile("oms-exchange-manifest-", ".partial", outputDirectory)
+                : File.createTempFile("oms-exchange-manifest-", ".partial")
+        try {
+            manifestWorkFile.text = groovy.json.JsonOutput.toJson([
+                    manifest: exchangeManifestValue,
+                    truncated: extraction.exchangeManifestTruncated == true,
+                    sourceFileName: outputFileName,
+            ])
+            String manifestLocation = DataManagerSupport.childLocation(outputBaseLocation, manifestFileName)
+            DataManagerSupport.moveIntoLocation(ec, manifestWorkFile, manifestLocation as String)
+            exchangeManifestFileLocation = manifestLocation
+        } finally {
+            if (manifestWorkFile.exists()) manifestWorkFile.delete()
+        }
+    }
 } finally {
     if (workFile.exists()) workFile.delete()
 }

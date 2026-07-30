@@ -47,6 +47,10 @@
         <out-parameters>
             <parameter name="dataAvailable" type="Boolean"/>
             <parameter name="fileLocation"/>
+            <parameter name="exchangeManifestFileLocation">
+                <description>Location of the exchange-manifest sidecar written when the window contained
+                    excluded exchange orders; null otherwise. Identities/amounts only, capped at 500 entries.</description>
+            </parameter>
             <parameter name="fileName"/>
             <parameter name="recordCount" type="Integer"/>
             <parameter name="requestMetadata" type="Map"/>
