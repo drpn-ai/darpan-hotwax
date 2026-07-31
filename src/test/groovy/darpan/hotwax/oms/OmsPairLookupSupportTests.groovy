@@ -38,6 +38,25 @@ class OmsPairLookupSupportTests {
     }
 
     @Test
+    void bearerAuthConfigSendsTheApiTokenHeader() {
+        // Live-run regression (2026-07-31): the lookup shaped its config through the SAFE metadata
+        // mapper, which redacts secrets — so BEARER/API_KEY configs could never authenticate
+        // ("API token is required for BEARER auth"). It must use the same plain config mapping the
+        // extraction path uses, secrets included.
+        Map requestHeaders = null
+        OmsRestSourceSupport.setHttpClient { Map request ->
+            requestHeaders = (Map) request.headers
+            [statusCode: 200, body: groovy.json.JsonOutput.toJson([orders: []])]
+        }
+
+        Map config = baseConfig() + [authType: "BEARER", apiToken: "secret-token"]
+        Map result = OmsRestSourceSupport.lookupOrdersByExternalId(config, ["6941645013123"], 1L, 2L)
+
+        assertTrue(result.ok as boolean, result.errors.toString())
+        assertEquals("Bearer secret-token", requestHeaders?.get("Authorization"))
+    }
+
+    @Test
     void anyHttpFailureMakesTheWholeLookupNotOk() {
         OmsRestSourceSupport.setHttpClient { Map ignored -> [statusCode: 500, body: "boom"] }
         Map result = OmsRestSourceSupport.lookupOrdersByExternalId(baseConfig(), ["X1"], 1L, 2L)

@@ -375,7 +375,9 @@ class OmsRestSourceSupport {
      */
     static Map<String, Object> lookupOrdersByExternalId(Map rawConfig, Collection externalIds,
                                                         Long fromMillis, Long thruMillis) {
-        Map config = safeConfigMapFromPlain(toPlainMap(rawConfig))
+        // Plain mapping like the extraction path (extractOrdersInternal) — NOT safeConfigMapFromPlain,
+        // which redacts secrets for response metadata and would strip the auth token buildHeaders needs.
+        Map config = toPlainMap(rawConfig)
         List<String> errors = []
         Map<String, Object> ordersByExternalId = [:]
         List<String> ids = (externalIds ?: []).collect { normalize(it) }.findAll { it }.unique()
