@@ -32,11 +32,14 @@ if (sourceConfig && (sourceConfig.isActive ?: "Y").toString().equalsIgnoreCase("
 }
 if (ec.message.hasError()) { errors = (ec.message?.getErrors() ?: []) as List; return }
 
-// Default window: 400 days back from tomorrow — wide enough for any original order's orderDate.
+// Default window: 10 years back from tomorrow. Originals can be years older than their exchange
+// (live run 2026-07-31: a 400-day default windowed out 18 old originals, turning every one into a
+// false EXCHANGE_ORIGINAL_MISSING_IN_OMS row). The externalId filter does the narrowing; the date
+// window exists only because the orders API requires the parameters.
 long thruMillis = (windowEndMillis instanceof Number) ? ((Number) windowEndMillis).longValue()
         : System.currentTimeMillis() + 86400000L
 long fromMillis = (windowStartMillis instanceof Number) ? ((Number) windowStartMillis).longValue()
-        : thruMillis - 400L * 86400000L
+        : thruMillis - 3650L * 86400000L
 
 Map result = OmsRestSourceSupport.lookupOrdersByExternalId(sourceConfig, (List) externalIds, fromMillis, thruMillis)
 ok = result.ok
