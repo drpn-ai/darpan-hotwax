@@ -599,6 +599,156 @@ class OmsRestSourceSupport {
         return pathPart + "/" + (queryIndex >= 0 ? url.substring(queryIndex) : "")
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // Connection diagnostics
+    // ---------------------------------------------------------------------------------------------
+
+    /** An operator is watching a popup: fail fast, single attempt, never retry. */
+    static final int PROBE_CONNECT_TIMEOUT_SECONDS = 5
+    static final int PROBE_READ_TIMEOUT_SECONDS = 10
+    private static final long PROBE_WINDOW_MILLIS = 86400000L
+
+    /**
+     * Operator-initiated connection probe for a saved OMS REST config.
+     *
+     * Composes the SAME helpers the extractor uses — buildOrdersEndpointUrl, buildHeaders,
+     * callOmsEndpoint — so the probe exercises the real auth construction and inherits the header
+     * stripping and base-URL validation, while skipping the file sink, projection and pagination
+     * machinery whose failures would drown the credential signal.
+     *
+     * Never writes to ec.message and never throws: every outcome is a check row. Pass
+     * config.credentialError when the caller could not decrypt a stored secret.
+     *
+     * @param config plain config map (see safeConfigMap), optionally carrying credentialError
+     * @return [checks: List] in the shared diagnostics check contract
+     */
+    static Map<String, Object> probeConnection(Map config) {
+        List<Map<String, Object>> checks = []
+
+        // 1. Credential readable — entirely local. A secret that cannot be decrypted or is missing
+        //    fails HERE, before a socket is opened, so it can never be misreported as a network fault.
+        Map<String, String> headers = null
+        String credentialFailure = normalize(config?.credentialError)
+        if (!credentialFailure) {
+            try {
+                headers = buildHeaders(config)
+            } catch (IllegalArgumentException e) {
+                // Our own fixed validation text ("API token is required for BEARER auth."), safe to show.
+                credentialFailure = e.message
+            } catch (Throwable t) {
+                credentialFailure = "The stored credentials could not be read."
+            }
+        }
+
+        if (credentialFailure) {
+            checks.add(diagnosticsCheck("credential", "Credential readable", "FAIL", credentialFailure))
+            checks.add(diagnosticsCheck("reachable", "Base URL reachable", "SKIP", "Not attempted."))
+            checks.add(diagnosticsCheck("auth", "Credentials accepted", "SKIP", "Not attempted."))
+            checks.add(diagnosticsCheck("ordersRead", "Orders readable", "SKIP", "Not attempted."))
+            return [checks: checks]
+        }
+
+        String authType = normalize(config?.authType)?.toUpperCase() ?: "NONE"
+        checks.add(diagnosticsCheck("credential", "Credential readable", "PASS",
+                authType == "NONE" ? "No credentials configured (auth type NONE)." : null))
+
+        // buildOrdersEndpointUrl falls back to the bare orders path when there is no base URL, which
+        // is fine for display but must never be requested — require an absolute http(s) endpoint.
+        String endpointUrl = buildOrdersEndpointUrl(normalize(config?.baseUrl), config?.ordersPath as String)
+        if (!endpointUrl || !(endpointUrl.toLowerCase(Locale.ROOT) ==~ /^https?:\/\/.+/)) {
+            checks.add(diagnosticsCheck("reachable", "Base URL reachable", "FAIL",
+                    "No usable base URL is configured."))
+            checks.add(diagnosticsCheck("auth", "Credentials accepted", "SKIP", "Not attempted."))
+            checks.add(diagnosticsCheck("ordersRead", "Orders readable", "SKIP", "Not attempted."))
+            return [checks: checks]
+        }
+
+        // One record over a one-day window: the orders API requires the date parameters, and the
+        // window only needs to be well-formed, not meaningful.
+        long thruMillis = System.currentTimeMillis() + PROBE_WINDOW_MILLIS
+        String requestUrl = buildOrdersUrl(endpointUrl, thruMillis - PROBE_WINDOW_MILLIS, thruMillis,
+                pageQueryParams(PAGINATION_STRATEGIES[0], 0, 1))
+        Map<String, Object> probeConfig = new LinkedHashMap<>(config ?: [:])
+        probeConfig.put("connectTimeoutSeconds", PROBE_CONNECT_TIMEOUT_SECONDS)
+        probeConfig.put("readTimeoutSeconds", PROBE_READ_TIMEOUT_SECONDS)
+
+        long startedAt = System.currentTimeMillis()
+        Map<String, Object> response
+        try {
+            response = callOmsEndpoint(requestUrl, headers, probeConfig)
+        } catch (Throwable ignored) {
+            checks.add(diagnosticsCheck("reachable", "Base URL reachable", "FAIL",
+                    "The base URL could not be reached.", System.currentTimeMillis() - startedAt))
+            checks.add(diagnosticsCheck("auth", "Credentials accepted", "SKIP", "Not attempted."))
+            checks.add(diagnosticsCheck("ordersRead", "Orders readable", "SKIP", "Not attempted."))
+            return [checks: checks]
+        }
+        long elapsedMillis = System.currentTimeMillis() - startedAt
+        int statusCode = normalizeInt(response?.statusCode, 0)
+
+        if (statusCode <= 0) {
+            checks.add(diagnosticsCheck("reachable", "Base URL reachable", "FAIL",
+                    "The base URL could not be reached.", elapsedMillis))
+            checks.add(diagnosticsCheck("auth", "Credentials accepted", "SKIP", "Not attempted."))
+            checks.add(diagnosticsCheck("ordersRead", "Orders readable", "SKIP", "Not attempted."))
+            return [checks: checks]
+        }
+
+        // Any HTTP status at all proves the host answered.
+        checks.add(diagnosticsCheck("reachable", "Base URL reachable", "PASS", null, elapsedMillis))
+
+        if (statusCode == 401 || statusCode == 403) {
+            checks.add(diagnosticsCheck("auth", "Credentials accepted", "FAIL",
+                    "The stored credentials were rejected (HTTP ${statusCode}).".toString()))
+            checks.add(diagnosticsCheck("ordersRead", "Orders readable", "SKIP", "Not attempted."))
+            return [checks: checks]
+        }
+        checks.add(diagnosticsCheck("auth", "Credentials accepted", "PASS"))
+
+        if (statusCode == 404) {
+            checks.add(diagnosticsCheck("ordersRead", "Orders readable", "FAIL",
+                    "The orders path was not found (HTTP 404). Check the base URL and orders path."))
+            return [checks: checks]
+        }
+        if (statusCode < 200 || statusCode >= 300) {
+            checks.add(diagnosticsCheck("ordersRead", "Orders readable", "FAIL",
+                    "The orders request failed with HTTP ${statusCode}.".toString()))
+            return [checks: checks]
+        }
+
+        String body = response?.body?.toString()
+        if (!body) {
+            checks.add(diagnosticsCheck("ordersRead", "Orders readable", "FAIL", "The orders response was empty."))
+            return [checks: checks]
+        }
+        Object parsed
+        try {
+            parsed = new JsonSlurper().parseText(body)
+        } catch (Exception ignored) {
+            // The classic misconfiguration: a login page or proxy error page answering with HTTP 200.
+            checks.add(diagnosticsCheck("ordersRead", "Orders readable", "FAIL",
+                    "The orders response was not valid JSON."))
+            return [checks: checks]
+        }
+
+        int recordCount = ((List) extractOrderRecords(parsed, new ArrayList<String>())).size()
+        checks.add(diagnosticsCheck("ordersRead", "Orders readable", "PASS",
+                recordCount > 0 ? "1 order returned" : "no orders in range"))
+        return [checks: checks]
+    }
+
+    /** Local builder for the shared check contract — keeps darpan-hotwax free of a core-class import. */
+    protected static Map<String, Object> diagnosticsCheck(String key, String label, String status,
+                                                          String detail = null, Long durationMillis = null) {
+        return [
+                key           : key,
+                label         : label,
+                status        : status,
+                detail        : normalize(detail),
+                durationMillis: durationMillis,
+        ] as Map<String, Object>
+    }
+
     protected static Map<String, Object> callOmsEndpoint(String requestUrl, Map<String, String> headers, Map config,
                                                          boolean acceptGzip = true) {
         return (httpClient.call([

@@ -68,4 +68,27 @@
         </out-parameters>
     </service>
 
+    <service verb="probe" noun="HotWaxOmsConnection" type="script" allow-remote="false" authenticate="true"
+            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/facade/settings/probeOmsRestSourceConnection.groovy">
+        <description>Connection diagnostics for a saved OMS REST source config. Registered on the
+            SourceSystemConnector OMS row as healthCheckServiceName and invoked only through
+            facade.SettingsFacadeServices.test#SourceConnection, which owns the permission gate.
+            Read-only, one record, no retries. Never writes to ec.message: a rejected credential is
+            a check row, not a service error.</description>
+        <in-parameters>
+            <parameter name="omsRestSourceConfigId" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="checks" type="List">
+                <parameter name="check" type="Map">
+                    <parameter name="key"/>
+                    <parameter name="label"/>
+                    <parameter name="status"/>
+                    <parameter name="detail"/>
+                    <parameter name="durationMillis" type="Long"/>
+                </parameter>
+            </parameter>
+        </out-parameters>
+    </service>
+
 </services>
