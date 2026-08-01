@@ -77,6 +77,10 @@
             a check row, not a service error.</description>
         <in-parameters>
             <parameter name="omsRestSourceConfigId" required="true"/>
+            <parameter name="stage">
+                <description>Run just this stage and report the next one, so the caller can show
+                    progress as each completes. Blank runs every stage in a single call.</description>
+            </parameter>
         </in-parameters>
         <out-parameters>
             <parameter name="checks" type="List">
@@ -87,6 +91,9 @@
                     <parameter name="detail"/>
                     <parameter name="durationMillis" type="Long"/>
                 </parameter>
+            </parameter>
+            <parameter name="nextStage">
+                <description>Stage to run next, or blank when the probe is finished.</description>
             </parameter>
         </out-parameters>
     </service>

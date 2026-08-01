@@ -16,6 +16,7 @@ import darpan.hotwax.oms.OmsRestSourceSupport
  */
 
 checks = []
+nextStage = null
 
 String configIdValue = omsRestSourceConfigId?.toString()?.trim()
 if (!configIdValue) {
@@ -58,4 +59,9 @@ try {
     probeConfig.credentialError = "The stored credentials could not be decrypted."
 }
 
-checks = OmsRestSourceSupport.probeConnection(probeConfig).checks
+String requestedStage = stage?.toString()?.trim()
+Map probeResult = requestedStage
+        ? OmsRestSourceSupport.probeConnectionStage(probeConfig, requestedStage)
+        : OmsRestSourceSupport.probeConnection(probeConfig)
+checks = probeResult.checks
+nextStage = probeResult.nextStage

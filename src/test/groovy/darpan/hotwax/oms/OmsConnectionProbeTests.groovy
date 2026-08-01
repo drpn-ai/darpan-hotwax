@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test
 import static org.junit.jupiter.api.Assertions.assertEquals
 import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertNotNull
+import static org.junit.jupiter.api.Assertions.assertNull
 import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
@@ -194,5 +195,55 @@ class OmsConnectionProbeTests {
             String rendered = ((List<Map<String, Object>>) result.checks)*.detail.join(" | ")
             assertFalse(rendered.contains(secret), "a check detail leaked the stored token: ${rendered}")
         }
+    }
+    @Test
+    void stagesRunOneAtATimeAndChainViaNextStage() {
+        int calls = 0
+        OmsRestSourceSupport.setHttpClient { Map request -> calls++; return response(200, ordersBody(1)) }
+
+        Map<String, Object> one = OmsRestSourceSupport.probeConnectionStage(config(),
+                OmsRestSourceSupport.PROBE_STAGE_FIRST)
+        assertEquals(["credential"], ((List<Map>) one.checks)*.key)
+        assertEquals("connect", one.nextStage)
+        assertEquals(0, calls, "the credential stage must not touch the network")
+
+        // OMS has only two stages: one orders GET decides reachability, auth and the orders read
+        // together, and splitting it would mean issuing the same request twice for the same facts.
+        Map<String, Object> two = OmsRestSourceSupport.probeConnectionStage(config(), (String) one.nextStage)
+        assertEquals(["reachable", "auth", "ordersRead"], ((List<Map>) two.checks)*.key)
+        assertNull(two.nextStage)
+        assertEquals(1, calls)
+    }
+
+    @Test
+    void anUnreadableCredentialEndsTheWalkAtStageOne() {
+        boolean called = false
+        OmsRestSourceSupport.setHttpClient { Map request -> called = true; return response(200, ordersBody(1)) }
+
+        Map<String, Object> result = OmsRestSourceSupport.probeConnectionStage(
+                config([apiToken: null, credentialError: "The stored credentials could not be decrypted."]),
+                OmsRestSourceSupport.PROBE_STAGE_FIRST)
+
+        assertFalse(called)
+        assertNull(result.nextStage, "no further stage can be meaningful")
+        assertEquals(["credential", "reachable", "auth", "ordersRead"], ((List<Map>) result.checks)*.key)
+        assertStatus(result, "credential", "FAIL")
+    }
+
+    @Test
+    void walkingTheStagesMatchesRunningThemAllAtOnce() {
+        OmsRestSourceSupport.setHttpClient { Map request -> response(200, ordersBody(1)) }
+        Map<String, Object> oneShot = OmsRestSourceSupport.probeConnection(config())
+
+        List<Map> walked = []
+        String stage = OmsRestSourceSupport.PROBE_STAGE_FIRST
+        while (stage) {
+            Map<String, Object> step = OmsRestSourceSupport.probeConnectionStage(config(), stage)
+            walked.addAll((List<Map>) step.checks)
+            stage = (String) step.nextStage
+        }
+
+        assertEquals(((List<Map>) oneShot.checks)*.key, walked*.key)
+        assertEquals(((List<Map>) oneShot.checks)*.status, walked*.status)
     }
 }

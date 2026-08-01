@@ -622,45 +622,103 @@ class OmsRestSourceSupport {
      * @param config plain config map (see safeConfigMap), optionally carrying credentialError
      * @return [checks: List] in the shared diagnostics check contract
      */
+    static final String PROBE_STAGE_CREDENTIAL = "credential"
+    static final String PROBE_STAGE_CONNECT = "connect"
+    static final List<String> PROBE_STAGES = [PROBE_STAGE_CREDENTIAL, PROBE_STAGE_CONNECT].asImmutable()
+    /** Mirrors SourceConnectionDiagnosticsSupport.STAGE_FIRST — "whichever stage you run first". */
+    static final String PROBE_STAGE_FIRST = "@first"
+
+    /**
+     * Run every stage in one call. Kept alongside the staged path so a single invocation still gives
+     * a complete verdict — the UI walks the stages to show progress, anything else can just ask once.
+     */
     static Map<String, Object> probeConnection(Map config) {
         List<Map<String, Object>> checks = []
+        String stage = PROBE_STAGES[0]
+        while (stage) {
+            Map<String, Object> result = probeConnectionStage(config, stage)
+            checks.addAll((List<Map<String, Object>>) result.checks)
+            stage = normalize(result.nextStage)
+        }
+        return [checks: checks, nextStage: null]
+    }
 
-        // 1. Credential readable — entirely local. A secret that cannot be decrypted or is missing
-        //    fails HERE, before a socket is opened, so it can never be misreported as a network fault.
-        Map<String, String> headers = null
-        String credentialFailure = normalize(config?.credentialError)
-        if (!credentialFailure) {
+    /**
+     * One stage, returning its rows plus the next stage to run (null when finished).
+     *
+     * Only two stages: the credential check is local, and everything after it is decided by a single
+     * orders GET. Splitting that GET further would mean issuing the same request twice to report the
+     * same three facts, so reachability, auth and the orders read land together.
+     */
+    static Map<String, Object> probeConnectionStage(Map config, String stage) {
+        switch (normalize(stage)) {
+            case PROBE_STAGE_FIRST:
+            case PROBE_STAGE_CREDENTIAL: return probeCredentialStage(config)
+            case PROBE_STAGE_CONNECT: return probeConnectStage(config)
+            default: return [checks: [], nextStage: null]
+        }
+    }
+
+    /**
+     * Entirely local. password and apiToken are encrypt="true", so an unreadable secret fails HERE,
+     * before a socket is opened — reporting it as a network fault is the misdiagnosis this ordering
+     * exists to prevent.
+     */
+    protected static Map<String, Object> probeCredentialStage(Map config) {
+        String failure = normalize(config?.credentialError)
+        if (!failure) {
             try {
-                headers = buildHeaders(config)
+                buildHeaders(config)
             } catch (IllegalArgumentException e) {
                 // Our own fixed validation text ("API token is required for BEARER auth."), safe to show.
-                credentialFailure = e.message
-            } catch (Throwable t) {
-                credentialFailure = "The stored credentials could not be read."
+                failure = e.message
+            } catch (Throwable ignored) {
+                failure = "The stored credentials could not be read."
             }
         }
 
-        if (credentialFailure) {
-            checks.add(diagnosticsCheck("credential", "Credential readable", "FAIL", credentialFailure))
-            checks.add(diagnosticsCheck("reachable", "Base URL reachable", "SKIP", "Not attempted."))
-            checks.add(diagnosticsCheck("auth", "Credentials accepted", "SKIP", "Not attempted."))
-            checks.add(diagnosticsCheck("ordersRead", "Orders readable", "SKIP", "Not attempted."))
-            return [checks: checks]
+        if (failure) {
+            return [checks   : [diagnosticsCheck("credential", "Credential readable", "FAIL", failure),
+                                probeSkipped("reachable", "Base URL reachable"),
+                                probeSkipped("auth", "Credentials accepted"),
+                                probeSkipped("ordersRead", "Orders readable")],
+                    nextStage: null]
         }
 
         String authType = normalize(config?.authType)?.toUpperCase() ?: "NONE"
-        checks.add(diagnosticsCheck("credential", "Credential readable", "PASS",
-                authType == "NONE" ? "No credentials configured (auth type NONE)." : null))
+        return [checks   : [diagnosticsCheck("credential", "Credential readable", "PASS",
+                                    authType == "NONE" ? "No credentials configured (auth type NONE)." : null)],
+                nextStage: PROBE_STAGE_CONNECT]
+    }
+
+    /**
+     * Composes the SAME helpers the extractor uses — buildOrdersEndpointUrl, buildHeaders,
+     * callOmsEndpoint — so the probe exercises the real auth construction and inherits the header
+     * stripping and base-URL validation, while skipping the file sink, projection and pagination
+     * machinery whose failures would drown the credential signal.
+     */
+    protected static Map<String, Object> probeConnectStage(Map config) {
+        List<Map<String, Object>> checks = []
+        Map<String, String> headers
+        try {
+            headers = buildHeaders(config)
+        } catch (Throwable ignored) {
+            return [checks   : [diagnosticsCheck("reachable", "Base URL reachable", "FAIL",
+                                        "The stored credentials could not be read."),
+                                probeSkipped("auth", "Credentials accepted"),
+                                probeSkipped("ordersRead", "Orders readable")],
+                    nextStage: null]
+        }
 
         // buildOrdersEndpointUrl falls back to the bare orders path when there is no base URL, which
         // is fine for display but must never be requested — require an absolute http(s) endpoint.
         String endpointUrl = buildOrdersEndpointUrl(normalize(config?.baseUrl), config?.ordersPath as String)
         if (!endpointUrl || !(endpointUrl.toLowerCase(Locale.ROOT) ==~ /^https?:\/\/.+/)) {
-            checks.add(diagnosticsCheck("reachable", "Base URL reachable", "FAIL",
-                    "No usable base URL is configured."))
-            checks.add(diagnosticsCheck("auth", "Credentials accepted", "SKIP", "Not attempted."))
-            checks.add(diagnosticsCheck("ordersRead", "Orders readable", "SKIP", "Not attempted."))
-            return [checks: checks]
+            return [checks   : [diagnosticsCheck("reachable", "Base URL reachable", "FAIL",
+                                        "No usable base URL is configured."),
+                                probeSkipped("auth", "Credentials accepted"),
+                                probeSkipped("ordersRead", "Orders readable")],
+                    nextStage: null]
         }
 
         // One record over a one-day window: the orders API requires the date parameters, and the
@@ -677,21 +735,21 @@ class OmsRestSourceSupport {
         try {
             response = callOmsEndpoint(requestUrl, headers, probeConfig)
         } catch (Throwable ignored) {
-            checks.add(diagnosticsCheck("reachable", "Base URL reachable", "FAIL",
-                    "The base URL could not be reached.", System.currentTimeMillis() - startedAt))
-            checks.add(diagnosticsCheck("auth", "Credentials accepted", "SKIP", "Not attempted."))
-            checks.add(diagnosticsCheck("ordersRead", "Orders readable", "SKIP", "Not attempted."))
-            return [checks: checks]
+            return [checks   : [diagnosticsCheck("reachable", "Base URL reachable", "FAIL",
+                                        "The base URL could not be reached.", System.currentTimeMillis() - startedAt),
+                                probeSkipped("auth", "Credentials accepted"),
+                                probeSkipped("ordersRead", "Orders readable")],
+                    nextStage: null]
         }
         long elapsedMillis = System.currentTimeMillis() - startedAt
         int statusCode = normalizeInt(response?.statusCode, 0)
 
         if (statusCode <= 0) {
-            checks.add(diagnosticsCheck("reachable", "Base URL reachable", "FAIL",
-                    "The base URL could not be reached.", elapsedMillis))
-            checks.add(diagnosticsCheck("auth", "Credentials accepted", "SKIP", "Not attempted."))
-            checks.add(diagnosticsCheck("ordersRead", "Orders readable", "SKIP", "Not attempted."))
-            return [checks: checks]
+            return [checks   : [diagnosticsCheck("reachable", "Base URL reachable", "FAIL",
+                                        "The base URL could not be reached.", elapsedMillis),
+                                probeSkipped("auth", "Credentials accepted"),
+                                probeSkipped("ordersRead", "Orders readable")],
+                    nextStage: null]
         }
 
         // Any HTTP status at all proves the host answered.
@@ -700,26 +758,26 @@ class OmsRestSourceSupport {
         if (statusCode == 401 || statusCode == 403) {
             checks.add(diagnosticsCheck("auth", "Credentials accepted", "FAIL",
                     "The stored credentials were rejected (HTTP ${statusCode}).".toString()))
-            checks.add(diagnosticsCheck("ordersRead", "Orders readable", "SKIP", "Not attempted."))
-            return [checks: checks]
+            checks.add(probeSkipped("ordersRead", "Orders readable"))
+            return [checks: checks, nextStage: null]
         }
         checks.add(diagnosticsCheck("auth", "Credentials accepted", "PASS"))
 
         if (statusCode == 404) {
             checks.add(diagnosticsCheck("ordersRead", "Orders readable", "FAIL",
                     "The orders path was not found (HTTP 404). Check the base URL and orders path."))
-            return [checks: checks]
+            return [checks: checks, nextStage: null]
         }
         if (statusCode < 200 || statusCode >= 300) {
             checks.add(diagnosticsCheck("ordersRead", "Orders readable", "FAIL",
                     "The orders request failed with HTTP ${statusCode}.".toString()))
-            return [checks: checks]
+            return [checks: checks, nextStage: null]
         }
 
         String body = response?.body?.toString()
         if (!body) {
             checks.add(diagnosticsCheck("ordersRead", "Orders readable", "FAIL", "The orders response was empty."))
-            return [checks: checks]
+            return [checks: checks, nextStage: null]
         }
         Object parsed
         try {
@@ -728,13 +786,17 @@ class OmsRestSourceSupport {
             // The classic misconfiguration: a login page or proxy error page answering with HTTP 200.
             checks.add(diagnosticsCheck("ordersRead", "Orders readable", "FAIL",
                     "The orders response was not valid JSON."))
-            return [checks: checks]
+            return [checks: checks, nextStage: null]
         }
 
         int recordCount = ((List) extractOrderRecords(parsed, new ArrayList<String>())).size()
         checks.add(diagnosticsCheck("ordersRead", "Orders readable", "PASS",
                 recordCount > 0 ? "1 order returned" : "no orders in range"))
-        return [checks: checks]
+        return [checks: checks, nextStage: null]
+    }
+
+    protected static Map<String, Object> probeSkipped(String key, String label) {
+        return diagnosticsCheck(key, label, "SKIP", "Not attempted.")
     }
 
     /** Local builder for the shared check contract — keeps darpan-hotwax free of a core-class import. */
