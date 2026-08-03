@@ -3,6 +3,8 @@ package darpan.hotwax.oms
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 
+import darpan.reconciliation.source.SourceFilterSupport
+
 import static darpan.common.ValueSupport.boundedInt
 import static darpan.common.ValueSupport.normalize
 import static darpan.common.ValueSupport.normalizeBool
@@ -90,12 +92,13 @@ class OmsRestSourceSupport {
     }
 
     static Map<String, Object> extractOrders(Object rawConfig, Object windowStart, Object windowEnd,
-                                             List keepRecordFields = null, Closure pageProgressListener = null) {
+                                             List keepRecordFields = null, Closure pageProgressListener = null,
+                                             List excludeFilters = null) {
         // In-memory variant kept for tests and small interactive windows. The automation path must
         // use extractOrdersToFile so month-scale windows never materialize whole in heap.
         StringWriter buffer = new StringWriter()
         Map<String, Object> result = extractOrdersInternal(rawConfig, windowStart, windowEnd,
-                new OrdersDocumentSink({ -> buffer }), keepRecordFields, pageProgressListener)
+                new OrdersDocumentSink({ -> buffer }), keepRecordFields, pageProgressListener, excludeFilters)
         if (!(result.errors as List)) {
             String outputText = buffer.toString()
             result.outputText = outputText
@@ -107,14 +110,16 @@ class OmsRestSourceSupport {
 
     static Map<String, Object> extractOrdersToFile(Object rawConfig, Object windowStart, Object windowEnd,
                                                    File targetFile, List keepRecordFields = null,
-                                                   Closure pageProgressListener = null) {
+                                                   Closure pageProgressListener = null,
+                                                   List excludeFilters = null) {
         OrdersDocumentSink sink = new OrdersDocumentSink({ ->
             targetFile.getParentFile()?.mkdirs()
             return new BufferedWriter(new OutputStreamWriter(new FileOutputStream(targetFile), StandardCharsets.UTF_8))
         })
         Map<String, Object> result
         try {
-            result = extractOrdersInternal(rawConfig, windowStart, windowEnd, sink, keepRecordFields, pageProgressListener)
+            result = extractOrdersInternal(rawConfig, windowStart, windowEnd, sink, keepRecordFields,
+                    pageProgressListener, excludeFilters)
         } catch (Exception e) {
             sink.abort()
             targetFile.delete()
@@ -130,12 +135,22 @@ class OmsRestSourceSupport {
 
     private static Map<String, Object> extractOrdersInternal(Object rawConfig, Object windowStart, Object windowEnd,
                                                              OrdersDocumentSink sink, List keepRecordFields = null,
-                                                             Closure pageProgressListener = null) {
+                                                             Closure pageProgressListener = null,
+                                                             List excludeFilters = null) {
         Set<String> keepFieldSet = normalizeKeepFields(keepRecordFields)
         Map config = toPlainMap(rawConfig)
         // Synchronized: page-preparation runs on fetch-pool worker threads under concurrency.
         List<String> warnings = Collections.synchronizedList(new ArrayList<String>())
         List<String> errors = []
+        List<Map<String, Object>> excludeRules
+        try {
+            // Parsed once, before the fetch pool starts: page preparation runs on worker threads, so
+            // a malformed rule must fail here, once, rather than N times mid-window.
+            excludeRules = SourceFilterSupport.parseRules(excludeFilters)
+        } catch (IllegalArgumentException e) {
+            excludeRules = Collections.emptyList()
+            errors.add(e.message)
+        }
 
         Long fromMillis = parseWindowMillis(windowStart, "windowStart", errors)
         Long thruMillis = parseWindowMillis(windowEnd, "windowEnd", errors)
@@ -200,11 +215,15 @@ class OmsRestSourceSupport {
         int consumedRawCount = 0
         List exchangeManifest = []
         boolean exchangeManifestTruncated = false
+        Map<Integer, Integer> excludedByRuleCounts = [:]
         Closure pageConsumer = { Map<String, Object> pageBundle ->
             // Pages arrive as pre-filtered, pre-serialized bundles (built on the fetch thread),
             // so consuming a page is an append plus counter bumps — no parsed graphs retained.
             excludedNonSalesOrderCount += (int) pageBundle.excludedNonSalesOrderCount
             excludedExchangeOrderCount += (int) pageBundle.excludedExchangeOrderCount
+            ((Map<Integer, Integer>) pageBundle.excludedByRuleCounts ?: [:]).each { Integer sequenceNum, Integer count ->
+                excludedByRuleCounts.put(sequenceNum, (excludedByRuleCounts.get(sequenceNum) ?: 0) + count)
+            }
             for (Object entry : (List) (pageBundle.excludedExchangeOrders ?: [])) {
                 if (exchangeManifest.size() >= EXCHANGE_MANIFEST_MAX_ENTRIES) { exchangeManifestTruncated = true; break }
                 exchangeManifest.add(entry)
@@ -229,7 +248,7 @@ class OmsRestSourceSupport {
         Map extraction
         try {
             extraction = extractAllOrderPages(endpointUrl, fromMillis, thruMillis, headers, config, warnings,
-                    pageConsumer, keepFieldSet)
+                    pageConsumer, keepFieldSet, excludeRules)
         } catch (IOException e) {
             sink.abort()
             errors.add("Failed writing OMS extract output: ${e.message}".toString())
@@ -248,13 +267,8 @@ class OmsRestSourceSupport {
             return baseResult
         }
 
-        requestMetadata.filters = [
-                requiredOrderTypeId          : SALES_ORDER_TYPE_ID,
-                excludedNonSalesOrderCount   : excludedNonSalesOrderCount,
-                excludedOrderItemAssocTypeIds: [EXCHANGE_ORDER_ASSOC_TYPE_ID],
-                excludedExchangeOrderCount   : excludedExchangeOrderCount,
-                exchangeManifestTruncated    : exchangeManifestTruncated,
-        ]
+        requestMetadata.filters = buildFilterMetadata(excludedNonSalesOrderCount, excludedExchangeOrderCount,
+                exchangeManifestTruncated, excludeRules, excludedByRuleCounts)
         Map documentMetadata = requestMetadata + [
                 sourceType            : "HOTWAX_OMS_REST_ORDERS",
                 omsRestSourceConfigId : normalize(config?.omsRestSourceConfigId),
@@ -826,14 +840,15 @@ class OmsRestSourceSupport {
     protected static Map<String, Object> extractAllOrderPages(String endpointUrl, Long fromMillis, Long thruMillis,
                                                               Map<String, String> headers, Map config,
                                                               List<String> warnings, Closure pageConsumer,
-                                                              Set<String> keepFieldSet = null) {
+                                                              Set<String> keepFieldSet = null,
+                                                              List<Map<String, Object>> excludeRules = null) {
         int pageSize = resolveOrdersPageSize(config)
         int maxPageCount = Math.max(1, normalizeInt(config?.maxOrdersPageCount, MAX_ORDERS_PAGE_COUNT))
         int fetchConcurrency = resolveOrdersFetchConcurrency(config)
 
         for (Map<String, Object> strategy : PAGINATION_STRATEGIES) {
             Map<String, Object> firstPage = prepareOrdersPage(endpointUrl, fromMillis, thruMillis,
-                    pageQueryParams(strategy, 0, pageSize), headers, config, warnings, keepFieldSet)
+                    pageQueryParams(strategy, 0, pageSize), headers, config, warnings, keepFieldSet, excludeRules)
             if (!firstPage.success) {
                 if (isRecoverablePaginationFailure(firstPage.statusCode)) continue
                 return failedPageResult(firstPage)
@@ -847,7 +862,7 @@ class OmsRestSourceSupport {
             }
 
             Map<String, Object> secondPage = prepareOrdersPage(endpointUrl, fromMillis, thruMillis,
-                    pageQueryParams(strategy, 1, pageSize), headers, config, warnings, keepFieldSet)
+                    pageQueryParams(strategy, 1, pageSize), headers, config, warnings, keepFieldSet, excludeRules)
             if (!secondPage.success) {
                 if (isRecoverablePaginationFailure(secondPage.statusCode)) continue
                 return failedPageResult(secondPage, pageMetas)
@@ -886,14 +901,16 @@ class OmsRestSourceSupport {
                         int requestIndex = nextPageToRequest++
                         inFlightPages.put(requestIndex, fetchPool.submit({ ->
                             prepareOrdersPage(endpointUrl, fromMillis, thruMillis,
-                                    pageQueryParams(strategy, requestIndex, pageSize), headers, config, warnings, keepFieldSet)
+                                    pageQueryParams(strategy, requestIndex, pageSize), headers, config, warnings,
+                                    keepFieldSet, excludeRules)
                         } as Callable<Map<String, Object>>))
                     }
 
                     Map<String, Object> page = fetchPool != null ?
                             inFlightPages.remove(pageIndex).get() :
                             prepareOrdersPage(endpointUrl, fromMillis, thruMillis,
-                                    pageQueryParams(strategy, pageIndex, pageSize), headers, config, warnings, keepFieldSet)
+                                    pageQueryParams(strategy, pageIndex, pageSize), headers, config, warnings,
+                                    keepFieldSet, excludeRules)
                     pageMetas.add(pageMeta(page))
                     if (!page.success) return failedPageResult(page, pageMetas)
 
@@ -928,7 +945,7 @@ class OmsRestSourceSupport {
             }
         }
 
-        Map<String, Object> unpaginatedPage = prepareOrdersPage(endpointUrl, fromMillis, thruMillis, [:], headers, config, warnings, keepFieldSet)
+        Map<String, Object> unpaginatedPage = prepareOrdersPage(endpointUrl, fromMillis, thruMillis, [:], headers, config, warnings, keepFieldSet, excludeRules)
         if (!unpaginatedPage.success) return failedPageResult(unpaginatedPage)
         warnings.add("OMS REST pagination parameters did not advance; extracted the first unpaginated response only.")
         List<Map<String, Object>> unpaginatedMetas = [pageMeta(unpaginatedPage)]
@@ -947,11 +964,12 @@ class OmsRestSourceSupport {
     protected static Map<String, Object> prepareOrdersPage(String endpointUrl, Long fromMillis, Long thruMillis,
                                                            Map<String, Object> pageParams,
                                                            Map<String, String> headers, Map config,
-                                                           List<String> warnings, Set<String> keepFieldSet = null) {
+                                                           List<String> warnings, Set<String> keepFieldSet = null,
+                                                           List<Map<String, Object>> excludeRules = null) {
         Map<String, Object> page = fetchOrdersPage(endpointUrl, fromMillis, thruMillis, pageParams, headers, config, warnings)
         if (!page.success) return page
         List rawRecords = page.records ?: []
-        Map<String, Object> pageFilter = filterComparableOrderRecords(rawRecords)
+        Map<String, Object> pageFilter = filterComparableOrderRecords(rawRecords, excludeRules)
         List filtered = (List) pageFilter.records
         // Projection happens after filtering (the EXCHANGE scan needs the full record) and before
         // serialization, so a trimmed extract writes ~90x less than the full order documents.
@@ -974,6 +992,7 @@ class OmsRestSourceSupport {
                 excludedNonSalesOrderCount: pageFilter.excludedNonSalesOrderCount,
                 excludedExchangeOrderCount: pageFilter.excludedExchangeOrderCount,
                 excludedExchangeOrders    : pageFilter.excludedExchangeOrders,
+                excludedByRuleCounts      : pageFilter.excludedByRuleCounts,
                 serializedRecords         : serialized.toString(),
         ]
     }
@@ -1269,19 +1288,30 @@ class OmsRestSourceSupport {
         return []
     }
 
-    protected static Map<String, Object> filterComparableOrderRecords(Collection records) {
+    protected static Map<String, Object> filterComparableOrderRecords(Collection records,
+                                                                      List<Map<String, Object>> excludeRules = null) {
         List filteredRecords = []
         List excludedExchangeOrders = []
         int excludedNonSalesOrderCount = 0
         int excludedExchangeOrderCount = 0
+        Map<Integer, Integer> excludedByRuleCounts = [:]
         (records ?: []).each { Object record ->
+            // Order is load-bearing: the two built-in exclusions keep priority so their counts never
+            // shift when a tenant adds a configured rule, and a record excluded by more than one
+            // reason is attributed to exactly one bucket.
             if (!isSalesOrder(record)) {
                 excludedNonSalesOrderCount++
             } else if (containsExchangeOrderAssociation(record)) {
                 excludedExchangeOrderCount++
                 excludedExchangeOrders.add(exchangeManifestEntry((Map) record))
             } else {
-                filteredRecords.add(record)
+                Map<String, Object> matchedRule = SourceFilterSupport.firstMatchingRule(record, excludeRules)
+                if (matchedRule != null) {
+                    Integer sequenceNum = (Integer) matchedRule.get("sequenceNum")
+                    excludedByRuleCounts.put(sequenceNum, (excludedByRuleCounts.get(sequenceNum) ?: 0) + 1)
+                } else {
+                    filteredRecords.add(record)
+                }
             }
         }
         return [
@@ -1289,7 +1319,37 @@ class OmsRestSourceSupport {
                 excludedNonSalesOrderCount : excludedNonSalesOrderCount,
                 excludedExchangeOrderCount : excludedExchangeOrderCount,
                 excludedExchangeOrders     : excludedExchangeOrders,
+                excludedByRuleCounts       : excludedByRuleCounts,
         ]
+    }
+
+    /** Request-metadata filter block. Existing keys keep their names and meanings exactly. */
+    protected static Map<String, Object> buildFilterMetadata(int excludedNonSalesOrderCount,
+                                                             int excludedExchangeOrderCount,
+                                                             boolean exchangeManifestTruncated,
+                                                             List<Map<String, Object>> excludeRules,
+                                                             Map<Integer, Integer> excludedByRuleCounts) {
+        Map<String, Object> filters = [
+                requiredOrderTypeId          : SALES_ORDER_TYPE_ID,
+                excludedNonSalesOrderCount   : excludedNonSalesOrderCount,
+                excludedOrderItemAssocTypeIds: [EXCHANGE_ORDER_ASSOC_TYPE_ID],
+                excludedExchangeOrderCount   : excludedExchangeOrderCount,
+                exchangeManifestTruncated    : exchangeManifestTruncated,
+        ]
+        if (excludeRules) {
+            // Every configured rule is reported, including ones that matched nothing: a rule that
+            // vanished from metadata would read as "not applied".
+            filters.configuredExclusions = excludeRules.collect { Map<String, Object> rule ->
+                [
+                        sequenceNum    : rule.get("sequenceNum"),
+                        fieldExpression: rule.get("fieldExpression"),
+                        operator       : rule.get("operator"),
+                        values         : new ArrayList<String>((List) rule.get("values")),
+                        excludedCount  : (excludedByRuleCounts?.get(rule.get("sequenceNum")) ?: 0),
+                ]
+            }
+        }
+        return filters
     }
 
     /** Identity summary of an excluded exchange order — ids and amounts only, no customer fields. */

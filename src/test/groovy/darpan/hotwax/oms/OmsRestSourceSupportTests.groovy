@@ -597,4 +597,119 @@ class OmsRestSourceSupportTests {
             return fields[fieldName]
         }
     }
+
+    private static Map salesOrder(String orderId, String channel) {
+        return [orderId: orderId, orderTypeId: "SALES_ORDER", salesChannelEnumId: channel, grandTotal: 10]
+    }
+
+    private static List<Map<String, Object>> posChannelRule() {
+        return darpan.reconciliation.source.SourceFilterSupport.parseRules([[
+                sequenceNum    : 1,
+                fieldExpression: "salesChannelEnumId",
+                filterValues   : "POS_SALES_CHANNEL",
+        ]])
+    }
+
+    @Test
+    void noExclusionRulesLeavesFilteringExactlyAsBefore() {
+        List records = [
+                salesOrder("1", "WEB_SALES_CHANNEL"),
+                salesOrder("2", "POS_SALES_CHANNEL"),
+                [orderId: "3", orderTypeId: "PURCHASE_ORDER"],
+        ]
+
+        Map result = OmsRestSourceSupport.filterComparableOrderRecords(records)
+
+        assertEquals(2, (result.records as List).size())
+        assertEquals(1, result.excludedNonSalesOrderCount)
+        assertEquals(0, result.excludedExchangeOrderCount)
+        assertEquals([:], result.excludedByRuleCounts)
+    }
+
+    @Test
+    void configuredRuleExcludesMatchingRecordsAndCountsThemByRule() {
+        List records = [
+                salesOrder("1", "WEB_SALES_CHANNEL"),
+                salesOrder("2", "POS_SALES_CHANNEL"),
+                salesOrder("3", "pos_sales_channel"),
+        ]
+
+        Map result = OmsRestSourceSupport.filterComparableOrderRecords(records, posChannelRule())
+
+        assertEquals(1, (result.records as List).size())
+        assertEquals("1", (result.records as List)[0].orderId)
+        assertEquals([(1): 2], result.excludedByRuleCounts)
+    }
+
+    @Test
+    void builtInExclusionsKeepPriorityOverConfiguredOnes() {
+        // A non-sales order that also matches a configured rule must stay attributed to the built-in
+        // counter, so existing excludedNonSalesOrderCount values never shift when a filter is added.
+        List records = [[orderId: "1", orderTypeId: "PURCHASE_ORDER", salesChannelEnumId: "POS_SALES_CHANNEL"]]
+
+        Map result = OmsRestSourceSupport.filterComparableOrderRecords(records, posChannelRule())
+
+        assertEquals(1, result.excludedNonSalesOrderCount)
+        assertEquals([:], result.excludedByRuleCounts)
+        assertEquals(0, (result.records as List).size())
+    }
+
+    @Test
+    void exchangeExclusionKeepsPriorityOverConfiguredRules() {
+        List records = [[
+                orderId           : "1",
+                orderTypeId       : "SALES_ORDER",
+                salesChannelEnumId: "POS_SALES_CHANNEL",
+                items             : [[orderItemAssocTypeId: "EXCHANGE", toOrderId: "9"]],
+        ]]
+
+        Map result = OmsRestSourceSupport.filterComparableOrderRecords(records, posChannelRule())
+
+        assertEquals(1, result.excludedExchangeOrderCount)
+        assertEquals([:], result.excludedByRuleCounts)
+    }
+
+    @Test
+    void recordMissingTheFilteredFieldIsKept() {
+        List records = [[orderId: "1", orderTypeId: "SALES_ORDER"]]
+
+        Map result = OmsRestSourceSupport.filterComparableOrderRecords(records, posChannelRule())
+
+        assertEquals(1, (result.records as List).size())
+        assertEquals([:], result.excludedByRuleCounts)
+    }
+
+    @Test
+    void configuredExclusionsAppearInRequestMetadataWithCounts() {
+        Map<String, Object> filters = OmsRestSourceSupport.buildFilterMetadata(
+                4, 2, false, posChannelRule(), [(1): 7])
+
+        assertEquals("SALES_ORDER", filters.requiredOrderTypeId)
+        assertEquals(4, filters.excludedNonSalesOrderCount)
+        assertEquals(2, filters.excludedExchangeOrderCount)
+
+        List configured = filters.configuredExclusions as List
+        assertEquals(1, configured.size())
+        assertEquals(1, configured[0].sequenceNum)
+        assertEquals("salesChannelEnumId", configured[0].fieldExpression)
+        assertEquals("EXCLUDE_IN", configured[0].operator)
+        assertEquals(["POS_SALES_CHANNEL"], configured[0].values)
+        assertEquals(7, configured[0].excludedCount)
+    }
+
+    @Test
+    void metadataOmitsConfiguredExclusionsWhenNoRulesAreSet() {
+        Map<String, Object> filters = OmsRestSourceSupport.buildFilterMetadata(1, 0, false, [], [:])
+
+        assertFalse(filters.containsKey("configuredExclusions"))
+    }
+
+    @Test
+    void ruleThatMatchedNothingStillReportsAZeroCount() {
+        // An operator who configured an exclusion needs to see it ran and matched nothing, rather
+        // than see the rule vanish from metadata and wonder whether it was applied at all.
+        Map<String, Object> filters = OmsRestSourceSupport.buildFilterMetadata(0, 0, false, posChannelRule(), [:])
+
+        assertEquals(0, (filters.configuredExclusions as List)[0].excludedCount)
+    }
 }

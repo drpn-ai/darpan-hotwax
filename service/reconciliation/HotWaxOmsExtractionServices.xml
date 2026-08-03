@@ -34,6 +34,18 @@
                     writing (callers compute the list from the rule set's join-key and rule fields plus the
                     display fields). Absent means full untrimmed records (backward compatible).</description>
             </parameter>
+            <parameter name="sourceFilters" type="List">
+                <parameter name="filterRule" type="Map">
+                    <parameter name="sequenceNum" type="Integer"/>
+                    <parameter name="fieldExpression"/>
+                    <parameter name="operator"/>
+                    <parameter name="filterValues"/>
+                </parameter>
+                <description>Optional record-exclusion rules. Each rule names a top-level record field and a
+                    comma-separated list of exact values; matching orders are dropped before the extract file is
+                    written and counted per rule in requestMetadata.filters.configuredExclusions. Absent or empty
+                    means no configured exclusions (backward compatible).</description>
+            </parameter>
             <parameter name="reconciliationRunResultId">
                 <description>Optional observability run id. On its own it is enough for the extractor to
                     heartbeat a running order count onto the run's RUNNING extract step as pages are

@@ -98,8 +98,9 @@ if (progressRunId) {
 
 try {
     List keepRecordFieldsValue = (keepRecordFields instanceof List) ? (List) keepRecordFields : null
+    List sourceFiltersValue = (sourceFilters instanceof List) ? (List) sourceFilters : null
     Map extraction = OmsRestSourceSupport.extractOrdersToFile(sourceConfig, windowStart, windowEnd, workFile,
-            keepRecordFieldsValue, pageProgressListener)
+            keepRecordFieldsValue, pageProgressListener, sourceFiltersValue)
     warnings = extraction.warnings ?: []
     errors = extraction.errors ?: []
     requestMetadata = extraction.requestMetadata ?: [:]
