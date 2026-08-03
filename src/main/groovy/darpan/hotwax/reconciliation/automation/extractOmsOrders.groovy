@@ -62,25 +62,37 @@ File workFile = outputDirectory != null
         ? File.createTempFile("oms-orders-extract-", ".partial", outputDirectory)
         : File.createTempFile("oms-orders-extract-", ".partial")
 
-// Live progress (advisory): with a run id + expected total, heartbeat percent onto the RUNNING
-// extract step as pages are consumed, throttled to percent changes. Never fails the extraction.
+// Live progress (advisory): with a run id, heartbeat the running order count onto this stage's
+// RUNNING extract step as pages are consumed. The count IS the progress — an expected total is
+// optional and only adds a percent, which the first extract of a run can never have because
+// nothing has finished yet to divide against.
+//
+// Throttled on elapsed time rather than on percent change: percent-throttling needed the total,
+// and a count has no natural "changed enough" threshold when page sizes vary by an order of
+// magnitude across sources (a 50-record OMS page vs a Shopify bulk page). Writing faster than the
+// UI polls buys nothing, so one heartbeat every couple of seconds is the useful ceiling — that
+// also bounds the write volume on a 99k-order window to a few hundred updates instead of ~2000.
+// The stage code is threaded in because this same extractor runs as file1 or file2 depending on
+// the saved run's source order; it used to be hardcoded to file2, so every run with OMS on the
+// first side silently looked up a step that was not RUNNING yet and reported nothing.
+// Never fails the extraction.
+final long PROGRESS_MIN_INTERVAL_MS = 2000L
 Closure pageProgressListener = null
 String progressRunId = reconciliationRunResultId?.toString()?.trim()
+String progressStage = progressStageCode?.toString()?.trim() ?: RunObservability.STAGE_EXTRACT_FILE2
 Integer progressExpectedTotal = null
 try {
     progressExpectedTotal = expectedRecordCount != null ? (expectedRecordCount as Integer) : null
 } catch (Exception ignored) {
 }
-if (progressRunId && progressExpectedTotal != null && progressExpectedTotal > 0) {
-    int lastReportedPercent = -1
-    int expectedTotal = progressExpectedTotal
+if (progressRunId) {
+    Integer expectedTotal = progressExpectedTotal != null && progressExpectedTotal > 0 ? progressExpectedTotal : null
+    long lastReportedAtMs = 0L
     pageProgressListener = { Object cumulativeRawCount ->
-        int percent = Math.min(99, (int) Math.floor(((cumulativeRawCount as Integer) * 100.0d) / expectedTotal))
-        if (percent != lastReportedPercent) {
-            lastReportedPercent = percent
-            RunObservability.heartbeatStageProgress(ec, progressRunId, RunObservability.STAGE_EXTRACT_FILE2,
-                    cumulativeRawCount, expectedTotal)
-        }
+        long nowMs = System.currentTimeMillis()
+        if (nowMs - lastReportedAtMs < PROGRESS_MIN_INTERVAL_MS) return
+        lastReportedAtMs = nowMs
+        RunObservability.heartbeatStageProgress(ec, progressRunId, progressStage, cumulativeRawCount, expectedTotal)
     }
 }
 
