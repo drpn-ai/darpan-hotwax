@@ -50,6 +50,44 @@ When the caller passes `keepRecordFields` (the SourceSystemConnector registry de
 
 Each fetched page is filtered and appended to the output file on disk before the next page is requested; the extractor never holds more than roughly one page of orders in memory, so month-scale windows do not scale heap usage. The extractor keeps only HotWax orders with `orderTypeId` equal to `SALES_ORDER` and excludes orders that contain an order item association with `orderItemAssocTypeId` equal to `EXCHANGE`. Non-sales orders and exchange orders are not written to the normalized source file and are therefore not compared against Shopify orders. Output metadata includes `filters.excludedNonSalesOrderCount` and `filters.excludedExchangeOrderCount` so the run can distinguish fetched HotWax records from comparison-eligible records. Excluded exchange orders are additionally captured into a sidecar `<extract-name>.exchange-manifest.json` file (`{manifest, truncated, sourceFileName}`, entries are ids/amounts only — `omsOrderId`, `externalId`, `orderName`, `toOrderId`, `grandTotal`, `orderDate`, `statusId` — capped at 500 entries), which the exchange pair verify stage consumes to check exchange orders against their linked original order rather than silently dropping them. `filters.exchangeManifestTruncated` marks windows where the cap was hit.
 
+### Configurable record exclusion
+
+Beyond the two built-in filters above, a rule set can configure its own per-field exclusion rules on either source's extraction. These are ordinary tenant-configured rules — a field to test and a set of values that disqualify a record — layered on top of the built-in `SALES_ORDER`/`EXCHANGE` filtering rather than replacing it.
+
+`extract#HotWaxOmsOrders` accepts an optional `sourceFilters` parameter: a list of rule Maps, each with `sequenceNum` (Integer), `fieldExpression`, `operator`, and `filterValues` (comma-separated). The parsing and matching semantics live in the connector-agnostic `darpan.reconciliation.source.SourceFilterSupport` (component `darpan`), which `OmsRestSourceSupport` calls into so configured and built-in exclusions behave identically:
+
+- **Field names** are trimmed and matched **case-sensitively** against each record's top-level keys.
+- **Values** are trimmed and matched **case-insensitively** against the field's value.
+- A record that **lacks the configured field is kept** — an exclusion rule can only remove a record for carrying a matching value, never for missing one.
+
+`SourceFilterSupport.parseRules` validates and normalizes the raw rule list once, before extraction starts (`extractOrdersInternal`, `OmsRestSourceSupport.groovy`), ahead of building request headers or issuing any HTTP call. A malformed rule (no field, no values, an unsupported operator, or more than `MAX_RULES_PER_SOURCE`/`MAX_VALUES_PER_RULE`) is recorded as a pre-flight error and the extraction returns immediately with no request ever sent — never a failure discovered mid-window on some later page.
+
+**Rejection order matters.** `filterComparableOrderRecords` evaluates each record against exactly three rejection branches, in this fixed order:
+
+1. Not `orderTypeId == SALES_ORDER` → counted in `excludedNonSalesOrderCount`.
+2. Carries an `EXCHANGE` order-item association → counted in `excludedExchangeOrderCount` (and captured into the exchange manifest).
+3. Matches a configured exclusion rule → counted per-rule.
+
+The two built-in branches are checked first, and a record is attributed to exactly one bucket — the first branch it matches. This means a record that would be caught by both a built-in filter and a configured rule is counted only in the built-in bucket, and `excludedNonSalesOrderCount`/`excludedExchangeOrderCount` never shift when a tenant adds or changes a configured exclusion.
+
+**Filtering runs before projection.** A page is filtered (`filterComparableOrderRecords`) before the `keepRecordFields` projection trims it (`prepareOrdersPage`), because the `EXCHANGE`-association scan needs the full order document. A practical consequence: a configured exclusion can target a field such as `salesChannelEnumId` even though that field is not part of the connector's declared keep-field set — filtering sees the untrimmed record regardless of what the eventual output projection keeps.
+
+Matched exclusions are reported in `requestMetadata.filters.configuredExclusions`, one entry per configured rule:
+
+```json
+{
+  "sequenceNum": 1,
+  "fieldExpression": "salesChannelEnumId",
+  "operator": "EXCLUDE_IN",
+  "values": ["POS_SALES_CHANNEL"],
+  "excludedCount": 0
+}
+```
+
+Every configured rule appears here, including a rule that matched nothing in the window — `excludedCount` is simply `0` in that case, rather than the rule disappearing from the metadata (a missing entry would read as "not applied"). Conversely, `configuredExclusions` is **absent entirely**, not an empty list, when the source has no configured exclusion rules — `sourceFilters` empty/omitted means fully backward-compatible metadata.
+
+Excluded counts — both the built-in `excludedNonSalesOrderCount`/`excludedExchangeOrderCount` and the per-rule `configuredExclusions[].excludedCount` — are diagnostic run metadata only. They are deliberately **not surfaced in the UI**; the rules board and rule set manager display the configured field/values themselves (what will be excluded), never how many records a run actually excluded.
+
 The extractor streams into a `.partial` work file in the run folder and moves it to its final name only after the whole window succeeds, so a mid-window failure never leaves a partial extract where reconciliation could read it.
 
 The output is normalized compact JSON. `records` is written first (pages are appended as they arrive) and `metadata` last, once counts and pagination are known; consumers read the file with JSON parsers (Spark multiLine JSON, JSONPath), so object key order is not part of the contract:
@@ -124,3 +162,5 @@ Example source metadata:
 ```
 
 The extractor writes normalized JSON to the data-manager run folder and returns the file location/counts needed by `reconciliation.ReconciliationAutomationServices.execute#Automation`. Keep config secrets in encrypted fields only; the extractor response and metadata should include header names but not header values or credentials.
+
+`sourceFilters` is never part of `safeMetadataJson` above. On the scheduled path, `AutomationExecutionSupport.callConfiguredSourceExtractor` (component `darpan`) loads the automation's own `ReconciliationAutomationSourceFilter` rows for the relevant `fileSide` and passes them as `sourceFilters` when it invokes this extractor. Those rows are a frozen snapshot copied from the rule set's `RuleSetCompareSourceFilter` rows once, at automation creation time — the automation wizard has no exclusion UI of its own, so an automation that carries exclusions got them by seeding, not by an operator setting them in the wizard. Later edits to the rule set's exclusions do not reach an already-created automation.
