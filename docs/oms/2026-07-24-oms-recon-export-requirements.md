@@ -1,9 +1,16 @@
 # OMS Reconciliation Export — Requirements
 
+> **SUPERSEDED 2026-08-03** by `2026-08-03-oms-recon-data-requirements.md` in this
+> folder. Two decisions changed: scope now includes returns (header and line-item
+> level), and the async export-job-plus-file transport is withdrawn in favour of a
+> faster synchronous endpoint. The join key, field set, filter rules, exclusion
+> counts, auth modes, and open questions OQ-3/OQ-6/OQ-7 are carried forward intact
+> into the new document. Do not hand this version to the OMS team.
+
 | | |
 |---|---|
 | Date | 2026-07-24 |
-| Status | DRAFT — not yet signed off by the Expert User (Aditi Patel / HotWax OMS team). All verdicts and numbers below carry that caveat. |
+| Status | SUPERSEDED — see banner above. Was DRAFT, never signed off. |
 | Consumer | Darpan reconciliation (component `darpan-hotwax` is the integration edge) |
 | Implementer | HotWax OMS ("maarg", Moqui-based) team — their architect owns all design |
 | Supersedes | Nothing. The current integration is documented in `rest-order-extraction.md` (same folder) and remains in service (RQ-19). |
