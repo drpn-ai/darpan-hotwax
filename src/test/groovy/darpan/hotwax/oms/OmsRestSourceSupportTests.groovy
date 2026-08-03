@@ -667,6 +667,13 @@ class OmsRestSourceSupportTests {
 
         assertEquals(1, result.excludedExchangeOrderCount)
         assertEquals([:], result.excludedByRuleCounts)
+        // Must actually fall into the exchange branch, not merely skip the rule branch: the record
+        // is dropped from the kept set and shows up on the exchange manifest, not silently kept.
+        assertEquals(0, (result.records as List).size())
+        List excludedExchangeOrders = result.excludedExchangeOrders as List
+        assertEquals(1, excludedExchangeOrders.size())
+        assertEquals("1", (excludedExchangeOrders[0] as Map).omsOrderId)
+        assertEquals("9", (excludedExchangeOrders[0] as Map).toOrderId)
     }
 
     @Test
@@ -711,5 +718,64 @@ class OmsRestSourceSupportTests {
         Map<String, Object> filters = OmsRestSourceSupport.buildFilterMetadata(0, 0, false, posChannelRule(), [:])
 
         assertEquals(0, (filters.configuredExclusions as List)[0].excludedCount)
+    }
+
+    @Test
+    void configuredExclusionsApplyToPagesFetchedFromTheConcurrentPool() {
+        // filterComparableOrderRecords and buildFilterMetadata are proven directly above, but nothing
+        // else exercises the five hops that carry excludeRules from extractOrdersToFile down into
+        // prepareOrdersPage. Page size 2 forces pages 0+1 to be fetched synchronously as pagination
+        // probes, then pages 2+ stream through the ExecutorService (default ordersFetchConcurrency=2)
+        // — the rule match sits on page 2 specifically so this guards that submit() call, not just
+        // the two synchronous probes.
+        OmsRestSourceSupport.setHttpClient { Map request ->
+            int pageIndex = queryInt(request.url as String, "pageIndex")
+            List<List> pages = [
+                    [salesOrder("O1", "WEB_SALES_CHANNEL"), salesOrder("O2", "WEB_SALES_CHANNEL")],
+                    [salesOrder("O3", "WEB_SALES_CHANNEL"), salesOrder("O4", "WEB_SALES_CHANNEL")],
+                    [salesOrder("O5", "WEB_SALES_CHANNEL"), salesOrder("O6", "POS_SALES_CHANNEL")],
+            ]
+            List orders = pageIndex < pages.size() ? pages[pageIndex] : []
+            return [statusCode: 200, body: JsonOutput.toJson([orders: orders])]
+        }
+
+        File target = File.createTempFile("oms-orders-exclusion-pool-", ".json")
+        try {
+            Map result = OmsRestSourceSupport.extractOrdersToFile(
+                    baseConfig([ordersPageSize: 2, ordersFetchConcurrency: 2]),
+                    "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z", target, null, null,
+                    posChannelRule())
+
+            assertTrue((result.errors as List).isEmpty(), result.errors.toString())
+            assertEquals(5, result.recordCount)
+
+            String written = target.getText("UTF-8")
+            assertFalse(written.contains("O6"), "excluded record O6 leaked into the extract file: ${written}")
+
+            List configured = result.requestMetadata.filters.configuredExclusions as List
+            assertEquals(1, (configured[0] as Map).excludedCount)
+        } finally {
+            target.delete()
+        }
+    }
+
+    @Test
+    void malformedExcludeFilterFailsBeforeAnyHttpRequestIsIssued() {
+        // Rules are parsed once, before the fetch pool starts (see extractOrdersInternal): a bad
+        // rule must surface as one clean pre-flight error, not a thrown exception and not N
+        // mid-window failures from worker threads that never should have started fetching.
+        boolean httpCalled = false
+        OmsRestSourceSupport.setHttpClient { Map ignored ->
+            httpCalled = true
+            [statusCode: 200, body: '{"orders":[]}']
+        }
+
+        Map result = OmsRestSourceSupport.extractOrders(baseConfig(), "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z",
+                null, null, [[fieldExpression: "salesChannelEnumId"]])
+
+        assertFalse(httpCalled, "a malformed exclusion rule must fail before any HTTP request is issued")
+        assertTrue((result.errors as List).any { it.toString().contains("has no values to exclude") },
+                result.errors.toString())
+        assertEquals(0, result.recordCount)
     }
 }
