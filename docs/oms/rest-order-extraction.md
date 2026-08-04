@@ -86,6 +86,8 @@ Matched exclusions are reported in `requestMetadata.filters.configuredExclusions
 
 Every configured rule appears here, including a rule that matched nothing in the window — `excludedCount` is simply `0` in that case, rather than the rule disappearing from the metadata (a missing entry would read as "not applied"). Conversely, `configuredExclusions` is **absent entirely**, not an empty list, when the source has no configured exclusion rules — `sourceFilters` empty/omitted means fully backward-compatible metadata.
 
+**Exclusions apply to the window extract only, not to pair lookups.** `lookup#HotWaxOmsOrdersByExternalId` (`lookupOrdersByExternalId`) resolves specific orders by ID and applies no exclusion rules — neither the built-in `SALES_ORDER`/`EXCHANGE` filters nor configured `sourceFilters`. A `STAGE_VERIFY` point lookup can therefore surface an order the window extract deliberately dropped. This is pre-existing behavior shared with the built-in filters, not something configured exclusions introduced.
+
 Excluded counts — both the built-in `excludedNonSalesOrderCount`/`excludedExchangeOrderCount` and the per-rule `configuredExclusions[].excludedCount` — are diagnostic run metadata only. They are deliberately **not surfaced in the UI**; the rules board and rule set manager display the configured field/values themselves (what will be excluded), never how many records a run actually excluded.
 
 The extractor streams into a `.partial` work file in the run folder and moves it to its final name only after the whole window succeeds, so a mid-window failure never leaves a partial extract where reconciliation could read it.
