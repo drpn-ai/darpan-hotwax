@@ -687,6 +687,66 @@ class OmsRestSourceSupportTests {
     }
 
     @Test
+    void extractOptionsDefaultToSalesOrderBehaviour() {
+        Map<String, Object> options = OmsRestSourceSupport.normalizeExtractOptions(null)
+
+        assertEquals("SALES_ORDER", options.orderTypeId)
+        assertEquals("orderDate", options.windowFieldName)
+        assertEquals([], options.orderStatusIds)
+        assertTrue(options.applyExchangeExclusion as boolean)
+        assertFalse(options.filterOrderTypeServerSide as boolean)
+    }
+
+    @Test
+    void extractOptionsForTransferOrdersDropExchangeExclusion() {
+        Map<String, Object> options = OmsRestSourceSupport.normalizeExtractOptions([
+                orderTypeId    : "TRANSFER_ORDER",
+                windowFieldName: "lastUpdatedTxStamp",
+                orderStatusIds : ["ORDER_APPROVED", " ORDER_CREATED ", "", null],
+        ])
+
+        assertEquals("TRANSFER_ORDER", options.orderTypeId)
+        assertEquals("lastUpdatedTxStamp", options.windowFieldName)
+        assertEquals(["ORDER_APPROVED", "ORDER_CREATED"], options.orderStatusIds)
+        assertFalse(options.applyExchangeExclusion as boolean)
+        assertTrue(options.filterOrderTypeServerSide as boolean)
+    }
+
+    @Test
+    void transferOrderFilterKeepsExchangeAssociatedRecords() {
+        List records = [
+                [orderId: "TO-1", orderTypeId: "TRANSFER_ORDER",
+                 itemAssocs: [[orderItemAssocTypeId: "EXCHANGE", toOrderId: "SO-9"]]],
+                [orderId: "TO-2", orderTypeId: "TRANSFER_ORDER"],
+                [orderId: "SO-1", orderTypeId: "SALES_ORDER"],
+        ]
+
+        Map<String, Object> result = OmsRestSourceSupport.filterComparableOrderRecords(
+                records, null, [orderTypeId: "TRANSFER_ORDER"])
+
+        assertEquals(["TO-1", "TO-2"], (result.records as List).collect { it.orderId })
+        assertEquals(1, result.excludedNonSalesOrderCount)
+        assertEquals(0, result.excludedExchangeOrderCount)
+        assertEquals([], result.excludedExchangeOrders)
+    }
+
+    @Test
+    void salesOrderFilterIsUnchangedWhenOptionsAbsent() {
+        List records = [
+                [orderId: "SO-1", orderTypeId: "SALES_ORDER"],
+                [orderId: "SO-2", orderTypeId: "SALES_ORDER",
+                 itemAssocs: [[orderItemAssocTypeId: "EXCHANGE", toOrderId: "SO-1"]]],
+                [orderId: "TO-1", orderTypeId: "TRANSFER_ORDER"],
+        ]
+
+        Map<String, Object> result = OmsRestSourceSupport.filterComparableOrderRecords(records)
+
+        assertEquals(["SO-1"], (result.records as List).collect { it.orderId })
+        assertEquals(1, result.excludedNonSalesOrderCount)
+        assertEquals(1, result.excludedExchangeOrderCount)
+    }
+
+    @Test
     void configuredExclusionsAppearInRequestMetadataWithCounts() {
         Map<String, Object> filters = OmsRestSourceSupport.buildFilterMetadata(
                 4, 2, false, posChannelRule(), [(1): 7])

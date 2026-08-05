@@ -44,6 +44,7 @@ class OmsRestSourceSupport {
     // Some OMS list endpoints silently cap a page at 50 records regardless of the requested pageSize;
     // a 50-record first page is therefore treated as "maybe truncated" and triggers a second-page probe.
     static final int OMS_DEFAULT_SERVER_PAGE_SIZE = 50
+    static final String DEFAULT_WINDOW_FIELD_NAME = "orderDate"
 
     private static final JsonSlurper JSON_SLURPER = new JsonSlurper()
     private static final List<String> CONFIG_FIELD_NAMES = [
@@ -1289,7 +1290,12 @@ class OmsRestSourceSupport {
     }
 
     protected static Map<String, Object> filterComparableOrderRecords(Collection records,
-                                                                      List<Map<String, Object>> excludeRules = null) {
+                                                                      List<Map<String, Object>> excludeRules = null,
+                                                                      Map<String, Object> extractOptions = null) {
+        Map<String, Object> options = normalizeExtractOptions(extractOptions)
+        String orderTypeId = (String) options.orderTypeId
+        boolean applyExchangeExclusion = options.applyExchangeExclusion as boolean
+
         List filteredRecords = []
         List excludedExchangeOrders = []
         int excludedNonSalesOrderCount = 0
@@ -1299,9 +1305,9 @@ class OmsRestSourceSupport {
             // Order is load-bearing: the two built-in exclusions keep priority so their counts never
             // shift when a tenant adds a configured rule, and a record excluded by more than one
             // reason is attributed to exactly one bucket.
-            if (!isSalesOrder(record)) {
+            if (!isRequestedOrderType(record, orderTypeId)) {
                 excludedNonSalesOrderCount++
-            } else if (containsExchangeOrderAssociation(record)) {
+            } else if (applyExchangeExclusion && containsExchangeOrderAssociation(record)) {
                 excludedExchangeOrderCount++
                 excludedExchangeOrders.add(exchangeManifestEntry((Map) record))
             } else {
@@ -1412,12 +1418,54 @@ class OmsRestSourceSupport {
         return copy
     }
 
-    protected static boolean isSalesOrder(Object record) {
+    /**
+     * One place that turns caller-supplied extract options into a complete, defaulted Map. Absent
+     * options must reproduce sales-order behaviour exactly, so every default here is the value the
+     * pre-parameterization code hardcoded.
+     *
+     * filterOrderTypeServerSide is deliberately keyed on whether the caller ASKED for an order type,
+     * not on the effective value: the shipped sales-order path never sent orderTypeId as a query
+     * parameter and must keep not sending it, so its request URLs stay byte-identical.
+     */
+    static Map<String, Object> normalizeExtractOptions(Map rawOptions) {
+        Map raw = rawOptions ?: [:]
+        String requestedOrderTypeId = normalize(raw.get("orderTypeId"))
+        String orderTypeId = requestedOrderTypeId ?: SALES_ORDER_TYPE_ID
+        String windowFieldName = normalize(raw.get("windowFieldName")) ?: DEFAULT_WINDOW_FIELD_NAME
+
+        Object rawStatusIds = raw.get("orderStatusIds")
+        Collection statusSource = rawStatusIds instanceof Collection ? (Collection) rawStatusIds
+                : (normalize(rawStatusIds) ? normalize(rawStatusIds).tokenize(",") : [])
+        List<String> orderStatusIds = statusSource
+                .collect { Object value -> normalize(value) }
+                .findAll { String value -> value } as List<String>
+
+        // The EXCHANGE order-item-association scan exists to keep exchange sales orders out of the
+        // sales-order comparison. It is meaningless on any other order type, where it would only cost
+        // a full-document walk per record.
+        boolean applyExchangeExclusion = raw.containsKey("applyExchangeExclusion")
+                ? normalizeBool(raw.get("applyExchangeExclusion"))
+                : SALES_ORDER_TYPE_ID.equalsIgnoreCase(orderTypeId)
+
+        return [
+                orderTypeId              : orderTypeId,
+                windowFieldName          : windowFieldName,
+                orderStatusIds           : orderStatusIds,
+                applyExchangeExclusion   : applyExchangeExclusion,
+                filterOrderTypeServerSide: requestedOrderTypeId != null,
+        ]
+    }
+
+    protected static boolean isRequestedOrderType(Object record, String orderTypeId) {
         if (!(record instanceof Map)) return false
-        Object orderTypeId = ((Map) record).find { key, ignored ->
+        Object recordOrderTypeId = ((Map) record).find { key, ignored ->
             normalize(key) == ORDER_TYPE_ID_FIELD
         }?.value
-        return normalize(orderTypeId)?.equalsIgnoreCase(SALES_ORDER_TYPE_ID)
+        return normalize(recordOrderTypeId)?.equalsIgnoreCase(orderTypeId)
+    }
+
+    protected static boolean isSalesOrder(Object record) {
+        return isRequestedOrderType(record, SALES_ORDER_TYPE_ID)
     }
 
     protected static boolean containsExchangeOrderAssociation(Object value) {
