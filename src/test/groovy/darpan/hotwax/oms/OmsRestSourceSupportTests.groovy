@@ -713,6 +713,17 @@ class OmsRestSourceSupportTests {
     }
 
     @Test
+    void blankOrderTypeIdIsTreatedAsUnsetForServerSideFiltering() {
+        Map<String, Object> options = OmsRestSourceSupport.normalizeExtractOptions([orderTypeId: "   "])
+
+        assertEquals("SALES_ORDER", options.orderTypeId)
+        // Must not request server-side type filtering: the effective type only defaulted to
+        // SALES_ORDER, the caller never asked for it.
+        assertFalse(options.filterOrderTypeServerSide as boolean)
+        assertTrue(options.applyExchangeExclusion as boolean)
+    }
+
+    @Test
     void transferOrderFilterKeepsExchangeAssociatedRecords() {
         List records = [
                 [orderId: "TO-1", orderTypeId: "TRANSFER_ORDER",

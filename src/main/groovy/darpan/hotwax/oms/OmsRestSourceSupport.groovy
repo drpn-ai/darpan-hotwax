@@ -1452,7 +1452,11 @@ class OmsRestSourceSupport {
                 windowFieldName          : windowFieldName,
                 orderStatusIds           : orderStatusIds,
                 applyExchangeExclusion   : applyExchangeExclusion,
-                filterOrderTypeServerSide: requestedOrderTypeId != null,
+                // Truthiness, not a null check: normalize() returns "" (not null) for a blank or
+                // whitespace-only value, and the Elvis on orderTypeId above already treats "" as
+                // unset. A strict != null here would flag a blank orderTypeId for server-side
+                // filtering while the effective type silently defaulted to SALES_ORDER.
+                filterOrderTypeServerSide: requestedOrderTypeId as Boolean,
         ]
     }
 
