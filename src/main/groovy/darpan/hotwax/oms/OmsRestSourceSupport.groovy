@@ -158,15 +158,23 @@ class OmsRestSourceSupport {
 
         // A state-based extract defines its population by status alone, so both bounds may be absent.
         // A HALF-supplied window is still an error: it reads as a window and silently would not be one.
-        Long fromMillis = windowStart == null ? null : parseWindowMillis(windowStart, "windowStart", errors)
-        Long thruMillis = windowEnd == null ? null : parseWindowMillis(windowEnd, "windowEnd", errors)
-        if ((fromMillis == null) != (thruMillis == null)) {
+        //
+        // Branch on SUPPLIED-ness, never on the parse result. parseWindowMillis returns null for two
+        // different outcomes — "nothing was supplied" and "what was supplied would not parse" — so
+        // testing fromMillis == null would report a malformed timestamp as a missing one, and two
+        // malformed bounds as "no window supplied", telling the operator to add a status filter when
+        // the real problem is a bad date.
+        boolean fromSupplied = windowStart != null
+        boolean thruSupplied = windowEnd != null
+        Long fromMillis = fromSupplied ? parseWindowMillis(windowStart, "windowStart", errors) : null
+        Long thruMillis = thruSupplied ? parseWindowMillis(windowEnd, "windowEnd", errors) : null
+        if (fromSupplied != thruSupplied) {
             errors.add("windowStart and windowEnd must be supplied together, or both omitted.")
         }
         if (fromMillis != null && thruMillis != null && fromMillis > thruMillis) {
             errors.add("windowStart must be before or equal to windowEnd.")
         }
-        if (fromMillis == null && thruMillis == null && !(options.orderStatusIds as List)) {
+        if (!fromSupplied && !thruSupplied && !(options.orderStatusIds as List)) {
             errors.add("An extract with no date window must supply at least one order status.")
         }
 
@@ -185,18 +193,9 @@ class OmsRestSourceSupport {
         }
 
         String endpointUrl = null
-        // Mirrors exactly what buildOrdersUrl will put on the wire: the configured window field
-        // name, the window bounds (only when present), and orderTypeId/statusId only when the
-        // request actually carries them — never a hardcoded guess at what was asked for.
-        Map<String, Object> metadataQueryParams = [:]
-        if (fromMillis != null) metadataQueryParams.put("${options.windowFieldName}_from".toString(), fromMillis)
-        if (thruMillis != null) metadataQueryParams.put("${options.windowFieldName}_thru".toString(), thruMillis)
-        if (options.filterOrderTypeServerSide as boolean) {
-            metadataQueryParams.put(ORDER_TYPE_ID_FIELD, options.orderTypeId)
-        }
-        if (options.orderStatusIds as List) {
-            metadataQueryParams.put(ORDER_STATUS_ID_FIELD, ((List) options.orderStatusIds).join(","))
-        }
+        // Same derivation buildOrdersUrl uses, so the reported query cannot drift from the one
+        // actually issued (extraQueryParams — pagination — are request-shape only, not reported here).
+        Map<String, Object> metadataQueryParams = buildOrdersQueryParams(options, fromMillis, thruMillis)
         Map<String, Object> requestMetadata = [
                 method     : "GET",
                 baseUrl    : sanitizeBaseUrl(baseUrl),
@@ -513,11 +512,9 @@ class OmsRestSourceSupport {
         return "${prefix}-${fromToken}-${thruToken}.json"
     }
 
+    // Both call sites (extractOrdersInternal) are supplied-guarded — they only call this when the
+    // caller passed a non-null windowStart/windowEnd — so rawValue is never null here.
     protected static Long parseWindowMillis(Object rawValue, String label, List<String> errors) {
-        if (rawValue == null) {
-            errors.add("${label} is required.")
-            return null
-        }
         if (rawValue instanceof Number) return ((Number) rawValue).longValue()
         if (rawValue instanceof Timestamp) return ((Timestamp) rawValue).time
         if (rawValue instanceof Date) return ((Date) rawValue).time
@@ -557,6 +554,17 @@ class OmsRestSourceSupport {
                                            Map<String, Object> extractOptions = null) {
         Map<String, Object> options = normalizeExtractOptions(extractOptions)
         String separator = endpointUrl.contains("?") ? "&" : "?"
+        Map<String, Object> queryParams = buildOrdersQueryParams(options, fromMillis, thruMillis)
+
+        queryParams.putAll(extraQueryParams ?: [:])
+        return "${endpointUrl}${separator}${queryParams.collect { key, value -> "${encodeQueryComponent(key)}=${encodeQueryComponent(value)}" }.join("&")}"
+    }
+
+    /** The reconciliation-defined query parameters for an orders request, in wire order. Shared by
+     *  buildOrdersUrl and by the request metadata so the reported query cannot drift from the issued
+     *  one. Caller-supplied extraQueryParams (pagination) are appended by buildOrdersUrl, not here. */
+    protected static Map<String, Object> buildOrdersQueryParams(Map<String, Object> options,
+                                                                Long fromMillis, Long thruMillis) {
         Map<String, Object> queryParams = new LinkedHashMap<>()
 
         // The window is optional: a state-based extract defines its population by status alone.
@@ -578,8 +586,7 @@ class OmsRestSourceSupport {
             queryParams.put("${ORDER_STATUS_ID_FIELD}_op".toString(), "in")
         }
 
-        queryParams.putAll(extraQueryParams ?: [:])
-        return "${endpointUrl}${separator}${queryParams.collect { key, value -> "${encodeQueryComponent(key)}=${encodeQueryComponent(value)}" }.join("&")}"
+        return queryParams
     }
 
     protected static String buildOrdersEndpointUrl(String baseUrl, String ordersPath) {

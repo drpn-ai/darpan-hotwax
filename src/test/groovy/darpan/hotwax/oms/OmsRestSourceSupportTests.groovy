@@ -500,9 +500,29 @@ class OmsRestSourceSupportTests {
         assertTrue(reversed.errors.any { it.contains("windowStart must be before or equal to windowEnd.") }, reversed.errors.toString())
         assertNull(reversed.outputText)
 
+        // A malformed-but-SUPPLIED windowStart, paired with a valid windowEnd, must report only the
+        // parse error — not also the "supplied together" message. Both are non-null, so parsing them
+        // must be driven by whether a value was supplied, never by whether parseWindowMillis's return
+        // value happens to be null (which it also is for "unparseable").
         Map overflow = OmsRestSourceSupport.extractOrders(baseConfig(), "99999999999999999999999999", "2026-05-01T00:00:00Z")
         assertTrue(overflow.errors.any { it.contains("must be a Timestamp, Date, ISO-8601 value, or epoch milliseconds.") }, overflow.errors.toString())
+        assertFalse(overflow.errors.any { it.contains("windowStart and windowEnd must be supplied together, or both omitted.") },
+                overflow.errors.toString())
         assertNull(overflow.outputText)
+    }
+
+    @Test
+    void bothWindowBoundsMalformedReportsBothParseErrorsNotANoWindowError() {
+        // Two malformed (but supplied) bounds must not be mistaken for two absent bounds — that
+        // would spuriously tell the operator to add a status filter when the real problem is a pair
+        // of bad timestamps.
+        Map result = OmsRestSourceSupport.extractOrders(baseConfig(), "not-a-date", "also-not-a-date")
+
+        assertEquals(2, result.errors.count { it.contains("must be a Timestamp, Date, ISO-8601 value, or epoch milliseconds.") },
+                result.errors.toString())
+        assertFalse(result.errors.any { it.contains("An extract with no date window must supply at least one order status.") },
+                result.errors.toString())
+        assertNull(result.outputText)
     }
 
     @Test
@@ -536,8 +556,27 @@ class OmsRestSourceSupportTests {
         assertEquals(1, result.recordCount)
         assertTrue(requestedUrls.first().contains("orderTypeId=TRANSFER_ORDER"))
         assertTrue(requestedUrls.first().contains("statusId=ORDER_APPROVED"))
-        assertEquals("TRANSFER_ORDER",
-                ((Map) ((Map) result.requestMetadata).queryParams).orderTypeId)
+        Map queryParams = (Map) ((Map) result.requestMetadata).queryParams
+        assertEquals("TRANSFER_ORDER", queryParams.orderTypeId)
+        // Metadata must report the query actually issued — buildOrdersUrl sends statusId_op=in
+        // alongside statusId, and the shared derivation (buildOrdersQueryParams) means metadata
+        // can no longer silently drift from that by omitting it.
+        assertEquals("ORDER_APPROVED", queryParams.statusId)
+        assertEquals("in", queryParams.statusId_op)
+    }
+
+    @Test
+    void defaultSalesOrderExtractReportsOrderDateWindowKeysInMetadata() {
+        // Pins the sales-order metadata shape through the buildOrdersQueryParams extraction: the
+        // default windowFieldName is "orderDate", so absent any extractOptions, metadata keys stay
+        // orderDate_from/orderDate_thru exactly as before the shared-derivation refactor.
+        OmsRestSourceSupport.setHttpClient { Map ignored -> [statusCode: 200, body: '{"orders":[]}'] }
+
+        Map result = OmsRestSourceSupport.extractOrders(baseConfig(), 1000L, 2000L)
+
+        Map queryParams = (Map) ((Map) result.requestMetadata).queryParams
+        assertEquals(1000L, queryParams.orderDate_from)
+        assertEquals(2000L, queryParams.orderDate_thru)
     }
 
     @Test
