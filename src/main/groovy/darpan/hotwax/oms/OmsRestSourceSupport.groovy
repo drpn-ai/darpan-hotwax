@@ -34,6 +34,7 @@ class OmsRestSourceSupport {
     static final String EXCHANGE_ORDER_ASSOC_TYPE_ID = "EXCHANGE"
     static final int EXCHANGE_MANIFEST_MAX_ENTRIES = 500
     static final String ORDER_TYPE_ID_FIELD = "orderTypeId"
+    static final String ORDER_STATUS_ID_FIELD = "statusId"
     static final String ORDER_ITEM_ASSOC_TYPE_ID_FIELD = "orderItemAssocTypeId"
     static final int DEFAULT_ORDERS_PAGE_SIZE = 500
     static final int MAX_ORDERS_PAGE_COUNT = 20000
@@ -521,11 +522,31 @@ class OmsRestSourceSupport {
     }
 
     protected static String buildOrdersUrl(String endpointUrl, Long fromMillis, Long thruMillis,
-                                           Map<String, Object> extraQueryParams) {
+                                           Map<String, Object> extraQueryParams,
+                                           Map<String, Object> extractOptions = null) {
+        Map<String, Object> options = normalizeExtractOptions(extractOptions)
         String separator = endpointUrl.contains("?") ? "&" : "?"
         Map<String, Object> queryParams = new LinkedHashMap<>()
-        queryParams.orderDate_from = fromMillis
-        queryParams.orderDate_thru = thruMillis
+
+        // The window is optional: a state-based extract defines its population by status alone.
+        String windowFieldName = (String) options.windowFieldName
+        if (fromMillis != null) queryParams.put("${windowFieldName}_from".toString(), fromMillis)
+        if (thruMillis != null) queryParams.put("${windowFieldName}_thru".toString(), thruMillis)
+
+        // Only sent when the caller explicitly asked for a type, so the shipped sales-order path
+        // keeps producing exactly the URLs it produced before.
+        if (options.filterOrderTypeServerSide as boolean) {
+            queryParams.put(ORDER_TYPE_ID_FIELD, options.orderTypeId)
+        }
+
+        // Moqui's searchFormMap turns a comma-joined value plus <field>_op=in into a SQL IN
+        // (EntityFindBase.searchFormMap). Server-side status filtering costs the OMS nothing extra.
+        List<String> orderStatusIds = (List<String>) options.orderStatusIds
+        if (orderStatusIds) {
+            queryParams.put(ORDER_STATUS_ID_FIELD, orderStatusIds.join(","))
+            queryParams.put("${ORDER_STATUS_ID_FIELD}_op".toString(), "in")
+        }
+
         queryParams.putAll(extraQueryParams ?: [:])
         return "${endpointUrl}${separator}${queryParams.collect { key, value -> "${encodeQueryComponent(key)}=${encodeQueryComponent(value)}" }.join("&")}"
     }
@@ -1456,7 +1477,10 @@ class OmsRestSourceSupport {
                 // whitespace-only value, and the Elvis on orderTypeId above already treats "" as
                 // unset. A strict != null here would flag a blank orderTypeId for server-side
                 // filtering while the effective type silently defaulted to SALES_ORDER.
-                filterOrderTypeServerSide: requestedOrderTypeId as Boolean,
+                // `!!` and not `as Boolean`: the reference-type cast passes null through, so when no
+                // orderTypeId key is supplied at all this would store a literal null instead of the
+                // false the contract promises.
+                filterOrderTypeServerSide: !!requestedOrderTypeId,
         ]
     }
 

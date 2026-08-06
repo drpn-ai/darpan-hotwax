@@ -240,6 +240,49 @@ class OmsRestSourceSupportTests {
     }
 
     @Test
+    void ordersUrlIsUnchangedForSalesOrders() {
+        String url = OmsRestSourceSupport.buildOrdersUrl(
+                "https://oms.example.com/rest/s1/oms/orders", 1000L, 2000L, [pageIndex: 0, pageSize: 500])
+
+        assertEquals("https://oms.example.com/rest/s1/oms/orders" +
+                "?orderDate_from=1000&orderDate_thru=2000&pageIndex=0&pageSize=500", url)
+    }
+
+    @Test
+    void transferOrderUrlCarriesTypeStatusAndConfiguredWindowField() {
+        String url = OmsRestSourceSupport.buildOrdersUrl(
+                "https://oms.example.com/rest/s1/oms/orders", 1000L, 2000L, [pageIndex: 0],
+                [orderTypeId: "TRANSFER_ORDER", windowFieldName: "lastUpdatedTxStamp",
+                 orderStatusIds: ["ORDER_CREATED", "ORDER_APPROVED"]])
+
+        assertEquals("https://oms.example.com/rest/s1/oms/orders" +
+                "?lastUpdatedTxStamp_from=1000&lastUpdatedTxStamp_thru=2000" +
+                "&orderTypeId=TRANSFER_ORDER" +
+                "&statusId=ORDER_CREATED%2CORDER_APPROVED&statusId_op=in" +
+                "&pageIndex=0", url)
+    }
+
+    @Test
+    void ordersUrlOmitsWindowBoundsWhenAbsent() {
+        String url = OmsRestSourceSupport.buildOrdersUrl(
+                "https://oms.example.com/rest/s1/oms/orders", null, null, [pageIndex: 0],
+                [orderTypeId: "TRANSFER_ORDER", orderStatusIds: ["ORDER_CREATED"]])
+
+        assertEquals("https://oms.example.com/rest/s1/oms/orders" +
+                "?orderTypeId=TRANSFER_ORDER&statusId=ORDER_CREATED&statusId_op=in&pageIndex=0", url)
+    }
+
+    @Test
+    void ordersUrlOmitsStatusWhenNoStatusesRequested() {
+        String url = OmsRestSourceSupport.buildOrdersUrl(
+                "https://oms.example.com/rest/s1/oms/orders", 1000L, 2000L, [:],
+                [orderTypeId: "TRANSFER_ORDER"])
+
+        assertEquals("https://oms.example.com/rest/s1/oms/orders" +
+                "?orderDate_from=1000&orderDate_thru=2000&orderTypeId=TRANSFER_ORDER", url)
+    }
+
+    @Test
     void retriesSwaggerRootOrdersRouteWithTrailingSlashAfter404() {
         List<String> requestedUrls = []
         OmsRestSourceSupport.setHttpClient { Map request ->
@@ -695,6 +738,9 @@ class OmsRestSourceSupportTests {
         assertEquals([], options.orderStatusIds)
         assertTrue(options.applyExchangeExclusion as boolean)
         assertFalse(options.filterOrderTypeServerSide as boolean)
+        // Proves the stored value is the boolean false, not null: `as boolean` coercion above would
+        // pass a null through silently, which is exactly the bug this assertion guards against.
+        assertEquals(false, options.filterOrderTypeServerSide)
     }
 
     @Test
