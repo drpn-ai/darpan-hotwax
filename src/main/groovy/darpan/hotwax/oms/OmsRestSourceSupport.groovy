@@ -95,12 +95,13 @@ class OmsRestSourceSupport {
 
     static Map<String, Object> extractOrders(Object rawConfig, Object windowStart, Object windowEnd,
                                              List keepRecordFields = null, Closure pageProgressListener = null,
-                                             List excludeFilters = null) {
+                                             List excludeFilters = null, Map extractOptions = null) {
         // In-memory variant kept for tests and small interactive windows. The automation path must
         // use extractOrdersToFile so month-scale windows never materialize whole in heap.
         StringWriter buffer = new StringWriter()
         Map<String, Object> result = extractOrdersInternal(rawConfig, windowStart, windowEnd,
-                new OrdersDocumentSink({ -> buffer }), keepRecordFields, pageProgressListener, excludeFilters)
+                new OrdersDocumentSink({ -> buffer }), keepRecordFields, pageProgressListener, excludeFilters,
+                extractOptions)
         if (!(result.errors as List)) {
             String outputText = buffer.toString()
             result.outputText = outputText
@@ -113,7 +114,7 @@ class OmsRestSourceSupport {
     static Map<String, Object> extractOrdersToFile(Object rawConfig, Object windowStart, Object windowEnd,
                                                    File targetFile, List keepRecordFields = null,
                                                    Closure pageProgressListener = null,
-                                                   List excludeFilters = null) {
+                                                   List excludeFilters = null, Map extractOptions = null) {
         OrdersDocumentSink sink = new OrdersDocumentSink({ ->
             targetFile.getParentFile()?.mkdirs()
             return new BufferedWriter(new OutputStreamWriter(new FileOutputStream(targetFile), StandardCharsets.UTF_8))
@@ -121,7 +122,7 @@ class OmsRestSourceSupport {
         Map<String, Object> result
         try {
             result = extractOrdersInternal(rawConfig, windowStart, windowEnd, sink, keepRecordFields,
-                    pageProgressListener, excludeFilters)
+                    pageProgressListener, excludeFilters, extractOptions)
         } catch (Exception e) {
             sink.abort()
             targetFile.delete()
@@ -138,8 +139,9 @@ class OmsRestSourceSupport {
     private static Map<String, Object> extractOrdersInternal(Object rawConfig, Object windowStart, Object windowEnd,
                                                              OrdersDocumentSink sink, List keepRecordFields = null,
                                                              Closure pageProgressListener = null,
-                                                             List excludeFilters = null) {
+                                                             List excludeFilters = null, Map extractOptions = null) {
         Set<String> keepFieldSet = normalizeKeepFields(keepRecordFields)
+        Map<String, Object> options = normalizeExtractOptions(extractOptions)
         Map config = toPlainMap(rawConfig)
         // Synchronized: page-preparation runs on fetch-pool worker threads under concurrency.
         List<String> warnings = Collections.synchronizedList(new ArrayList<String>())
@@ -154,10 +156,18 @@ class OmsRestSourceSupport {
             errors.add(e.message)
         }
 
-        Long fromMillis = parseWindowMillis(windowStart, "windowStart", errors)
-        Long thruMillis = parseWindowMillis(windowEnd, "windowEnd", errors)
+        // A state-based extract defines its population by status alone, so both bounds may be absent.
+        // A HALF-supplied window is still an error: it reads as a window and silently would not be one.
+        Long fromMillis = windowStart == null ? null : parseWindowMillis(windowStart, "windowStart", errors)
+        Long thruMillis = windowEnd == null ? null : parseWindowMillis(windowEnd, "windowEnd", errors)
+        if ((fromMillis == null) != (thruMillis == null)) {
+            errors.add("windowStart and windowEnd must be supplied together, or both omitted.")
+        }
         if (fromMillis != null && thruMillis != null && fromMillis > thruMillis) {
             errors.add("windowStart must be before or equal to windowEnd.")
+        }
+        if (fromMillis == null && thruMillis == null && !(options.orderStatusIds as List)) {
+            errors.add("An extract with no date window must supply at least one order status.")
         }
 
         String baseUrl = normalize(config?.baseUrl)
@@ -175,14 +185,23 @@ class OmsRestSourceSupport {
         }
 
         String endpointUrl = null
+        // Mirrors exactly what buildOrdersUrl will put on the wire: the configured window field
+        // name, the window bounds (only when present), and orderTypeId/statusId only when the
+        // request actually carries them — never a hardcoded guess at what was asked for.
+        Map<String, Object> metadataQueryParams = [:]
+        if (fromMillis != null) metadataQueryParams.put("${options.windowFieldName}_from".toString(), fromMillis)
+        if (thruMillis != null) metadataQueryParams.put("${options.windowFieldName}_thru".toString(), thruMillis)
+        if (options.filterOrderTypeServerSide as boolean) {
+            metadataQueryParams.put(ORDER_TYPE_ID_FIELD, options.orderTypeId)
+        }
+        if (options.orderStatusIds as List) {
+            metadataQueryParams.put(ORDER_STATUS_ID_FIELD, ((List) options.orderStatusIds).join(","))
+        }
         Map<String, Object> requestMetadata = [
                 method     : "GET",
                 baseUrl    : sanitizeBaseUrl(baseUrl),
                 ordersPath : normalizeOrdersPath(ordersPath),
-                queryParams: [
-                        orderDate_from: fromMillis,
-                        orderDate_thru: thruMillis,
-                ],
+                queryParams: metadataQueryParams,
                 authType   : normalize(config?.authType)?.toUpperCase() ?: "NONE",
                 timeZone   : timeZone,
                 headerNames: safeHeaderNames(headers),
@@ -207,7 +226,9 @@ class OmsRestSourceSupport {
                 errors         : errors,
                 fromMillis     : fromMillis,
                 thruMillis     : thruMillis,
-                fileName       : buildDefaultFileName(fromMillis, thruMillis),
+                fileName       : buildDefaultFileName(fromMillis, thruMillis,
+                        SALES_ORDER_TYPE_ID.equalsIgnoreCase((String) options.orderTypeId)
+                                ? null : "oms-transfer-orders"),
         ]
         if (errors) return baseResult
 
@@ -249,8 +270,17 @@ class OmsRestSourceSupport {
 
         Map extraction
         try {
+            // extractOptions, not options: buildOrdersUrl and filterComparableOrderRecords each
+            // normalize their own extractOptions argument internally (see their own docs), and
+            // normalizeExtractOptions is not idempotent on filterOrderTypeServerSide — it is
+            // recomputed from whether orderTypeId is present, and a normalized map always carries
+            // one (defaulted to SALES_ORDER). Feeding the already-normalized options map back in
+            // would flip filterOrderTypeServerSide to true for every plain sales-order extract and
+            // put a spurious orderTypeId=SALES_ORDER on the wire — breaking the byte-identical
+            // sales-order URL contract. The raw, possibly-null extractOptions carries the same
+            // information and normalizes correctly exactly once at each leaf.
             extraction = extractAllOrderPages(endpointUrl, fromMillis, thruMillis, headers, config, warnings,
-                    pageConsumer, keepFieldSet, excludeRules)
+                    pageConsumer, keepFieldSet, excludeRules, extractOptions)
         } catch (IOException e) {
             sink.abort()
             errors.add("Failed writing OMS extract output: ${e.message}".toString())
@@ -476,10 +506,11 @@ class OmsRestSourceSupport {
         return fileName.toLowerCase().endsWith(".json") ? fileName : "${fileName}.json"
     }
 
-    static String buildDefaultFileName(Long fromMillis, Long thruMillis) {
+    static String buildDefaultFileName(Long fromMillis, Long thruMillis, String filePrefix = null) {
         String fromToken = fromMillis != null ? fromMillis.toString() : "start"
         String thruToken = thruMillis != null ? thruMillis.toString() : "end"
-        return "${DEFAULT_FILE_NAME_PREFIX}-${fromToken}-${thruToken}.json"
+        String prefix = normalize(filePrefix) ?: DEFAULT_FILE_NAME_PREFIX
+        return "${prefix}-${fromToken}-${thruToken}.json"
     }
 
     protected static Long parseWindowMillis(Object rawValue, String label, List<String> errors) {
@@ -863,14 +894,16 @@ class OmsRestSourceSupport {
                                                               Map<String, String> headers, Map config,
                                                               List<String> warnings, Closure pageConsumer,
                                                               Set<String> keepFieldSet = null,
-                                                              List<Map<String, Object>> excludeRules = null) {
+                                                              List<Map<String, Object>> excludeRules = null,
+                                                              Map<String, Object> extractOptions = null) {
         int pageSize = resolveOrdersPageSize(config)
         int maxPageCount = Math.max(1, normalizeInt(config?.maxOrdersPageCount, MAX_ORDERS_PAGE_COUNT))
         int fetchConcurrency = resolveOrdersFetchConcurrency(config)
 
         for (Map<String, Object> strategy : PAGINATION_STRATEGIES) {
             Map<String, Object> firstPage = prepareOrdersPage(endpointUrl, fromMillis, thruMillis,
-                    pageQueryParams(strategy, 0, pageSize), headers, config, warnings, keepFieldSet, excludeRules)
+                    pageQueryParams(strategy, 0, pageSize), headers, config, warnings, keepFieldSet, excludeRules,
+                    extractOptions)
             if (!firstPage.success) {
                 if (isRecoverablePaginationFailure(firstPage.statusCode)) continue
                 return failedPageResult(firstPage)
@@ -884,7 +917,8 @@ class OmsRestSourceSupport {
             }
 
             Map<String, Object> secondPage = prepareOrdersPage(endpointUrl, fromMillis, thruMillis,
-                    pageQueryParams(strategy, 1, pageSize), headers, config, warnings, keepFieldSet, excludeRules)
+                    pageQueryParams(strategy, 1, pageSize), headers, config, warnings, keepFieldSet, excludeRules,
+                    extractOptions)
             if (!secondPage.success) {
                 if (isRecoverablePaginationFailure(secondPage.statusCode)) continue
                 return failedPageResult(secondPage, pageMetas)
@@ -924,7 +958,7 @@ class OmsRestSourceSupport {
                         inFlightPages.put(requestIndex, fetchPool.submit({ ->
                             prepareOrdersPage(endpointUrl, fromMillis, thruMillis,
                                     pageQueryParams(strategy, requestIndex, pageSize), headers, config, warnings,
-                                    keepFieldSet, excludeRules)
+                                    keepFieldSet, excludeRules, extractOptions)
                         } as Callable<Map<String, Object>>))
                     }
 
@@ -932,7 +966,7 @@ class OmsRestSourceSupport {
                             inFlightPages.remove(pageIndex).get() :
                             prepareOrdersPage(endpointUrl, fromMillis, thruMillis,
                                     pageQueryParams(strategy, pageIndex, pageSize), headers, config, warnings,
-                                    keepFieldSet, excludeRules)
+                                    keepFieldSet, excludeRules, extractOptions)
                     pageMetas.add(pageMeta(page))
                     if (!page.success) return failedPageResult(page, pageMetas)
 
@@ -967,7 +1001,7 @@ class OmsRestSourceSupport {
             }
         }
 
-        Map<String, Object> unpaginatedPage = prepareOrdersPage(endpointUrl, fromMillis, thruMillis, [:], headers, config, warnings, keepFieldSet, excludeRules)
+        Map<String, Object> unpaginatedPage = prepareOrdersPage(endpointUrl, fromMillis, thruMillis, [:], headers, config, warnings, keepFieldSet, excludeRules, extractOptions)
         if (!unpaginatedPage.success) return failedPageResult(unpaginatedPage)
         warnings.add("OMS REST pagination parameters did not advance; extracted the first unpaginated response only.")
         List<Map<String, Object>> unpaginatedMetas = [pageMeta(unpaginatedPage)]
@@ -987,11 +1021,13 @@ class OmsRestSourceSupport {
                                                            Map<String, Object> pageParams,
                                                            Map<String, String> headers, Map config,
                                                            List<String> warnings, Set<String> keepFieldSet = null,
-                                                           List<Map<String, Object>> excludeRules = null) {
-        Map<String, Object> page = fetchOrdersPage(endpointUrl, fromMillis, thruMillis, pageParams, headers, config, warnings)
+                                                           List<Map<String, Object>> excludeRules = null,
+                                                           Map<String, Object> extractOptions = null) {
+        Map<String, Object> page = fetchOrdersPage(endpointUrl, fromMillis, thruMillis, pageParams, headers, config,
+                warnings, extractOptions)
         if (!page.success) return page
         List rawRecords = page.records ?: []
-        Map<String, Object> pageFilter = filterComparableOrderRecords(rawRecords, excludeRules)
+        Map<String, Object> pageFilter = filterComparableOrderRecords(rawRecords, excludeRules, extractOptions)
         List filtered = (List) pageFilter.records
         // Projection happens after filtering (the EXCHANGE scan needs the full record) and before
         // serialization, so a trimmed extract writes ~90x less than the full order documents.
@@ -1061,8 +1097,9 @@ class OmsRestSourceSupport {
     protected static Map<String, Object> fetchOrdersPage(String endpointUrl, Long fromMillis, Long thruMillis,
                                                          Map<String, Object> pageParams,
                                                          Map<String, String> headers, Map config,
-                                                         List<String> warnings) {
-        String requestUrl = buildOrdersUrl(endpointUrl, fromMillis, thruMillis, pageParams)
+                                                         List<String> warnings,
+                                                         Map<String, Object> extractOptions = null) {
+        String requestUrl = buildOrdersUrl(endpointUrl, fromMillis, thruMillis, pageParams, extractOptions)
         Map response
         boolean retriedWithTrailingSlash = false
         boolean retriedWithoutCompression = false

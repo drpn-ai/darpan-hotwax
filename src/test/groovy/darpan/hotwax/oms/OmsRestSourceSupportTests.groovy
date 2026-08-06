@@ -489,8 +489,11 @@ class OmsRestSourceSupportTests {
 
     @Test
     void returnsValidationErrorsForBadWindows() {
+        // A HALF-supplied window (one bound null, the other not) is still an error: the window is
+        // now optional as a whole, but a lone bound reads as a window and silently would not be one.
         Map missing = OmsRestSourceSupport.extractOrders(baseConfig(), null, "2026-05-01T00:00:00Z")
-        assertTrue(missing.errors.any { it.contains("windowStart is required.") }, missing.errors.toString())
+        assertTrue(missing.errors.any { it.contains("windowStart and windowEnd must be supplied together, or both omitted.") },
+                missing.errors.toString())
         assertNull(missing.outputText)
 
         Map reversed = OmsRestSourceSupport.extractOrders(baseConfig(), "2026-05-02T00:00:00Z", "2026-05-01T00:00:00Z")
@@ -500,6 +503,97 @@ class OmsRestSourceSupportTests {
         Map overflow = OmsRestSourceSupport.extractOrders(baseConfig(), "99999999999999999999999999", "2026-05-01T00:00:00Z")
         assertTrue(overflow.errors.any { it.contains("must be a Timestamp, Date, ISO-8601 value, or epoch milliseconds.") }, overflow.errors.toString())
         assertNull(overflow.outputText)
+    }
+
+    @Test
+    void bothWindowBoundsOmittedWithNoStatusRequiresAtLeastOneStatus() {
+        // Neither a window nor a status means "every order in the OMS" — a request no caller wants
+        // and one that would page until the safety ceiling, so this combination is rejected outright.
+        Map result = OmsRestSourceSupport.extractOrders(baseConfig(), null, null, null, null, null,
+                [orderTypeId: "TRANSFER_ORDER"])
+
+        assertTrue(result.errors.any { it.contains("An extract with no date window must supply at least one order status.") },
+                result.errors.toString())
+        assertNull(result.outputText)
+    }
+
+    @Test
+    void transferOrderExtractRequestsTypeFilteredUrlAndReportsIt() {
+        List<String> requestedUrls = []
+        OmsRestSourceSupport.setHttpClient({ Map request ->
+            requestedUrls.add(request.url as String)
+            return [statusCode: 200, body: JsonOutput.toJson([
+                    [orderId: "TO-1", orderTypeId: "TRANSFER_ORDER", statusId: "ORDER_APPROVED"],
+            ])]
+        })
+
+        Map<String, Object> result = OmsRestSourceSupport.extractOrders(
+                [omsRestSourceConfigId: "GORJANA_OMS", baseUrl: "https://oms.example.com"],
+                1000L, 2000L, null, null, null,
+                [orderTypeId: "TRANSFER_ORDER", orderStatusIds: ["ORDER_APPROVED"]])
+
+        assertEquals([], result.errors)
+        assertEquals(1, result.recordCount)
+        assertTrue(requestedUrls.first().contains("orderTypeId=TRANSFER_ORDER"))
+        assertTrue(requestedUrls.first().contains("statusId=ORDER_APPROVED"))
+        assertEquals("TRANSFER_ORDER",
+                ((Map) ((Map) result.requestMetadata).queryParams).orderTypeId)
+    }
+
+    @Test
+    void statusOnlyExtractSendsNoWindowBounds() {
+        List<String> requestedUrls = []
+        OmsRestSourceSupport.setHttpClient({ Map request ->
+            requestedUrls.add(request.url as String)
+            return [statusCode: 200, body: JsonOutput.toJson([
+                    [orderId: "TO-1", orderTypeId: "TRANSFER_ORDER", statusId: "ORDER_APPROVED"],
+            ])]
+        })
+
+        Map<String, Object> result = OmsRestSourceSupport.extractOrders(
+                [omsRestSourceConfigId: "GORJANA_OMS", baseUrl: "https://oms.example.com"],
+                null, null, null, null, null,
+                [orderTypeId: "TRANSFER_ORDER", orderStatusIds: ["ORDER_APPROVED"]])
+
+        assertEquals([], result.errors)
+        assertEquals(1, result.recordCount)
+        assertFalse(requestedUrls.first().contains("_from="))
+        assertFalse(requestedUrls.first().contains("_thru="))
+    }
+
+    @Test
+    void defaultSalesOrderExtractNeverSendsOrderTypeIdOnTheWire() {
+        // Regression guard: normalizeExtractOptions is NOT idempotent on filterOrderTypeServerSide
+        // (it is re-derived from whether orderTypeId is present, and a normalized options map
+        // always carries one, defaulted to SALES_ORDER). extractOrdersInternal must therefore thread
+        // the raw, possibly-null extractOptions down to buildOrdersUrl/filterComparableOrderRecords —
+        // not its own already-normalized copy — or every plain sales-order extract would start
+        // sending orderTypeId=SALES_ORDER on the wire and in metadata, breaking the byte-identical
+        // sales-order URL contract this test protects.
+        List<String> requestedUrls = []
+        OmsRestSourceSupport.setHttpClient { Map request ->
+            requestedUrls.add(request.url as String)
+            return [statusCode: 200, body: '{"orders":[]}']
+        }
+
+        Map result = OmsRestSourceSupport.extractOrders(baseConfig(), "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z")
+
+        assertTrue(result.errors.isEmpty(), result.errors.toString())
+        assertFalse(requestedUrls.first().contains("orderTypeId="), requestedUrls.first())
+        assertFalse(((Map) result.requestMetadata).queryParams.toString().contains("orderTypeId"),
+                result.requestMetadata.toString())
+    }
+
+    @Test
+    void defaultFileNameCarriesAnOptionsAwarePrefix() {
+        OmsRestSourceSupport.setHttpClient { Map ignored -> [statusCode: 200, body: '{"orders":[]}'] }
+
+        Map salesOrderResult = OmsRestSourceSupport.extractOrders(baseConfig(), 1000L, 2000L)
+        assertEquals("oms-orders-1000-2000.json", salesOrderResult.fileName)
+
+        Map transferOrderResult = OmsRestSourceSupport.extractOrders(baseConfig(), 1000L, 2000L, null, null, null,
+                [orderTypeId: "TRANSFER_ORDER"])
+        assertEquals("oms-transfer-orders-1000-2000.json", transferOrderResult.fileName)
     }
 
     @Test
@@ -603,6 +697,14 @@ class OmsRestSourceSupportTests {
         assertEquals(500, ((List) result.exchangeManifest).size())
         assertTrue(result.exchangeManifestTruncated as boolean)
         assertTrue(result.requestMetadata.filters.exchangeManifestTruncated as boolean)
+    }
+
+    @Test
+    void buildDefaultFileNameUsesTheGivenPrefixWhenSupplied() {
+        assertEquals("oms-orders-1-2.json", OmsRestSourceSupport.buildDefaultFileName(1L, 2L))
+        assertEquals("oms-transfer-orders-1-2.json", OmsRestSourceSupport.buildDefaultFileName(1L, 2L, "oms-transfer-orders"))
+        // A blank prefix is treated as absent, same as every other normalize()-backed default here.
+        assertEquals("oms-orders-start-end.json", OmsRestSourceSupport.buildDefaultFileName(null, null, "   "))
     }
 
     @Test
