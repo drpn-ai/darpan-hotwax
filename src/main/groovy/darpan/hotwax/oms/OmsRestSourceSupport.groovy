@@ -38,6 +38,11 @@ class OmsRestSourceSupport {
     static final String ORDER_ITEM_ASSOC_TYPE_ID_FIELD = "orderItemAssocTypeId"
     static final int DEFAULT_ORDERS_PAGE_SIZE = 500
     static final int MAX_ORDERS_PAGE_COUNT = 20000
+    // A status-defined population has no natural bound the way a date window does. This ceiling exists
+    // so a misconfigured status set cannot page indefinitely; breaching it FAILS the extract rather
+    // than truncating, because a short state extract is indistinguishable from records genuinely
+    // missing on this side.
+    static final int DEFAULT_STATE_EXTRACT_MAX_RECORDS = 50000
     // Default prefetch window after the pagination strategy commits. Two keeps one page in
     // flight while the previous is consumed — chosen for memory-constrained production hosts;
     // raise per config (ordersFetchConcurrency, capped at 4) where the box has headroom.
@@ -254,6 +259,15 @@ class OmsRestSourceSupport {
             if (filteredCount > 0) sink.writeSerializedPage((String) pageBundle.serializedRecords, filteredCount)
             extractedRecordCount += filteredCount
             consumedRawCount += (int) pageBundle.rawCount
+            // Windowed extracts are bounded by their window; only a window-less (state) extract needs
+            // this. Fail hard — never truncate. Branches on supplied-ness (not fromMillis/thruMillis
+            // nullness) for the same reason the window-required check above does: both signal "no
+            // window" identically once parsed, but only supplied-ness is unambiguous.
+            if (!fromSupplied && !thruSupplied && consumedRawCount > (options.maxRecords as int)) {
+                throw new IllegalStateException(
+                        "Status-only extract exceeded its maximum of ${options.maxRecords} records. " +
+                        "Narrow the status list or raise the limit; the extract was not truncated.")
+            }
             if (pageProgressListener != null) {
                 // Progress is advisory: a listener failure must never fail the extraction.
                 try {
@@ -284,6 +298,13 @@ class OmsRestSourceSupport {
             sink.abort()
             errors.add("Failed writing OMS extract output: ${e.message}".toString())
             return baseResult
+        } catch (IllegalStateException e) {
+            // Thrown by pageConsumer when a window-less (state) extract breaches its record ceiling.
+            // Caught here, once, so the service returns a clean error rather than an escaped
+            // exception — consistent with how the IOException case above is handled.
+            sink.abort()
+            errors.add(e.message)
+            return baseResult
         }
         requestMetadata.statusCode = extraction.statusCode
         requestMetadata.attemptCount = extraction.attemptCount ?: 0
@@ -298,8 +319,12 @@ class OmsRestSourceSupport {
             return baseResult
         }
 
+        Map<String, Object> stateExtractMetadata = (!fromSupplied && !thruSupplied) ? [
+                statusIds : new ArrayList<String>((List<String>) options.orderStatusIds),
+                maxRecords: options.maxRecords,
+        ] : null
         requestMetadata.filters = buildFilterMetadata(excludedNonSalesOrderCount, excludedExchangeOrderCount,
-                exchangeManifestTruncated, excludeRules, excludedByRuleCounts)
+                exchangeManifestTruncated, excludeRules, excludedByRuleCounts, stateExtractMetadata)
         Map documentMetadata = requestMetadata + [
                 sourceType            : "HOTWAX_OMS_REST_ORDERS",
                 omsRestSourceConfigId : normalize(config?.omsRestSourceConfigId),
@@ -1399,7 +1424,8 @@ class OmsRestSourceSupport {
                                                              int excludedExchangeOrderCount,
                                                              boolean exchangeManifestTruncated,
                                                              List<Map<String, Object>> excludeRules,
-                                                             Map<Integer, Integer> excludedByRuleCounts) {
+                                                             Map<Integer, Integer> excludedByRuleCounts,
+                                                             Map<String, Object> stateExtract = null) {
         Map<String, Object> filters = [
                 requiredOrderTypeId          : SALES_ORDER_TYPE_ID,
                 excludedNonSalesOrderCount   : excludedNonSalesOrderCount,
@@ -1420,6 +1446,9 @@ class OmsRestSourceSupport {
                 ]
             }
         }
+        // Absent rather than empty for a windowed extract, matching configuredExclusions above: a
+        // block that appeared for every extract would read as "this always applies".
+        if (stateExtract != null) filters.stateExtract = stateExtract
         return filters
     }
 
@@ -1517,6 +1546,7 @@ class OmsRestSourceSupport {
                 windowFieldName          : windowFieldName,
                 orderStatusIds           : orderStatusIds,
                 applyExchangeExclusion   : applyExchangeExclusion,
+                maxRecords               : normalizeInt(raw.get("maxRecords")) ?: DEFAULT_STATE_EXTRACT_MAX_RECORDS,
                 // Truthiness, not a null check: normalize() returns "" (not null) for a blank or
                 // whitespace-only value, and the Elvis on orderTypeId above already treats "" as
                 // unset. A strict != null here would flag a blank orderTypeId for server-side

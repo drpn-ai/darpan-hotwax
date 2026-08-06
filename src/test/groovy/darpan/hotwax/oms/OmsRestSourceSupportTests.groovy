@@ -601,6 +601,63 @@ class OmsRestSourceSupportTests {
     }
 
     @Test
+    void stateExtractFailsRatherThanTruncatingAtTheCeiling() {
+        // Every page is full (500 records) AND distinct per page index, so pagination never stops
+        // on its own: the repeated-page guard (sameOrderPageBundles) only halts on byte-identical
+        // pages, and a full page never shrinks. Only the ceiling can stop this extract — proving it
+        // fails loudly rather than quietly truncating at whatever page it happened to be on.
+        OmsRestSourceSupport.setHttpClient({ Map request ->
+            int pageIndex = queryInt(request.url as String, "pageIndex")
+            List page = (1..500).collect { int index ->
+                [orderId: "TO-${pageIndex}-${index}".toString(), orderTypeId: "TRANSFER_ORDER", statusId: "ORDER_APPROVED"]
+            }
+            return [statusCode: 200, body: JsonOutput.toJson(page)]
+        })
+
+        Map<String, Object> result = OmsRestSourceSupport.extractOrders(
+                [omsRestSourceConfigId: "GORJANA_OMS", baseUrl: "https://oms.example.com"],
+                null, null, null, null, null,
+                [orderTypeId: "TRANSFER_ORDER", orderStatusIds: ["ORDER_APPROVED"], maxRecords: 1000])
+
+        assertFalse((result.errors as List).isEmpty())
+        assertTrue((result.errors as List).first().toString().contains("1000"))
+        assertFalse(result.dataAvailable as boolean)
+    }
+
+    @Test
+    void stateExtractRecordsItsStatusSetInMetadata() {
+        OmsRestSourceSupport.setHttpClient({ Map request ->
+            return [statusCode: 200, body: JsonOutput.toJson([
+                    [orderId: "TO-1", orderTypeId: "TRANSFER_ORDER", statusId: "ORDER_APPROVED"],
+            ])]
+        })
+
+        Map<String, Object> result = OmsRestSourceSupport.extractOrders(
+                [omsRestSourceConfigId: "GORJANA_OMS", baseUrl: "https://oms.example.com"],
+                null, null, null, null, null,
+                [orderTypeId: "TRANSFER_ORDER", orderStatusIds: ["ORDER_APPROVED"]])
+
+        Map stateExtract = (Map) ((Map) ((Map) result.requestMetadata).filters).stateExtract
+        assertEquals(["ORDER_APPROVED"], stateExtract.statusIds)
+        assertEquals(50000, stateExtract.maxRecords)
+    }
+
+    @Test
+    void windowedExtractCarriesNoStateExtractMetadata() {
+        OmsRestSourceSupport.setHttpClient({ Map request ->
+            return [statusCode: 200, body: JsonOutput.toJson([
+                    [orderId: "SO-1", orderTypeId: "SALES_ORDER"],
+            ])]
+        })
+
+        Map<String, Object> result = OmsRestSourceSupport.extractOrders(
+                [omsRestSourceConfigId: "GORJANA_OMS", baseUrl: "https://oms.example.com"],
+                1000L, 2000L)
+
+        assertFalse(((Map) ((Map) result.requestMetadata).filters).containsKey("stateExtract"))
+    }
+
+    @Test
     void defaultSalesOrderExtractNeverSendsOrderTypeIdOnTheWire() {
         // Regression guard: normalizeExtractOptions is NOT idempotent on filterOrderTypeServerSide
         // (it is re-derived from whether orderTypeId is present, and a normalized options map
