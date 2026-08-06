@@ -78,6 +78,82 @@
         </out-parameters>
     </service>
 
+    <service verb="extract" noun="HotWaxOmsTransferOrders" type="script" transaction="ignore" allow-remote="false" authenticate="true"
+            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsTransferOrders.groovy">
+        <description>Extract HotWax OMS transfer orders (orderTypeId=TRANSFER_ORDER) by date window and/or
+            status, writing normalized JSON output to the automation data-manager folder. Served by the same
+            /rest/s1/oms/orders endpoint as sales orders; the order type is a server-side query filter.
+            A distinct service name from extract#HotWaxOmsOrders is required because the connector registry
+            resolves a connector row by its extract service name.</description>
+        <in-parameters>
+            <parameter name="omsRestSourceConfigId" required="true">
+                <description>Tenant-owned HotWaxOmsRestSourceConfig identifier. Transfer-order extraction
+                    reuses the same OMS credentials as sales-order extraction.</description>
+            </parameter>
+            <parameter name="automationExecutionId">
+                <description>Automation execution id used to choose the default data-manager output folder.</description>
+            </parameter>
+            <parameter name="companyUserGroupId">
+                <description>Trusted automation owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
+            </parameter>
+            <parameter name="windowStart">
+                <description>Optional start of the extract window; accepts Timestamp, Date, ISO-8601 text,
+                    SQL timestamp text, or epoch milliseconds. Omit both bounds for a status-only extract;
+                    supplying one bound without the other is an error.</description>
+            </parameter>
+            <parameter name="windowEnd">
+                <description>Optional end of the extract window, same accepted formats as windowStart.</description>
+            </parameter>
+            <parameter name="windowFieldName">
+                <description>OrderHeader date field the window filters on. Defaults to orderDate. A transfer
+                    order's life spans create to receive, so a deployment that needs long-lived transfers to
+                    stay visible can point this at lastUpdatedTxStamp instead.</description>
+            </parameter>
+            <parameter name="orderStatusIds" type="List">
+                <parameter name="statusId"/>
+                <description>Optional statuses to include, sent to the OMS as a server-side IN filter.
+                    Required when no date window is supplied.</description>
+            </parameter>
+            <parameter name="outputLocation">
+                <description>Optional output directory. Defaults to runtime://datamanager/reconciliation-runs/{automationExecutionId}/{timestamp}/.</description>
+            </parameter>
+            <parameter name="fileName">
+                <description>Optional output file name.</description>
+            </parameter>
+            <parameter name="keepRecordFields" type="List">
+                <parameter name="fieldName"/>
+                <description>Optional projection: top-level record fields to keep in the output file.</description>
+            </parameter>
+            <parameter name="sourceFilters" type="List">
+                <parameter name="filterRule" type="Map">
+                    <parameter name="sequenceNum" type="Integer"/>
+                    <parameter name="fieldExpression"/>
+                    <parameter name="operator"/>
+                    <parameter name="filterValues"/>
+                </parameter>
+                <description>Optional record-exclusion rules, same semantics as extract#HotWaxOmsOrders.</description>
+            </parameter>
+            <parameter name="reconciliationRunResultId">
+                <description>Optional observability run id for progress heartbeats. Advisory only.</description>
+            </parameter>
+            <parameter name="progressStageCode">
+                <description>Which extract stage this run is: EXTRACT_FILE1 or EXTRACT_FILE2.</description>
+            </parameter>
+            <parameter name="expectedRecordCount" type="Integer">
+                <description>Optional expected total, which adds a progress percent alongside the count.</description>
+            </parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="dataAvailable" type="Boolean"/>
+            <parameter name="fileLocation"/>
+            <parameter name="fileName"/>
+            <parameter name="recordCount" type="Integer"/>
+            <parameter name="requestMetadata" type="Map"/>
+            <parameter name="warnings" type="List"/>
+            <parameter name="errors" type="List"/>
+        </out-parameters>
+    </service>
+
     <service verb="lookup" noun="HotWaxOmsOrdersByExternalId" type="script" transaction="ignore"
             allow-remote="false" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/lookup/lookupOmsOrdersByExternalId.groovy">
