@@ -230,9 +230,13 @@ class OmsRestSourceStreamingTests {
         OmsRestSourceSupport.setHttpClient { Map ignored -> [statusCode: 200, body: '{"orders":[]}'] }
 
         File target = new File(tempDir, "invalid.json")
+        // A HALF-supplied window (windowStart absent, windowEnd present) is a validation error in
+        // its own right now that the window as a whole is optional (see OmsRestSourceSupportTests'
+        // returnsValidationErrorsForBadWindows), so the message differs from a plain "is required.".
         Map result = OmsRestSourceSupport.extractOrdersToFile(baseConfig(), null, "2026-05-01T00:00:00Z", target)
 
-        assertTrue(result.errors.any { it.contains("windowStart is required.") }, result.errors.toString())
+        assertTrue(result.errors.any { it.contains("windowStart and windowEnd must be supplied together, or both omitted.") },
+                result.errors.toString())
         assertFalse(target.exists(), "no file may be created for a rejected request")
     }
 
