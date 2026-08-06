@@ -1546,7 +1546,12 @@ class OmsRestSourceSupport {
                 windowFieldName          : windowFieldName,
                 orderStatusIds           : orderStatusIds,
                 applyExchangeExclusion   : applyExchangeExclusion,
-                maxRecords               : normalizeInt(raw.get("maxRecords")) ?: DEFAULT_STATE_EXTRACT_MAX_RECORDS,
+                // Explicit null check, not Elvis: normalizeInt(0) returns 0, which Groovy's ?: treats as
+                // falsy, so `maxRecords: 0` would silently become the 50000 default — the same
+                // looks-like-success-but-is-wrong failure this ceiling exists to prevent.
+                maxRecords               : normalizeInt(raw.get("maxRecords")) != null
+                        ? normalizeInt(raw.get("maxRecords"))
+                        : DEFAULT_STATE_EXTRACT_MAX_RECORDS,
                 // Truthiness, not a null check: normalize() returns "" (not null) for a blank or
                 // whitespace-only value, and the Elvis on orderTypeId above already treats "" as
                 // unset. A strict != null here would flag a blank orderTypeId for server-side

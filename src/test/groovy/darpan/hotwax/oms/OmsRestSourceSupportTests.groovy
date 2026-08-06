@@ -602,15 +602,21 @@ class OmsRestSourceSupportTests {
 
     @Test
     void stateExtractFailsRatherThanTruncatingAtTheCeiling() {
-        // Every page is full (500 records) AND distinct per page index, so pagination never stops
-        // on its own: the repeated-page guard (sameOrderPageBundles) only halts on byte-identical
-        // pages, and a full page never shrinks. Only the ceiling can stop this extract — proving it
-        // fails loudly rather than quietly truncating at whatever page it happened to be on.
+        // Three full (500-record) pages -- distinct per page index, so the repeated-page guard never
+        // intervenes -- are enough to cross the 1000-record maxRecords below, then an empty page ends
+        // the supply. This keeps the mock FINITE: if the ceiling guard is ever weakened or removed,
+        // pagination terminates naturally on its own (no window, no error) and the assertions below
+        // fail cleanly and fast, rather than the extract driving pagination toward the unrelated
+        // MAX_ORDERS_PAGE_COUNT (20000) cap. An earlier version of this mock supplied an unbounded
+        // stream of full pages; with the guard temporarily removed for verification, that version
+        // never reached a clean assertion failure -- it drove pagination toward that 20000-page cap
+        // and crashed the Gradle test executor instead. Verified with the guard removed that THIS
+        // (finite-supply) version fails cleanly at the `errors.isEmpty()` assertion instead.
         OmsRestSourceSupport.setHttpClient({ Map request ->
             int pageIndex = queryInt(request.url as String, "pageIndex")
-            List page = (1..500).collect { int index ->
+            List page = pageIndex < 3 ? (1..500).collect { int index ->
                 [orderId: "TO-${pageIndex}-${index}".toString(), orderTypeId: "TRANSFER_ORDER", statusId: "ORDER_APPROVED"]
-            }
+            } : []
             return [statusCode: 200, body: JsonOutput.toJson(page)]
         })
 
@@ -622,6 +628,52 @@ class OmsRestSourceSupportTests {
         assertFalse((result.errors as List).isEmpty())
         assertTrue((result.errors as List).first().toString().contains("1000"))
         assertFalse(result.dataAvailable as boolean)
+    }
+
+    @Test
+    void ceilingDoesNotFireWhenConsumedCountExactlyMatchesTheLimit() {
+        // The comparator is strict (>): landing exactly on the ceiling must succeed, not fail. A
+        // single full page (500) followed by an empty probe page is consumed as exactly 500 raw
+        // records -- the probe page itself is never handed to pageConsumer once it comes back empty.
+        OmsRestSourceSupport.setHttpClient({ Map request ->
+            int pageIndex = queryInt(request.url as String, "pageIndex")
+            List page = pageIndex == 0 ? (1..500).collect { int index ->
+                [orderId: "TO-${index}".toString(), orderTypeId: "TRANSFER_ORDER", statusId: "ORDER_APPROVED"]
+            } : []
+            return [statusCode: 200, body: JsonOutput.toJson(page)]
+        })
+
+        Map<String, Object> result = OmsRestSourceSupport.extractOrders(
+                [omsRestSourceConfigId: "GORJANA_OMS", baseUrl: "https://oms.example.com"],
+                null, null, null, null, null,
+                [orderTypeId: "TRANSFER_ORDER", orderStatusIds: ["ORDER_APPROVED"], maxRecords: 500])
+
+        assertTrue((result.errors as List).isEmpty(), result.errors.toString())
+        assertEquals(500, result.recordCount)
+        assertTrue(result.dataAvailable as boolean)
+    }
+
+    @Test
+    void windowedExtractIgnoresTheCeilingEvenWhenRecordCountExceedsIt() {
+        // The ceiling only guards a window-less (state) extract -- a windowed extract's population is
+        // already bounded by the window. A tiny maxRecords alongside a supplied window must never
+        // fire, proving the GUARD is scoped correctly, not merely that the metadata block is absent.
+        OmsRestSourceSupport.setHttpClient({ Map request ->
+            int pageIndex = queryInt(request.url as String, "pageIndex")
+            List page = pageIndex < 3 ? (1..500).collect { int index ->
+                [orderId: "SO-${pageIndex}-${index}".toString(), orderTypeId: "SALES_ORDER"]
+            } : []
+            return [statusCode: 200, body: JsonOutput.toJson(page)]
+        })
+
+        Map<String, Object> result = OmsRestSourceSupport.extractOrders(
+                [omsRestSourceConfigId: "GORJANA_OMS", baseUrl: "https://oms.example.com"],
+                1000L, 2000L, null, null, null,
+                [maxRecords: 10])
+
+        assertTrue((result.errors as List).isEmpty(), result.errors.toString())
+        assertEquals(1500, result.recordCount)
+        assertTrue(result.dataAvailable as boolean)
     }
 
     @Test
@@ -939,6 +991,7 @@ class OmsRestSourceSupportTests {
         // Proves the stored value is the boolean false, not null: `as boolean` coercion above would
         // pass a null through silently, which is exactly the bug this assertion guards against.
         assertEquals(false, options.filterOrderTypeServerSide)
+        assertEquals(50000, options.maxRecords)
     }
 
     @Test
@@ -954,6 +1007,17 @@ class OmsRestSourceSupportTests {
         assertEquals(["ORDER_APPROVED", "ORDER_CREATED"], options.orderStatusIds)
         assertFalse(options.applyExchangeExclusion as boolean)
         assertTrue(options.filterOrderTypeServerSide as boolean)
+    }
+
+    @Test
+    void maxRecordsDefaultsToTheCeilingAndHonoursAnExplicitOverride() {
+        assertEquals(50000, OmsRestSourceSupport.normalizeExtractOptions(null).maxRecords)
+        assertEquals(1000, OmsRestSourceSupport.normalizeExtractOptions([maxRecords: 1000]).maxRecords)
+        // Regression lock: normalizeInt(0) returns the boxed Integer 0, which Groovy's ?: treats as
+        // falsy. An explicit maxRecords: 0 must be honoured as 0 (meaning "fail on the first record"
+        // at the ceiling check), not silently become the 50000 default -- the same
+        // looks-like-success-but-is-wrong failure this ceiling exists to prevent.
+        assertEquals(0, OmsRestSourceSupport.normalizeExtractOptions([maxRecords: 0]).maxRecords)
     }
 
     @Test
