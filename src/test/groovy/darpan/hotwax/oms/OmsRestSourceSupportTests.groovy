@@ -979,6 +979,77 @@ class OmsRestSourceSupportTests {
         assertEquals([:], result.excludedByRuleCounts)
     }
 
+    /**
+     * Shaped from a real captured OMS extract (`_entity` = org.apache.ofbiz.order.order.OrderHeader):
+     * the exact top-level key set the live orders endpoint returns. The point is the field NAME —
+     * a pill offering `productStoreId` against a record that spells it differently, or nests it,
+     * would persist a rule that matches nothing and excludes nothing, with no error anywhere.
+     */
+    private static Map omsOrderHeaderRecord(String orderId, String productStoreId) {
+        return [
+                _entity                 : "org.apache.ofbiz.order.order.OrderHeader",
+                orderId                 : orderId,
+                orderTypeId             : "SALES_ORDER",
+                orderName               : "SO-${orderId}".toString(),
+                externalId              : "ext-${orderId}".toString(),
+                statusId                : "ORDER_APPROVED",
+                productStoreId          : productStoreId,
+                salesChannelEnumId      : "WEB_SALES_CHANNEL",
+                originFacilityId        : "WH1",
+                grandTotal              : 10,
+                currencyUom             : "USD",
+                presentmentCurrencyUom  : "USD",
+        ]
+    }
+
+    @Test
+    void configuredRuleExcludesByProductStoreIdOnRealOrderShape() {
+        List records = [
+                omsOrderHeaderRecord("1", "STORE"),
+                omsOrderHeaderRecord("2", "RETAIL_STORE"),
+                omsOrderHeaderRecord("3", "retail_store"),
+        ]
+
+        List<Map<String, Object>> rules = darpan.reconciliation.source.SourceFilterSupport.parseRules([[
+                sequenceNum    : 1,
+                fieldExpression: "productStoreId",
+                filterValues   : "RETAIL_STORE",
+        ]])
+
+        Map result = OmsRestSourceSupport.filterComparableOrderRecords(records, rules)
+
+        // Values match case-insensitively, so both spellings of the excluded store go.
+        assertEquals(1, (result.records as List).size())
+        assertEquals("1", (result.records as List)[0].orderId)
+        assertEquals([(1): 2], result.excludedByRuleCounts)
+    }
+
+    @Test
+    void productStoreIdPillJsonPathSurvivesTheRealDispatchChain() {
+        // End-to-end over the chain production actually uses for the pill the rules board writes:
+        //   stored `$.records[*].productStoreId`
+        //     -> toRecordFieldRules  (dispatch: AutomationRuntimeSupport / ReconciliationSavedRunSupport)
+        //     -> parseRules          (inside the extractor)
+        //     -> firstMatchingRule   (scans TOP-LEVEL record keys)
+        // firstMatchingRule never reduces anything itself, so skipping the dispatch step is what would
+        // silently match nothing. This asserts the pill's stored path lands on the real record key.
+        List<Map<String, Object>> dispatched = darpan.reconciliation.source.SourceFilterSupport
+                .toRecordFieldRules([[
+                        sequenceNum    : 1,
+                        fieldExpression: "\$.records[*].productStoreId",
+                        filterValues   : "STORE",
+                ] as Map<String, Object>])
+        assertEquals("productStoreId", dispatched[0].fieldExpression)
+
+        Map result = OmsRestSourceSupport.filterComparableOrderRecords(
+                [omsOrderHeaderRecord("1", "STORE"), omsOrderHeaderRecord("2", "OTHER_STORE")],
+                darpan.reconciliation.source.SourceFilterSupport.parseRules(dispatched))
+
+        assertEquals(1, (result.records as List).size())
+        assertEquals("2", (result.records as List)[0].orderId)
+        assertEquals([(1): 1], result.excludedByRuleCounts)
+    }
+
     @Test
     void extractOptionsDefaultToSalesOrderBehaviour() {
         Map<String, Object> options = OmsRestSourceSupport.normalizeExtractOptions(null)
