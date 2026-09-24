@@ -320,6 +320,104 @@
         </out-parameters>
     </service>
 
+    <service verb="extract" noun="HotWaxOmsOrderLineUnits" type="script" transaction="ignore" allow-remote="false" authenticate="true"
+            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsOrderLineUnits.groovy">
+        <description>Extract HotWax OMS order lines as ONE RECORD PER UNIT for the DAR-BE-050
+            Shopify-to-OMS unit presence pair, writing normalized JSON output to the automation
+            data-manager folder. Served by the same /rest/s1/oms/orders endpoint as sales orders;
+            the grain, not the endpoint, is what differs. A distinct service name from
+            extract#HotWaxOmsOrders is required because the connector registry resolves a connector
+            row by its extract service name.
+
+            WHY UNITS AND NOT LINES: OMS explodes a Shopify line of quantity N into N single-unit
+            OrderItems for routing, and the Spark compare core is a left_anti join followed by
+            .distinct() - set semantics. At line grain a line OMS imported SHORT still matches a
+            complete Shopify line, so the pair reports clean on exactly the defect it exists to
+            find. Each record therefore carries a unitOrdinal, and the compare key is
+            (shopifyOrderId, shopifyLineId, unitOrdinal).
+
+            NO keepRecordFields: the unit record IS the projection. Passing an order-shaped field
+            list would strip every field a unit record has and still report a successful extract.
+
+            THE EXCHANGE EXCLUSION IS KEPT, NOT INVERTED, and this is the thing most likely to be
+            "fixed" wrongly. It looks like an order-grain artefact - two OMS orders colliding on one
+            compare_id - and therefore looks safe to drop at item grain. Measured against gorjana
+            production: an OMS EXC- order's externalId names the ORIGINAL Shopify order (15 of 15
+            resolved), and Shopify adds the exchange line to that original's lineItems (12 of 12, by
+            set difference). That original may be months old, so a creation-windowed Shopify sweep
+            never includes it while OMS lands a new EXC- order inside the window. Inverting the
+            exclusion makes every exchange a false missing-in-Shopify, roughly 1 order in 9.
+            Exchange-line presence is a separate pair (DAR-BE-004).</description>
+        <in-parameters>
+            <parameter name="omsRestSourceConfigId" required="true">
+                <description>Tenant-owned HotWaxOmsRestSourceConfig identifier. Unit extraction reuses
+                    the same OMS credentials and baseUrl as sales-order extraction.</description>
+            </parameter>
+            <parameter name="automationExecutionId">
+                <description>Automation execution id used to choose the default data-manager output folder.</description>
+            </parameter>
+            <parameter name="companyUserGroupId">
+                <description>Trusted automation owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
+            </parameter>
+            <parameter name="windowStart" required="true">
+                <description>Start of the automation window; accepts Timestamp, Date, ISO-8601 text,
+                    SQL timestamp text, or epoch milliseconds.</description>
+            </parameter>
+            <parameter name="windowEnd" required="true">
+                <description>End of the automation window, same accepted formats as windowStart.</description>
+            </parameter>
+            <parameter name="windowFieldName">
+                <description>OrderHeader date field the window filters on. Defaults to orderDate, which is
+                    what the Shopify side's created_at window matches. Changing one side only produces the
+                    DAR-BE-038 skew: structurally guaranteed false positives on every run.</description>
+            </parameter>
+            <parameter name="orderStatusIds" type="List">
+                <parameter name="statusId"/>
+                <description>Optional statuses to include, sent to the OMS as a server-side IN filter.</description>
+            </parameter>
+            <parameter name="outputLocation">
+                <description>Optional output directory. Defaults to runtime://datamanager/reconciliation-runs/{automationExecutionId}/{timestamp}/.</description>
+            </parameter>
+            <parameter name="fileName">
+                <description>Optional output file name.</description>
+            </parameter>
+            <parameter name="sourceFilters" type="List">
+                <parameter name="filterRule" type="Map">
+                    <parameter name="sequenceNum" type="Integer"/>
+                    <parameter name="fieldExpression"/>
+                    <parameter name="operator"/>
+                    <parameter name="filterValues"/>
+                </parameter>
+                <description>Optional record-exclusion rules, same semantics as extract#HotWaxOmsOrders.
+                    Applied to ORDERS before flattening, because the exchange scan needs the full record.</description>
+            </parameter>
+            <parameter name="reconciliationRunResultId">
+                <description>Optional observability run id for progress heartbeats. Advisory only.</description>
+            </parameter>
+            <parameter name="progressStageCode">
+                <description>Which extract stage this run is: EXTRACT_FILE1 or EXTRACT_FILE2.</description>
+            </parameter>
+            <parameter name="expectedRecordCount" type="Integer">
+                <description>Optional expected total, which adds a progress percent alongside the count.</description>
+            </parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="dataAvailable" type="Boolean"/>
+            <parameter name="fileLocation"/>
+            <parameter name="fileName"/>
+            <parameter name="recordCount" type="Integer">
+                <description>Number of UNITS written, not orders.</description>
+            </parameter>
+            <parameter name="requestMetadata" type="Map">
+                <description>Carries droppedNullLineIdCount and nonUnitQuantityCount beside the usual
+                    filter counts. Those two record units the extract could not key and therefore LOST,
+                    which is a different thing from a record a filter excluded on purpose.</description>
+            </parameter>
+            <parameter name="warnings" type="List"/>
+            <parameter name="errors" type="List"/>
+        </out-parameters>
+    </service>
+
     <service verb="lookup" noun="HotWaxOmsOrdersByExternalId" type="script" transaction="ignore"
             allow-remote="false" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/lookup/lookupOmsOrdersByExternalId.groovy">
