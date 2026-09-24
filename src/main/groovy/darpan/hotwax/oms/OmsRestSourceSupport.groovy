@@ -261,6 +261,11 @@ class OmsRestSourceSupport {
 
         int excludedNonSalesOrderCount = 0
         int excludedExchangeOrderCount = 0
+        // DAR-BE-050. Totals across every page, not per-page: a caller reading requestMetadata is
+        // asking what the WHOLE extract dropped. Reported even when zero, so "the key is absent"
+        // never has to be told apart from "nothing was dropped".
+        int droppedNullLineIdCount = 0
+        int nonUnitQuantityCount = 0
         int extractedRecordCount = 0
         int consumedRawCount = 0
         List exchangeManifest = []
@@ -278,9 +283,16 @@ class OmsRestSourceSupport {
                 if (exchangeManifest.size() >= EXCHANGE_MANIFEST_MAX_ENTRIES) { exchangeManifestTruncated = true; break }
                 exchangeManifest.add(entry)
             }
-            int filteredCount = (int) pageBundle.filteredCount
-            if (filteredCount > 0) sink.writeSerializedPage((String) pageBundle.serializedRecords, filteredCount)
-            extractedRecordCount += filteredCount
+            // DAR-BE-050: outputCount, not filteredCount. They are the same number at order grain,
+            // but a unit-grain page turns one filtered ORDER into many serialized UNITS - and the
+            // reverse, an order whose units were all dropped serializes nothing while still
+            // counting as filtered. Using filteredCount here would report orders while the file
+            // holds units, and would write an empty page with a non-zero count.
+            int writtenCount = (int) (pageBundle.outputCount != null ? pageBundle.outputCount : pageBundle.filteredCount)
+            if (writtenCount > 0) sink.writeSerializedPage((String) pageBundle.serializedRecords, writtenCount)
+            extractedRecordCount += writtenCount
+            droppedNullLineIdCount += (int) (pageBundle.droppedNullLineIdCount ?: 0)
+            nonUnitQuantityCount += (int) (pageBundle.nonUnitQuantityCount ?: 0)
             consumedRawCount += (int) pageBundle.rawCount
             // Windowed extracts are bounded by their window; only a window-less (state) extract needs
             // this. Fail hard — never truncate. Branches on supplied-ness (not fromMillis/thruMillis
@@ -346,6 +358,13 @@ class OmsRestSourceSupport {
                 statusIds : new ArrayList<String>((List<String>) options.orderStatusIds),
                 maxRecords: options.maxRecords,
         ] : null
+        // Unit-grain drop counters ride beside filters rather than inside them: a filter EXCLUDED a
+        // record on purpose, while these record units the extract could not key and therefore LOST.
+        // Conflating the two would let a lossy run read as a deliberately narrowed one.
+        if (options.get("emitGrain") == "ORDER_LINE_UNIT") {
+            requestMetadata.droppedNullLineIdCount = droppedNullLineIdCount
+            requestMetadata.nonUnitQuantityCount = nonUnitQuantityCount
+        }
         requestMetadata.filters = buildFilterMetadata(excludedNonSalesOrderCount, excludedExchangeOrderCount,
                 exchangeManifestTruncated, excludeRules, excludedByRuleCounts, stateExtractMetadata,
                 (Map<String, Object>) extraction.serverCounts)
@@ -1226,18 +1245,7 @@ class OmsRestSourceSupport {
                 warnings, extractOptions)
         if (!page.success) return page
         List rawRecords = page.records ?: []
-        Map<String, Object> pageFilter = filterComparableOrderRecords(rawRecords, excludeRules, extractOptions)
-        List filtered = (List) pageFilter.records
-        // Projection happens after filtering (the EXCHANGE scan needs the full record) and before
-        // serialization, so a trimmed extract writes ~90x less than the full order documents.
-        List outputRecords = keepFieldSet ? filtered.collect { Object record -> trimRecord(record, keepFieldSet) } : filtered
-        StringBuilder serialized = new StringBuilder(Math.max(16, outputRecords.size() * 512))
-        boolean firstRecord = true
-        for (Object record : outputRecords) {
-            if (!firstRecord) serialized.append(',')
-            serialized.append(JsonOutput.toJson(record))
-            firstRecord = false
-        }
+        Map<String, Object> shaped = shapePageRecords(rawRecords, extractOptions, excludeRules, keepFieldSet)
         return [
                 success                   : true,
                 statusCode                : page.statusCode,
@@ -1248,11 +1256,71 @@ class OmsRestSourceSupport {
                 // Present only in recon mode; the legacy loop never reads them.
                 hasMore                   : page.hasMore,
                 serverCounts              : page.serverCounts,
+                filteredCount             : shaped.filteredCount,
+                // DAR-BE-050: the number of records actually SERIALIZED. Equal to filteredCount at
+                // order grain, but not at unit grain, where one order becomes many units - so this
+                // is what the write gate and the extract's record count must use.
+                outputCount               : shaped.outputCount,
+                excludedNonSalesOrderCount: shaped.excludedNonSalesOrderCount,
+                excludedExchangeOrderCount: shaped.excludedExchangeOrderCount,
+                excludedExchangeOrders    : shaped.excludedExchangeOrders,
+                excludedByRuleCounts      : shaped.excludedByRuleCounts,
+                droppedNullLineIdCount    : shaped.droppedNullLineIdCount,
+                nonUnitQuantityCount      : shaped.nonUnitQuantityCount,
+                serializedRecords         : shaped.serializedRecords,
+        ]
+    }
+
+    /**
+     * Filter -> (flatten) -> project -> serialize, split out of prepareOrdersPage so the shaping
+     * rules are reachable without an HTTP round trip.
+     *
+     * Order of operations is load-bearing: the EXCHANGE scan needs the FULL record, so filtering
+     * precedes both flattening and projection.
+     */
+    static Map<String, Object> shapePageRecords(List rawRecords, Map extractOptions,
+                                                List excludeRules = null,
+                                                Set<String> keepFieldSet = null) {
+        Map<String, Object> options = normalizeExtractOptions(extractOptions)
+        Map<String, Object> pageFilter = filterComparableOrderRecords(rawRecords, excludeRules, extractOptions)
+        List filtered = (List) pageFilter.records
+
+        List outputRecords
+        int droppedNullLineIdCount = 0
+        int nonUnitQuantityCount = 0
+        if (options.get("emitGrain") == "ORDER_LINE_UNIT") {
+            // Unit grain does NOT take keepFieldSet: the unit record IS the projection, and a
+            // caller's order-shaped keepRecordFields would strip every field it has.
+            outputRecords = []
+            for (Object record : filtered) {
+                if (!(record instanceof Map)) continue
+                Map flattened = OmsOrderLineUnitSupport.flattenOrderToUnits((Map) record)
+                outputRecords.addAll((List) flattened.units)
+                droppedNullLineIdCount += (flattened.droppedNullLineId as int)
+                nonUnitQuantityCount += (flattened.nonUnitQuantityCount as int)
+            }
+        } else {
+            // Projection happens after filtering (the EXCHANGE scan needs the full record) and
+            // before serialization, so a trimmed extract writes ~90x less than the full documents.
+            outputRecords = keepFieldSet ? filtered.collect { Object record -> trimRecord(record, keepFieldSet) } : filtered
+        }
+
+        StringBuilder serialized = new StringBuilder(Math.max(16, outputRecords.size() * 512))
+        boolean firstRecord = true
+        for (Object record : outputRecords) {
+            if (!firstRecord) serialized.append(',')
+            serialized.append(JsonOutput.toJson(record))
+            firstRecord = false
+        }
+        return [
                 filteredCount             : filtered.size(),
+                outputCount               : outputRecords.size(),
                 excludedNonSalesOrderCount: pageFilter.excludedNonSalesOrderCount,
                 excludedExchangeOrderCount: pageFilter.excludedExchangeOrderCount,
                 excludedExchangeOrders    : pageFilter.excludedExchangeOrders,
                 excludedByRuleCounts      : pageFilter.excludedByRuleCounts,
+                droppedNullLineIdCount    : droppedNullLineIdCount,
+                nonUnitQuantityCount      : nonUnitQuantityCount,
                 serializedRecords         : serialized.toString(),
         ]
     }
@@ -1849,12 +1917,19 @@ class OmsRestSourceSupport {
                 ? normalizeBool(raw.get("applyExchangeExclusion"))
                 : (!reconEndpoint && SALES_ORDER_TYPE_ID.equalsIgnoreCase(orderTypeId))
 
+        // DAR-BE-050. ORDER_LINE_UNIT is the only supported non-default grain. Anything else -
+        // including a typo - falls back to order grain rather than failing, because an unrecognised
+        // grain that silently emitted NOTHING would read downstream as "the source is empty",
+        // which is indistinguishable from a clean run.
+        boolean unitGrain = "ORDER_LINE_UNIT".equalsIgnoreCase(normalize(raw.get("emitGrain")) ?: "")
+
         return [
                 reconEndpoint            : reconEndpoint,
                 orderTypeId              : orderTypeId,
                 windowFieldName          : windowFieldName,
                 orderStatusIds           : orderStatusIds,
                 applyExchangeExclusion   : applyExchangeExclusion,
+                emitGrain                : unitGrain ? "ORDER_LINE_UNIT" : null,
                 // Explicit null check, not Elvis: normalizeInt(0) returns 0, which Groovy's ?: treats as
                 // falsy, so `maxRecords: 0` would silently become the 50000 default — the same
                 // looks-like-success-but-is-wrong failure this ceiling exists to prevent.
