@@ -271,6 +271,7 @@ class OmsRestSourceSupport {
         List exchangeManifest = []
         boolean exchangeManifestTruncated = false
         Map<Integer, Integer> excludedByRuleCounts = [:]
+        Map<Integer, Integer> fieldAbsentByRuleCounts = [:]
         Closure pageConsumer = { Map<String, Object> pageBundle ->
             // Pages arrive as pre-filtered, pre-serialized bundles (built on the fetch thread),
             // so consuming a page is an append plus counter bumps — no parsed graphs retained.
@@ -278,6 +279,9 @@ class OmsRestSourceSupport {
             excludedExchangeOrderCount += (int) pageBundle.excludedExchangeOrderCount
             ((Map<Integer, Integer>) pageBundle.excludedByRuleCounts ?: [:]).each { Integer sequenceNum, Integer count ->
                 excludedByRuleCounts.put(sequenceNum, (excludedByRuleCounts.get(sequenceNum) ?: 0) + count)
+            }
+            ((Map<Integer, Integer>) pageBundle.fieldAbsentByRuleCounts ?: [:]).each { Integer sequenceNum, Integer count ->
+                fieldAbsentByRuleCounts.put(sequenceNum, (fieldAbsentByRuleCounts.get(sequenceNum) ?: 0) + count)
             }
             for (Object entry : (List) (pageBundle.excludedExchangeOrders ?: [])) {
                 if (exchangeManifest.size() >= EXCHANGE_MANIFEST_MAX_ENTRIES) { exchangeManifestTruncated = true; break }
@@ -366,8 +370,8 @@ class OmsRestSourceSupport {
             requestMetadata.nonUnitQuantityCount = nonUnitQuantityCount
         }
         requestMetadata.filters = buildFilterMetadata(excludedNonSalesOrderCount, excludedExchangeOrderCount,
-                exchangeManifestTruncated, excludeRules, excludedByRuleCounts, stateExtractMetadata,
-                (Map<String, Object>) extraction.serverCounts)
+                exchangeManifestTruncated, excludeRules, excludedByRuleCounts, fieldAbsentByRuleCounts,
+                stateExtractMetadata, (Map<String, Object>) extraction.serverCounts)
         Map documentMetadata = requestMetadata + [
                 sourceType            : "HOTWAX_OMS_REST_ORDERS",
                 omsRestSourceConfigId : normalize(config?.omsRestSourceConfigId),
@@ -1265,6 +1269,7 @@ class OmsRestSourceSupport {
                 excludedExchangeOrderCount: shaped.excludedExchangeOrderCount,
                 excludedExchangeOrders    : shaped.excludedExchangeOrders,
                 excludedByRuleCounts      : shaped.excludedByRuleCounts,
+                fieldAbsentByRuleCounts   : shaped.fieldAbsentByRuleCounts,
                 droppedNullLineIdCount    : shaped.droppedNullLineIdCount,
                 nonUnitQuantityCount      : shaped.nonUnitQuantityCount,
                 serializedRecords         : shaped.serializedRecords,
@@ -1319,6 +1324,7 @@ class OmsRestSourceSupport {
                 excludedExchangeOrderCount: pageFilter.excludedExchangeOrderCount,
                 excludedExchangeOrders    : pageFilter.excludedExchangeOrders,
                 excludedByRuleCounts      : pageFilter.excludedByRuleCounts,
+                fieldAbsentByRuleCounts   : pageFilter.fieldAbsentByRuleCounts,
                 droppedNullLineIdCount    : droppedNullLineIdCount,
                 nonUnitQuantityCount      : nonUnitQuantityCount,
                 serializedRecords         : serialized.toString(),
@@ -1700,6 +1706,7 @@ class OmsRestSourceSupport {
         int excludedNonSalesOrderCount = 0
         int excludedExchangeOrderCount = 0
         Map<Integer, Integer> excludedByRuleCounts = [:]
+        Map<Integer, Integer> fieldAbsentByRuleCounts = [:]
         (records ?: []).each { Object record ->
             // Order is load-bearing: the two built-in exclusions keep priority so their counts never
             // shift when a tenant adds a configured rule, and a record excluded by more than one
@@ -1716,10 +1723,15 @@ class OmsRestSourceSupport {
                 excludedExchangeOrderCount++
                 excludedExchangeOrders.add(exchangeManifestEntry((Map) record))
             } else {
-                Map<String, Object> matchedRule = SourceFilterSupport.firstMatchingRule(record, excludeRules)
-                if (matchedRule != null) {
-                    Integer sequenceNum = (Integer) matchedRule.get("sequenceNum")
-                    excludedByRuleCounts.put(sequenceNum, (excludedByRuleCounts.get(sequenceNum) ?: 0) + 1)
+                Map<String, Object> verdict = SourceFilterSupport.evaluate(record, excludeRules)
+                if (verdict != null) {
+                    Integer sequenceNum = (Integer) ((Map) verdict.get("rule")).get("sequenceNum")
+                    // Two buckets, one rejection: an include rule that drops a whole row class for
+                    // want of the field must not read as "the rule matched a lot of values".
+                    Map<Integer, Integer> bucket = SourceFilterSupport.REASON_FIELD_ABSENT == verdict.get("reason")
+                            ? fieldAbsentByRuleCounts
+                            : excludedByRuleCounts
+                    bucket.put(sequenceNum, (bucket.get(sequenceNum) ?: 0) + 1)
                 } else {
                     filteredRecords.add(record)
                 }
@@ -1731,6 +1743,7 @@ class OmsRestSourceSupport {
                 excludedExchangeOrderCount : excludedExchangeOrderCount,
                 excludedExchangeOrders     : excludedExchangeOrders,
                 excludedByRuleCounts       : excludedByRuleCounts,
+                fieldAbsentByRuleCounts    : fieldAbsentByRuleCounts,
         ]
     }
 
@@ -1740,6 +1753,7 @@ class OmsRestSourceSupport {
                                                              boolean exchangeManifestTruncated,
                                                              List<Map<String, Object>> excludeRules,
                                                              Map<Integer, Integer> excludedByRuleCounts,
+                                                             Map<Integer, Integer> fieldAbsentByRuleCounts,
                                                              Map<String, Object> stateExtract = null,
                                                              Map<String, Object> serverCounts = null) {
         Map<String, Object> filters = [
@@ -1757,8 +1771,11 @@ class OmsRestSourceSupport {
                         sequenceNum    : rule.get("sequenceNum"),
                         fieldExpression: rule.get("fieldExpression"),
                         operator       : rule.get("operator"),
-                        values         : new ArrayList<String>((List) rule.get("values")),
-                        excludedCount  : (excludedByRuleCounts?.get(rule.get("sequenceNum")) ?: 0),
+                        values          : new ArrayList<String>((List) rule.get("values")),
+                        excludedCount   : (excludedByRuleCounts?.get(rule.get("sequenceNum")) ?: 0),
+                        // Present on every rule including EXCLUDE_IN ones, where it is structurally
+                        // zero: a reader should not need to know which keys apply to which mode.
+                        fieldAbsentCount: (fieldAbsentByRuleCounts?.get(rule.get("sequenceNum")) ?: 0),
                 ]
             }
         }

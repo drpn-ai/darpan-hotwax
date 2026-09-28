@@ -935,6 +935,44 @@ class OmsRestSourceSupportTests {
     }
 
     @Test
+    void includeRuleKeepsOnlyListedChannelsAndCountsAbsentSeparately() {
+        // DAR-BE-054. Under INCLUDE_IN the two rejection reasons are different facts: order 2 named
+        // a channel this rule does not allow, order 3 named no channel at all. Folding them into one
+        // count would let an include rule quietly delete a whole row class and read as a busy rule.
+        List<Map<String, Object>> rules = darpan.reconciliation.source.SourceFilterSupport.parseRules([[
+                sequenceNum    : 1,
+                fieldExpression: "salesChannelEnumId",
+                operator       : "INCLUDE_IN",
+                filterValues   : "WEB_SALES_CHANNEL",
+        ]])
+        List records = [
+                salesOrder("1", "WEB_SALES_CHANNEL"),
+                salesOrder("2", "POS_SALES_CHANNEL"),
+                [orderId: "3", orderTypeId: "SALES_ORDER"],
+        ]
+
+        Map result = OmsRestSourceSupport.filterComparableOrderRecords(records, rules)
+
+        assertEquals(1, (result.records as List).size())
+        assertEquals("1", (result.records as List)[0].orderId)
+        assertEquals([(1): 1], result.excludedByRuleCounts)
+        assertEquals([(1): 1], result.fieldAbsentByRuleCounts)
+    }
+
+    @Test
+    void anExcludeRuleNeverReportsFieldAbsentDrops() {
+        // The bucket exists on both modes so a reader need not know which keys apply to which, but
+        // under EXCLUDE_IN a record with no value is KEPT, so the bucket is structurally empty.
+        List records = [salesOrder("1", "POS_SALES_CHANNEL"), [orderId: "2", orderTypeId: "SALES_ORDER"]]
+
+        Map result = OmsRestSourceSupport.filterComparableOrderRecords(records, posChannelRule())
+
+        assertEquals(1, (result.records as List).size())
+        assertEquals([(1): 1], result.excludedByRuleCounts)
+        assertEquals([:], result.fieldAbsentByRuleCounts)
+    }
+
+    @Test
     void builtInExclusionsKeepPriorityOverConfiguredOnes() {
         // A non-sales order that also matches a configured rule must stay attributed to the built-in
         // counter, so existing excludedNonSalesOrderCount values never shift when a filter is added.
@@ -1139,7 +1177,7 @@ class OmsRestSourceSupportTests {
     @Test
     void configuredExclusionsAppearInRequestMetadataWithCounts() {
         Map<String, Object> filters = OmsRestSourceSupport.buildFilterMetadata(
-                4, 2, false, posChannelRule(), [(1): 7])
+                4, 2, false, posChannelRule(), [(1): 7], [:])
 
         assertEquals("SALES_ORDER", filters.requiredOrderTypeId)
         assertEquals(4, filters.excludedNonSalesOrderCount)
@@ -1152,11 +1190,13 @@ class OmsRestSourceSupportTests {
         assertEquals("EXCLUDE_IN", configured[0].operator)
         assertEquals(["POS_SALES_CHANNEL"], configured[0].values)
         assertEquals(7, configured[0].excludedCount)
+        // Always present, structurally zero on an exclude rule.
+        assertEquals(0, configured[0].fieldAbsentCount)
     }
 
     @Test
     void metadataOmitsConfiguredExclusionsWhenNoRulesAreSet() {
-        Map<String, Object> filters = OmsRestSourceSupport.buildFilterMetadata(1, 0, false, [], [:])
+        Map<String, Object> filters = OmsRestSourceSupport.buildFilterMetadata(1, 0, false, [], [:], [:])
 
         assertFalse(filters.containsKey("configuredExclusions"))
     }
@@ -1165,7 +1205,7 @@ class OmsRestSourceSupportTests {
     void ruleThatMatchedNothingStillReportsAZeroCount() {
         // An operator who configured an exclusion needs to see it ran and matched nothing, rather
         // than see the rule vanish from metadata and wonder whether it was applied at all.
-        Map<String, Object> filters = OmsRestSourceSupport.buildFilterMetadata(0, 0, false, posChannelRule(), [:])
+        Map<String, Object> filters = OmsRestSourceSupport.buildFilterMetadata(0, 0, false, posChannelRule(), [:], [:])
 
         assertEquals(0, (filters.configuredExclusions as List)[0].excludedCount)
     }
@@ -1224,7 +1264,9 @@ class OmsRestSourceSupportTests {
                 null, null, [[fieldExpression: "salesChannelEnumId"]])
 
         assertFalse(httpCalled, "a malformed exclusion rule must fail before any HTTP request is issued")
-        assertTrue((result.errors as List).any { it.toString().contains("has no values to exclude") },
+        // Message reworded by DAR-BE-054 ("to exclude" is no longer true of every filter); what this
+        // asserts is unchanged — the rule fails pre-flight with a message naming the fault.
+        assertTrue((result.errors as List).any { it.toString().contains("has no values") },
                 result.errors.toString())
         assertEquals(0, result.recordCount)
     }
