@@ -1068,8 +1068,8 @@ class OmsRestSourceSupportTests {
         //   stored `$.records[*].productStoreId`
         //     -> toRecordFieldRules  (dispatch: AutomationRuntimeSupport / ReconciliationSavedRunSupport)
         //     -> parseRules          (inside the extractor)
-        //     -> firstMatchingRule   (scans TOP-LEVEL record keys)
-        // firstMatchingRule never reduces anything itself, so skipping the dispatch step is what would
+        //     -> evaluate            (scans TOP-LEVEL record keys)
+        // evaluate never reduces anything itself, so skipping the dispatch step is what would
         // silently match nothing. This asserts the pill's stored path lands on the real record key.
         List<Map<String, Object>> dispatched = darpan.reconciliation.source.SourceFilterSupport
                 .toRecordFieldRules([[
