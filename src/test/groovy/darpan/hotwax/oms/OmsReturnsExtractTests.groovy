@@ -380,6 +380,53 @@ class OmsReturnsExtractTests {
     }
 
     @Test
+    void anIncludeRuleKeepsOnlyListedChannelsAndCountsAbsentSeparately() {
+        // DAR-BE-054, the mirror of keepsReturnsThatLackTheConfiguredFieldEntirely above: under
+        // INCLUDE_IN the record lacking the field is DROPPED, and it is counted apart from the one
+        // dropped for naming a channel the rule does not allow. Same run, both reasons, two numbers.
+        OmsReturnsSourceSupport.setHttpClient { Map request ->
+            Map noChannel = returnRecord("1003", "5003")
+            noChannel.remove("returnChannelEnumId")
+            Map webReturn = returnRecord("1001", "5001")
+            webReturn.put("returnChannelEnumId", "WEB_RETURN_CHANNEL")
+            return [statusCode: 200, body: returnsBody([
+                    webReturn,
+                    posReturnRecord("1002", "5002"),
+                    noChannel,
+            ], false)]
+        }
+
+        Map result = OmsReturnsSourceSupport.extractReturns(baseConfig(), "2026-05-01T00:00:00Z",
+                "2026-05-02T00:00:00Z", null, null, channelInclusion(), [:])
+
+        assertEquals(1, result.recordCount, "only the WEB-channel return qualifies")
+        Map entry = (Map) ((List) ((Map) ((Map) result.requestMetadata).get("filters"))
+                .get("configuredExclusions"))[0]
+        assertEquals("INCLUDE_IN", entry.get("operator"))
+        assertEquals(1, entry.get("excludedCount"), "the POS return, dropped on its value")
+        assertEquals(1, entry.get("fieldAbsentCount"), "the return with no channel at all")
+    }
+
+    @Test
+    void anExcludeRuleReportsAZeroFieldAbsentCount() {
+        // The key is present on every rule so a reader need not know which apply to which mode;
+        // under EXCLUDE_IN a record with no value is kept, so it is structurally zero.
+        OmsReturnsSourceSupport.setHttpClient { Map request ->
+            Map noChannel = returnRecord("1001", "5001")
+            noChannel.remove("returnChannelEnumId")
+            return [statusCode: 200, body: returnsBody([noChannel], false)]
+        }
+
+        Map result = OmsReturnsSourceSupport.extractReturns(baseConfig(), "2026-05-01T00:00:00Z",
+                "2026-05-02T00:00:00Z", null, null, channelExclusion(), [:])
+
+        Map entry = (Map) ((List) ((Map) ((Map) result.requestMetadata).get("filters"))
+                .get("configuredExclusions"))[0]
+        assertEquals(1, result.recordCount)
+        assertEquals(0, entry.get("fieldAbsentCount"))
+    }
+
+    @Test
     void omitsConfiguredExclusionsEntirelyWhenNoRulesAreConfigured() {
         OmsReturnsSourceSupport.setHttpClient { Map request ->
             return [statusCode: 200, body: returnsBody([returnRecord("1001", "5001")], false)]
@@ -416,6 +463,15 @@ class OmsReturnsExtractTests {
         Map record = returnRecord(returnId, externalId)
         record.put("returnChannelEnumId", "POS_RETURN_CHANNEL")
         return record
+    }
+
+    private static List channelInclusion() {
+        return [[
+                sequenceNum    : 1,
+                fieldExpression: "returnChannelEnumId",
+                operator       : "INCLUDE_IN",
+                filterValues   : "WEB_RETURN_CHANNEL",
+        ]]
     }
 
     private static List channelExclusion() {

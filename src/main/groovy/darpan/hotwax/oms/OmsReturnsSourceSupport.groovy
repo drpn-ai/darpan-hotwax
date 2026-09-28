@@ -147,6 +147,7 @@ class OmsReturnsSourceSupport {
         OutputSink sink = new OutputSink(targetFile)
         Map<String, Object> serverCounts = [:]
         Map<String, Object> exclusionCounts = [:]
+        Map<String, Object> fieldAbsentCounts = [:]
         long cumulativeRaw = 0L
 
         try {
@@ -183,10 +184,15 @@ class OmsReturnsSourceSupport {
                     // Configured exclusions run CLIENT-side: the endpoint has no knowledge of tenant
                     // rules. They cannot double-count against excludedNoShopifyRefCount because that
                     // filter is server-side — those returns never arrive here at all (design §9.5).
-                    Map match = SourceFilterSupport.firstMatchingRule(record, parsedFilters)
-                    if (match != null) {
-                        String key = String.valueOf(match.get("sequenceNum"))
-                        exclusionCounts.put(key, normalizeInt(exclusionCounts.get(key), 0) + 1)
+                    Map<String, Object> verdict = SourceFilterSupport.evaluate(record, parsedFilters)
+                    if (verdict != null) {
+                        String key = String.valueOf(((Map) verdict.get("rule")).get("sequenceNum"))
+                        // Two buckets, one rejection: an include rule that drops a whole row class
+                        // for want of the field must not read as "the rule matched many values".
+                        Map<String, Object> bucket = SourceFilterSupport.REASON_FIELD_ABSENT == verdict.get("reason")
+                                ? fieldAbsentCounts
+                                : exclusionCounts
+                        bucket.put(key, normalizeInt(bucket.get(key), 0) + 1)
                         return
                     }
                     applyJoinKeyFallback(record)
@@ -232,7 +238,7 @@ class OmsReturnsSourceSupport {
             if (errors) {
                 sink.abort()
             } else {
-                sink.finish(buildMetadata(serverCounts, exclusionCounts, parsedFilters))
+                sink.finish(buildMetadata(serverCounts, exclusionCounts, fieldAbsentCounts, parsedFilters))
             }
         } catch (Exception e) {
             sink.abort()
@@ -254,7 +260,7 @@ class OmsReturnsSourceSupport {
         Map<String, Object> result = [
                 recordCount    : recordCount,
                 dataAvailable  : recordCount > 0,
-                requestMetadata: buildMetadata(serverCounts, exclusionCounts, parsedFilters),
+                requestMetadata: buildMetadata(serverCounts, exclusionCounts, fieldAbsentCounts, parsedFilters),
                 warnings       : warnings,
                 errors         : [],
                 fileName       : OmsRestSourceSupport.buildDefaultFileName(fromMillis, thruMillis, DEFAULT_FILE_NAME_PREFIX),
@@ -504,6 +510,7 @@ class OmsReturnsSourceSupport {
     }
 
     protected static Map<String, Object> buildMetadata(Map serverCounts, Map exclusionCounts,
+                                                        Map fieldAbsentCounts,
                                                         List<Map<String, Object>> parsedFilters) {
         Map<String, Object> filters = [:]
         filters.put("excludedNoShopifyRefCount", normalizeInt(serverCounts.get("excludedNoShopifyRefCount"), 0))
@@ -520,8 +527,11 @@ class OmsReturnsSourceSupport {
                         sequenceNum    : rule.get("sequenceNum"),
                         fieldExpression: rule.get("fieldExpression"),
                         operator       : rule.get("operator"),
-                        values         : rule.get("values"),
-                        excludedCount  : normalizeInt(exclusionCounts.get(key), 0),
+                        values          : rule.get("values"),
+                        excludedCount   : normalizeInt(exclusionCounts.get(key), 0),
+                        // Present on every rule including EXCLUDE_IN ones, where it is structurally
+                        // zero: a reader should not need to know which keys apply to which mode.
+                        fieldAbsentCount: normalizeInt(fieldAbsentCounts?.get(key), 0),
                 ]
             })
         }
