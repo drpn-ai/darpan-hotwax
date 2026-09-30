@@ -57,11 +57,11 @@ class OmsOrderLineUnitExtractTests {
         ] + overrides
     }
 
-    private Map extractUnits(List orders, Map extraOptions = [:]) {
+    private Map extractUnits(List orders, Map extraOptions = [:], List sourceFilters = null) {
         serve(orders)
         File target = new File(tempDir, "units-${System.nanoTime()}.json")
         Map result = OmsRestSourceSupport.extractOrdersToFile(baseConfig(),
-                "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z", target, null, null, null,
+                "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z", target, null, null, sourceFilters,
                 [emitGrain: "ORDER_LINE_UNIT"] + extraOptions)
         result.parsedOutput = target.exists() ? JSON_SLURPER.parseText(target.getText("UTF-8")) : null
         return result
@@ -160,5 +160,152 @@ class OmsOrderLineUnitExtractTests {
         assertEquals(1, records.size(), "no emitGrain means one record per ORDER, as today")
         assertEquals("M153320", ((Map) records[0]).orderId)
         assertEquals(1, result.recordCount)
+    }
+
+    // ---- Tri-system order runs, D3: at unit grain a source filter sees the UNIT, not the order.
+
+    private static List mixedOrders() {
+        return [order("M1", "6678687481987", [item("01", "L1", 1, "ITEM_COMPLETED"),
+                                              item("02", "L1", 1, "ITEM_CANCELLED"),
+                                              item("03", "L2", 1, "ITEM_COMPLETED")],
+                        [salesChannelEnumId: "WEB_SALES_CHANNEL", statusId: "ORDER_COMPLETED", productStoreId: "STORE"]),
+                order("M2", "6678687481988", [item("01", "L3", 1, "ITEM_COMPLETED")],
+                        [salesChannelEnumId: "POS_SALES_CHANNEL", statusId: "ORDER_COMPLETED", productStoreId: "STORE"])]
+    }
+
+    private static List records(Map result) {
+        return (List) ((Map) result.parsedOutput).records
+    }
+
+    private static Map ruleMetadata(Map result, int sequenceNum) {
+        List rules = (List) ((Map) ((Map) result.requestMetadata).filters).configuredExclusions
+        return (Map) rules.find { ((Map) it).sequenceNum == sequenceNum }
+    }
+
+    @Test
+    void aUnitStateIncludeRuleKeepsOnlyThoseUnits() {
+        Map result = extractUnits(mixedOrders(), [:],
+                [[sequenceNum: 1, fieldExpression: "unitState", operator: "INCLUDE_IN", filterValues: "COMPLETED"]])
+
+        assertTrue((result.errors as List).isEmpty(), result.errors.toString())
+        assertEquals(["COMPLETED", "COMPLETED", "COMPLETED"], records(result).collect { ((Map) it).unitState })
+        assertEquals(3, result.recordCount)
+        // Counts are UNITS at unit grain, and still reach requestMetadata.
+        assertEquals(1, ruleMetadata(result, 1).excludedCount)
+        assertEquals(0, ruleMetadata(result, 1).fieldAbsentCount)
+    }
+
+    @Test
+    void theUnitStatusWinsOverTheOrderStatusOnCollision() {
+        // Both the order header and the unit define statusId; the unit's item status wins.
+        Map result = extractUnits(mixedOrders(), [:],
+                [[sequenceNum: 1, fieldExpression: "statusId", operator: "EXCLUDE_IN", filterValues: "ITEM_CANCELLED"]])
+
+        assertEquals(3, records(result).size())
+        assertFalse(records(result).any { ((Map) it).statusId == "ITEM_CANCELLED" })
+        assertEquals(1, ruleMetadata(result, 1).excludedCount)
+    }
+
+    @Test
+    void anOrderLevelRuleStillDropsEveryUnitOfThatOrder() {
+        Map result = extractUnits(mixedOrders(), [:],
+                [[sequenceNum: 1, fieldExpression: "salesChannelEnumId", operator: "EXCLUDE_IN",
+                  filterValues: "POS_SALES_CHANNEL"]])
+
+        assertEquals(["M1", "M1", "M1"], records(result).collect { ((Map) it).omsOrderId })
+        // One order excluded, but it had one unit: the count is in units now.
+        assertEquals(1, ruleMetadata(result, 1).excludedCount)
+        // The order header field is used for the decision only; it is not written into the unit.
+        // salesChannelEnumId IS on the unit since DAR-UI-044 (conclusion rules read it); an order-only
+        // header field still decides without being written.
+        assertFalse(((Map) records(result)[0]).containsKey("productStoreId"))
+    }
+
+    @Test
+    void anIncludeRuleOnAFieldNoUnitOrOrderHasCountsAsFieldAbsent() {
+        Map result = extractUnits(mixedOrders(), [:],
+                [[sequenceNum: 1, fieldExpression: "noSuchField", operator: "INCLUDE_IN", filterValues: "X"]])
+
+        assertEquals(0, records(result).size())
+        assertEquals(4, ruleMetadata(result, 1).fieldAbsentCount)
+        assertEquals(0, ruleMetadata(result, 1).excludedCount)
+    }
+
+    @Test
+    void noRulesLeavesUnitGrainOutputUnchanged() {
+        Map withNull = extractUnits(mixedOrders())
+        Map withEmpty = extractUnits(mixedOrders(), [:], [])
+
+        assertEquals(4, records(withNull).size())
+        assertEquals(records(withNull), records(withEmpty))
+    }
+
+    @Test
+    void orderGrainRulesStillEvaluateAgainstTheOrderDocument() {
+        serve(mixedOrders())
+        File target = new File(tempDir, "order-grain-rules.json")
+        Map result = OmsRestSourceSupport.extractOrdersToFile(baseConfig(),
+                "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z", target, null, null,
+                [[sequenceNum: 1, fieldExpression: "salesChannelEnumId", operator: "EXCLUDE_IN",
+                  filterValues: "POS_SALES_CHANNEL"]])
+
+        List orders = (List) (JSON_SLURPER.parseText(target.getText("UTF-8")) as Map).records
+        assertEquals(["M1"], orders.collect { ((Map) it).orderId })
+        assertEquals(1, ruleMetadata(result, 1).excludedCount)
+    }
+
+    // ---- Tri-system D4: the OMS_ORDER_ITEMS options.
+
+    @Test
+    void notRequiringALineIdKeepsUnkeyedItemsAndCountsThemApart() {
+        Map result = extractUnits([order("M153320", "6678687481987",
+                [item("01", "15210699161731"), item("02", null)])], [requireShopifyLineId: false])
+
+        assertEquals(2, records(result).size())
+        assertEquals(0, ((Map) result.requestMetadata).droppedNullLineIdCount)
+        assertEquals(1, ((Map) result.requestMetadata).keptNullShopifyIdCount)
+        assertEquals(1, ((Map) ((Map) result.parsedOutput).metadata).keptNullShopifyIdCount)
+    }
+
+    @Test
+    void theLineUnitExtractMetadataGainsNoNewKey() {
+        // DAR-BE-050's shipped pair must not see a new requestMetadata key.
+        Map result = extractUnits([order("M153320", "6678687481987", [item("01", "15210699161731")])])
+
+        assertFalse(((Map) result.requestMetadata).containsKey("keptNullShopifyIdCount"))
+    }
+
+    @Test
+    void theExchangeExclusionCanBeTurnedOffAtUnitGrain() {
+        Map result = extractUnits([
+                order("M153320", "6678687481987", [item("01", "15210699161731")]),
+                order("M153427", "6678687481987", [item("01", "15210793599107")],
+                        [orderItemAssocs: [[orderItemAssocTypeId: "EXCHANGE"]]])],
+                [applyExchangeExclusion: false, requireShopifyLineId: false])
+
+        assertEquals(2, records(result).size())
+        assertEquals(0, ((Map) ((Map) result.requestMetadata).filters).excludedExchangeOrderCount)
+    }
+
+    // DAR-UI-044: what a rule drops is kept for the conclude pass. The UNIT row is collected, not the
+    // merged order+unit view the rule was tested against, so the sidecar has the kept extract's shape.
+    @Test
+    void unitGrainCollectsTheRejectedUnitRowNotTheMergedView() {
+        Map result = extractUnits([order("M1", "6678687481987",
+                [item("01", "15210699161731", 1, "ITEM_COMPLETED"), item("02", "15210699161732", 1, "ITEM_CANCELLED")],
+                [salesChannelEnumId: "WEB_SALES_CHANNEL", productStoreId: "STORE"])],
+                [:], [[sequenceNum: 1, fieldExpression: "unitState", operator: "INCLUDE_IN", filterValues: "COMPLETED"]])
+        Map c = (Map) result.excludedCollector
+        assertEquals(1, c.total)
+        Map dropped = (Map) ((List) c.records)[0]
+        assertEquals("CANCELLED", dropped.unitState)
+        assertFalse(dropped.containsKey("productStoreId"), "order-only header fields decide, they are not written")
+        assertEquals("1:unitState", dropped._excludedBy)
+    }
+
+    @Test
+    void noRulesMeansAnEmptyCollector() {
+        Map result = extractUnits([order("M1", "6678687481987", [item("01", "15210699161731")])])
+        assertEquals(0, ((Map) result.excludedCollector).total)
     }
 }

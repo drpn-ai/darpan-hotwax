@@ -19,7 +19,7 @@ def sourceConfig = ec.entity.find("darpan.hotwax.HotWaxOmsRestSourceConfig")
         .useCache(false)
         .one()
 
-OmsRestSourceSupport.requireUsableOmsConfig(ec, sourceConfig, configIdValue, companyUserGroupIdValue, "OMS_ORDER_LINE_UNITS")
+OmsRestSourceSupport.requireUsableOmsConfig(ec, sourceConfig, configIdValue, companyUserGroupIdValue, "OMS_ORDER_ITEMS")
 
 if (sourceConfig && (sourceConfig.isActive ?: "Y").toString().equalsIgnoreCase("N")) {
     ec.message.addError("OMS REST source config ${configIdValue} is inactive.")
@@ -42,8 +42,8 @@ String outputBaseLocation = outputLocation ?: DataManagerSupport.resolveReconcil
 
 File outputDirectory = DataManagerSupport.resolveDirectoryFile(ec, outputBaseLocation, true)
 File workFile = outputDirectory != null
-        ? File.createTempFile("oms-order-line-units-extract-", ".partial", outputDirectory)
-        : File.createTempFile("oms-order-line-units-extract-", ".partial")
+        ? File.createTempFile("oms-order-items-extract-", ".partial", outputDirectory)
+        : File.createTempFile("oms-order-items-extract-", ".partial")
 
 final long PROGRESS_MIN_INTERVAL_MS = 2000L
 Closure pageProgressListener = null
@@ -67,19 +67,18 @@ if (progressRunId) {
 
 try {
     List sourceFiltersValue = (sourceFilters instanceof List) ? (List) sourceFilters : null
-    // No keepRecordFields is passed, and that is deliberate rather than an omission: the unit
-    // record IS the projection. An order-shaped keepRecordFields would strip every field a unit
-    // record has, leaving a file of empty objects that still counts as a successful extract.
-    //
-    // applyExchangeExclusion is stated explicitly even though it already defaults to true for
-    // SALES_ORDER, because at item grain the temptation is to turn it OFF (see the connector seed
-    // comment, and DAR-BE-050 D2): an exchange line sits on an ORIGINAL Shopify order that may be
-    // months old, so a creation-windowed Shopify sweep never sees it while OMS lands a new EXC-
-    // order inside the window. Inverting this makes every exchange a false missing-in-Shopify.
+    // Tri-system D4. Same flattener and unit record as extract#HotWaxOmsOrderLineUnits, with the
+    // two DAR-BE-050 guards that only exist for the Shopify side turned OFF:
+    //  - applyExchangeExclusion false: an EXC- order is a real OMS order that syncs to NetSuite the
+    //    same day. The exclusion exists only for Shopify's creation-window asymmetry.
+    //  - requireShopifyLineId false: the NetSuite hops key on the OMS order, so an item with no
+    //    Shopify line id is still a real unit; it is emitted with that id null, and counted.
+    // No keepRecordFields, for the same reason as the sibling: the unit record IS the projection.
     Map extractOptions = [
             emitGrain             : "ORDER_LINE_UNIT",
             windowFieldName       : windowFieldName?.toString()?.trim() ?: null,
-            applyExchangeExclusion: true,
+            applyExchangeExclusion: false,
+            requireShopifyLineId  : false,
             orderStatusIds        : (orderStatusIds instanceof List) ? (List) orderStatusIds : null,
     ]
     Map extraction = OmsRestSourceSupport.extractOrdersToFile(sourceConfig, windowStart, windowEnd, workFile,
@@ -90,12 +89,11 @@ try {
     recordCount = extraction.recordCount ?: 0
     dataAvailable = extraction.dataAvailable == true
 
-    // Units the extract could not key are LOST, not excluded, so they are surfaced as a warning
-    // rather than left for whoever thinks to open requestMetadata. A clean run that silently
-    // dropped units is the failure this whole pair exists to prevent.
-    int droppedNullLineIdCount = (requestMetadata?.droppedNullLineIdCount ?: 0) as int
-    if (droppedNullLineIdCount > 0) {
-        warnings = warnings + ["${droppedNullLineIdCount} order item(s) had no Shopify line id and were not compared.".toString()]
+    // Nothing is dropped for want of a Shopify id here, but the count is still surfaced: an item
+    // OMS never tied to a Shopify line is worth knowing about even when it is compared.
+    int keptNullShopifyIdCount = (requestMetadata?.keptNullShopifyIdCount ?: 0) as int
+    if (keptNullShopifyIdCount > 0) {
+        warnings = warnings + ["${keptNullShopifyIdCount} order item(s) had no Shopify order or line id; they were compared with it left empty.".toString()]
     }
 
     if (errors) {

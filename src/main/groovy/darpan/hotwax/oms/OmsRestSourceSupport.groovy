@@ -5,6 +5,7 @@ import groovy.json.JsonSlurper
 
 import darpan.facade.common.SharedConfigAccessSupport
 import darpan.reconciliation.automation.SourceEndpointAccessSupport
+import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
 import darpan.reconciliation.source.SourceFilterSupport
 
 import static darpan.common.ValueSupport.boundedInt
@@ -266,13 +267,17 @@ class OmsRestSourceSupport {
         // never has to be told apart from "nothing was dropped".
         int droppedNullLineIdCount = 0
         int nonUnitQuantityCount = 0
+        int keptNullShopifyIdCount = 0
         int extractedRecordCount = 0
         int consumedRawCount = 0
         List exchangeManifest = []
         boolean exchangeManifestTruncated = false
         Map<Integer, Integer> excludedByRuleCounts = [:]
         Map<Integer, Integer> fieldAbsentByRuleCounts = [:]
+        // DAR-UI-044: every page's dropped units, for the conclude pass's sidecar.
+        Map excludedCollector = ExcludedRecordsSidecar.newCollector()
         Closure pageConsumer = { Map<String, Object> pageBundle ->
+            ExcludedRecordsSidecar.merge(excludedCollector, (Map) pageBundle.excludedCollector)
             // Pages arrive as pre-filtered, pre-serialized bundles (built on the fetch thread),
             // so consuming a page is an append plus counter bumps — no parsed graphs retained.
             excludedNonSalesOrderCount += (int) pageBundle.excludedNonSalesOrderCount
@@ -297,6 +302,7 @@ class OmsRestSourceSupport {
             extractedRecordCount += writtenCount
             droppedNullLineIdCount += (int) (pageBundle.droppedNullLineIdCount ?: 0)
             nonUnitQuantityCount += (int) (pageBundle.nonUnitQuantityCount ?: 0)
+            keptNullShopifyIdCount += (int) (pageBundle.keptNullShopifyIdCount ?: 0)
             consumedRawCount += (int) pageBundle.rawCount
             // Windowed extracts are bounded by their window; only a window-less (state) extract needs
             // this. Fail hard — never truncate. Branches on supplied-ness (not fromMillis/thruMillis
@@ -368,6 +374,11 @@ class OmsRestSourceSupport {
         if (options.get("emitGrain") == "ORDER_LINE_UNIT") {
             requestMetadata.droppedNullLineIdCount = droppedNullLineIdCount
             requestMetadata.nonUnitQuantityCount = nonUnitQuantityCount
+            // Only when lines are NOT required (OMS_ORDER_ITEMS): DAR-BE-050's shipped pair keeps
+            // its exact metadata shape, where this number is structurally zero anyway.
+            if (options.get("requireShopifyLineId") == false) {
+                requestMetadata.keptNullShopifyIdCount = keptNullShopifyIdCount
+            }
         }
         requestMetadata.filters = buildFilterMetadata(excludedNonSalesOrderCount, excludedExchangeOrderCount,
                 exchangeManifestTruncated, excludeRules, excludedByRuleCounts, fieldAbsentByRuleCounts,
@@ -387,6 +398,7 @@ class OmsRestSourceSupport {
             return baseResult
         }
         return baseResult + [
+                excludedCollector: excludedCollector,
                 dataAvailable: extractedRecordCount > 0,
                 recordCount  : extractedRecordCount,
                 warnings     : warnings,
@@ -1272,6 +1284,8 @@ class OmsRestSourceSupport {
                 fieldAbsentByRuleCounts   : shaped.fieldAbsentByRuleCounts,
                 droppedNullLineIdCount    : shaped.droppedNullLineIdCount,
                 nonUnitQuantityCount      : shaped.nonUnitQuantityCount,
+                keptNullShopifyIdCount    : shaped.keptNullShopifyIdCount,
+                excludedCollector         : shaped.excludedCollector,
                 serializedRecords         : shaped.serializedRecords,
         ]
     }
@@ -1280,29 +1294,64 @@ class OmsRestSourceSupport {
      * Filter -> (flatten) -> project -> serialize, split out of prepareOrdersPage so the shaping
      * rules are reachable without an HTTP round trip.
      *
-     * Order of operations is load-bearing: the EXCHANGE scan needs the FULL record, so filtering
-     * precedes both flattening and projection.
+     * Order of operations is load-bearing: the EXCHANGE scan needs the FULL record, so the built-in
+     * exclusions precede both flattening and projection.
+     *
+     * Configured source filters run at the grain that is emitted. At order grain that is the order
+     * document, exactly as before. At unit grain (tri-system D3) they run per UNIT, against the
+     * order's top-level scalar fields overlaid by the unit row, so a rule on unitState or item
+     * statusId can match while an order-level rule (salesChannelEnumId) still drops every unit of
+     * its order. Per-rule counts are then UNITS, not orders.
      */
     static Map<String, Object> shapePageRecords(List rawRecords, Map extractOptions,
                                                 List excludeRules = null,
                                                 Set<String> keepFieldSet = null) {
         Map<String, Object> options = normalizeExtractOptions(extractOptions)
-        Map<String, Object> pageFilter = filterComparableOrderRecords(rawRecords, excludeRules, extractOptions)
+        boolean unitGrain = options.get("emitGrain") == "ORDER_LINE_UNIT"
+        Map<String, Object> pageFilter = filterComparableOrderRecords(rawRecords,
+                unitGrain ? null : (List<Map<String, Object>>) excludeRules, extractOptions)
         List filtered = (List) pageFilter.records
+        Map<Integer, Integer> excludedByRuleCounts = (Map<Integer, Integer>) pageFilter.excludedByRuleCounts
+        Map<Integer, Integer> fieldAbsentByRuleCounts = (Map<Integer, Integer>) pageFilter.fieldAbsentByRuleCounts
 
         List outputRecords
         int droppedNullLineIdCount = 0
         int nonUnitQuantityCount = 0
-        if (options.get("emitGrain") == "ORDER_LINE_UNIT") {
+        int keptNullShopifyIdCount = 0
+        Map excludedCollector = ExcludedRecordsSidecar.newCollector()
+        if (unitGrain) {
             // Unit grain does NOT take keepFieldSet: the unit record IS the projection, and a
             // caller's order-shaped keepRecordFields would strip every field it has.
+            Map flattenOptions = [requireShopifyLineId: options.get("requireShopifyLineId")]
             outputRecords = []
             for (Object record : filtered) {
                 if (!(record instanceof Map)) continue
-                Map flattened = OmsOrderLineUnitSupport.flattenOrderToUnits((Map) record)
-                outputRecords.addAll((List) flattened.units)
+                Map flattened = OmsOrderLineUnitSupport.flattenOrderToUnits((Map) record, flattenOptions)
                 droppedNullLineIdCount += (flattened.droppedNullLineId as int)
                 nonUnitQuantityCount += (flattened.nonUnitQuantityCount as int)
+                keptNullShopifyIdCount += (flattened.keptNullShopifyIdCount as int)
+                if (!excludeRules) {
+                    outputRecords.addAll((List) flattened.units)
+                    continue
+                }
+                Map<String, Object> orderScalars = topLevelScalars((Map) record)
+                for (Object unit : (List) flattened.units) {
+                    // The merged map decides; the UNIT is what gets written, so order header
+                    // fields never leak into the output shape.
+                    Map<String, Object> view = new LinkedHashMap<String, Object>(orderScalars)
+                    view.putAll((Map) unit)
+                    Map<String, Object> verdict = SourceFilterSupport.evaluate(view, (List<Map<String, Object>>) excludeRules)
+                    if (verdict == null) {
+                        outputRecords.add(unit)
+                        continue
+                    }
+                    ExcludedRecordsSidecar.collect(excludedCollector, (Map) unit, (Map) verdict.get("rule"))
+                    Integer sequenceNum = (Integer) ((Map) verdict.get("rule")).get("sequenceNum")
+                    Map<Integer, Integer> bucket = SourceFilterSupport.REASON_FIELD_ABSENT == verdict.get("reason")
+                            ? fieldAbsentByRuleCounts
+                            : excludedByRuleCounts
+                    bucket.put(sequenceNum, (bucket.get(sequenceNum) ?: 0) + 1)
+                }
             }
         } else {
             // Projection happens after filtering (the EXCHANGE scan needs the full record) and
@@ -1323,12 +1372,23 @@ class OmsRestSourceSupport {
                 excludedNonSalesOrderCount: pageFilter.excludedNonSalesOrderCount,
                 excludedExchangeOrderCount: pageFilter.excludedExchangeOrderCount,
                 excludedExchangeOrders    : pageFilter.excludedExchangeOrders,
-                excludedByRuleCounts      : pageFilter.excludedByRuleCounts,
-                fieldAbsentByRuleCounts   : pageFilter.fieldAbsentByRuleCounts,
+                excludedByRuleCounts      : excludedByRuleCounts,
+                fieldAbsentByRuleCounts   : fieldAbsentByRuleCounts,
                 droppedNullLineIdCount    : droppedNullLineIdCount,
                 nonUnitQuantityCount      : nonUnitQuantityCount,
+                keptNullShopifyIdCount    : keptNullShopifyIdCount,
+                excludedCollector         : excludedCollector,
                 serializedRecords         : serialized.toString(),
         ]
+    }
+
+    /** Top-level fields of an order document that are not nested lists or maps. */
+    private static Map<String, Object> topLevelScalars(Map record) {
+        Map<String, Object> scalars = new LinkedHashMap<String, Object>()
+        record.each { Object key, Object value ->
+            if (!(value instanceof Map) && !(value instanceof Collection)) scalars.put(key?.toString(), value)
+        }
+        return scalars
     }
 
     protected static Set<String> normalizeKeepFields(List keepRecordFields) {
@@ -1947,6 +2007,11 @@ class OmsRestSourceSupport {
                 orderStatusIds           : orderStatusIds,
                 applyExchangeExclusion   : applyExchangeExclusion,
                 emitGrain                : unitGrain ? "ORDER_LINE_UNIT" : null,
+                // Tri-system D4. Unit grain only; defaults to true (DAR-BE-050). Only an explicit
+                // false turns it off, so a missing or garbled value can never start emitting
+                // unkeyed units into a pair whose key needs the Shopify line.
+                requireShopifyLineId     : !(raw.get("requireShopifyLineId") == Boolean.FALSE
+                        || (normalize(raw.get("requireShopifyLineId"))?.toLowerCase(Locale.ROOT) in ["false", "n"])),
                 // Explicit null check, not Elvis: normalizeInt(0) returns 0, which Groovy's ?: treats as
                 // falsy, so `maxRecords: 0` would silently become the 50000 default — the same
                 // looks-like-success-but-is-wrong failure this ceiling exists to prevent.

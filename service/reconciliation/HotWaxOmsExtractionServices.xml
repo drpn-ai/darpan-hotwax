@@ -418,6 +418,100 @@
         </out-parameters>
     </service>
 
+    <service verb="extract" noun="HotWaxOmsOrderItems" type="script" transaction="ignore" allow-remote="false" authenticate="true"
+            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsOrderItems.groovy">
+        <description>Tri-system order runs (spec 2026-09-30, D4). Extract HotWax OMS order items as ONE
+            RECORD PER UNIT for the OMS-to-NetSuite hops, writing normalized JSON output to the
+            automation data-manager folder. Same /rest/s1/oms/orders endpoint and the same flattener
+            as extract#HotWaxOmsOrderLineUnits; a distinct service name is required because the
+            connector registry resolves a connector row by its extract service name, and this one is
+            gated on the OMS_ORDER_ITEMS endpoint.
+
+            Each unit carries unitState (OPEN, COMPLETED, CANCELLED, OTHER) and stateOrdinal (1..k
+            within order, line and state), netsuiteOrderId (the NETSUITE_ORDER_ID identification, or
+            the literal NONE, because composite keys refuse a blank part), omsOrderStatusId and the
+            ship group's facilityId.
+
+            TWO DELIBERATE DIFFERENCES from extract#HotWaxOmsOrderLineUnits, which is why this is a
+            connector and not a filter (changing that service's defaults would change a shipped pair):
+            the exchange exclusion is OFF, because an EXC- order is a real OMS order that syncs to
+            NetSuite the same day and the exclusion exists only for Shopify's creation-window
+            asymmetry; and items with no Shopify order or line id are KEPT with that id null (counted
+            as keptNullShopifyIdCount), because the NetSuite hops key on the OMS order.
+
+            Source filters run per UNIT (D3), against the order's top-level fields overlaid by the
+            unit row, so unitState and item statusId can be filtered on.</description>
+        <in-parameters>
+            <parameter name="omsRestSourceConfigId" required="true">
+                <description>Tenant-owned HotWaxOmsRestSourceConfig identifier. Item extraction reuses
+                    the same OMS credentials and baseUrl as sales-order extraction.</description>
+            </parameter>
+            <parameter name="automationExecutionId">
+                <description>Automation execution id used to choose the default data-manager output folder.</description>
+            </parameter>
+            <parameter name="companyUserGroupId">
+                <description>Trusted automation owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
+            </parameter>
+            <parameter name="windowStart" required="true">
+                <description>Start of the automation window; accepts Timestamp, Date, ISO-8601 text,
+                    SQL timestamp text, or epoch milliseconds.</description>
+            </parameter>
+            <parameter name="windowEnd" required="true">
+                <description>End of the automation window, same accepted formats as windowStart.</description>
+            </parameter>
+            <parameter name="windowFieldName">
+                <description>OrderHeader date field the window filters on. Defaults to orderDate. Changing one
+                    side of a pair only produces the DAR-BE-038 skew: structurally guaranteed false
+                    positives on every run.</description>
+            </parameter>
+            <parameter name="orderStatusIds" type="List">
+                <parameter name="statusId"/>
+                <description>Optional statuses to include, sent to the OMS as a server-side IN filter.</description>
+            </parameter>
+            <parameter name="outputLocation">
+                <description>Optional output directory. Defaults to runtime://datamanager/reconciliation-runs/{automationExecutionId}/{timestamp}/.</description>
+            </parameter>
+            <parameter name="fileName">
+                <description>Optional output file name.</description>
+            </parameter>
+            <parameter name="sourceFilters" type="List">
+                <parameter name="filterRule" type="Map">
+                    <parameter name="sequenceNum" type="Integer"/>
+                    <parameter name="fieldExpression"/>
+                    <parameter name="operator"/>
+                    <parameter name="filterValues"/>
+                </parameter>
+                <description>Optional include/exclude rules, same operators as extract#HotWaxOmsOrders,
+                    evaluated per UNIT against the order's top-level fields overlaid by the unit row (the
+                    unit wins on a shared name such as statusId). Per-rule counts are units.</description>
+            </parameter>
+            <parameter name="reconciliationRunResultId">
+                <description>Optional observability run id for progress heartbeats. Advisory only.</description>
+            </parameter>
+            <parameter name="progressStageCode">
+                <description>Which extract stage this run is: EXTRACT_FILE1 or EXTRACT_FILE2.</description>
+            </parameter>
+            <parameter name="expectedRecordCount" type="Integer">
+                <description>Optional expected total, which adds a progress percent alongside the count.</description>
+            </parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="dataAvailable" type="Boolean"/>
+            <parameter name="fileLocation"/>
+            <parameter name="fileName"/>
+            <parameter name="recordCount" type="Integer">
+                <description>Number of UNITS written, not orders.</description>
+            </parameter>
+            <parameter name="requestMetadata" type="Map">
+                <description>Carries keptNullShopifyIdCount (items emitted with a null Shopify id),
+                    droppedNullLineIdCount (structurally zero here) and nonUnitQuantityCount beside the
+                    usual filter counts.</description>
+            </parameter>
+            <parameter name="warnings" type="List"/>
+            <parameter name="errors" type="List"/>
+        </out-parameters>
+    </service>
+
     <service verb="lookup" noun="HotWaxOmsOrdersByExternalId" type="script" transaction="ignore"
             allow-remote="false" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/lookup/lookupOmsOrdersByExternalId.groovy">
