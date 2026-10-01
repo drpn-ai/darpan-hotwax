@@ -167,4 +167,68 @@ class OmsGqlOrderPageSourceTests {
             assertEquals(true, pagination.orderTypeFilteredServerSide)
         } finally { out.delete() }
     }
+
+    // ---- review fix pass ----
+
+    @Test
+    void anUnsupportedFilterFieldFailsEvenWithNoProjection() {
+        ScriptedClient client = new ScriptedClient([])
+        File out = File.createTempFile("gql-", ".json"); out.delete()
+        Map result = run(client, out, null, [[fieldExpression: "salesChannelEnumId", operator: "EXCLUDE_IN",
+                                              filterValues: "POS_SALES_CHANNEL", sequenceNum: 1]])
+        assertTrue(((List) result.errors)[0].toString().contains("salesChannelEnumId"))
+        assertEquals(0, client.calls.size())
+    }
+
+    @Test
+    void aFilterFieldIsSelectedEvenWithNoProjection() {
+        ScriptedClient client = new ScriptedClient([ordersPage([], false)])
+        File out = File.createTempFile("gql-", ".json")
+        try {
+            run(client, out, null, [[fieldExpression: "productStoreId", operator: "EXCLUDE_IN", filterValues: "X", sequenceNum: 1]])
+            assertTrue((client.calls[0].document as String).contains("productStoreId"))
+        } finally { out.delete() }
+    }
+
+    private static void assertFailsClosed(List<Map> queued, String expected, Map config = CONFIG) {
+        ScriptedClient client = new ScriptedClient(queued)
+        File out = File.createTempFile("gql-", ".json"); out.delete()
+        Map result = OmsRestSourceSupport.extractOrdersToFile(config, FROM, THRU, out, KEEP, null, null, null,
+                OmsGqlOrderPageSource.fetcher(client))
+        assertTrue(((List) result.errors).size() > 0, "expected an error, got a clean extract")
+        assertTrue(((List) result.errors)[0].toString().contains(expected), ((List) result.errors)[0].toString())
+        assertEquals(false, result.dataAvailable)
+        assertFalse(out.exists())
+    }
+
+    @Test
+    void aResponseWithNoOrdersConnectionIsAnErrorNotAnEmptyExtract() {
+        assertFailsClosed([[data: [:]]], "MALFORMED")
+        assertFailsClosed([[data: null]], "MALFORMED")
+        assertFailsClosed([[data: [orders: [pageInfo: [hasNextPage: false]]]]], "MALFORMED")
+    }
+
+    @Test
+    void hasNextPageWithoutACursorIsAnErrorNotATruncatedExtract() {
+        assertFailsClosed([ordersPage([order("M1")], true, null), assocsPage([])], "MALFORMED")
+    }
+
+    @Test
+    void aRepeatedCursorIsAnErrorNotAnEndlessLoop() {
+        assertFailsClosed([ordersPage([order("M1")], true, "C1"), assocsPage([]),
+                           ordersPage([order("M2")], true, "C1"), assocsPage([])], "MALFORMED")
+    }
+
+    @Test
+    void anAssocsResponseWithNoConnectionIsAnError() {
+        // A missing exchange pass would let exchange orders re-enter as "in OMS, missing from Shopify".
+        assertFailsClosed([ordersPage([order("M1")], false), [data: [:]]], "MALFORMED")
+    }
+
+    @Test
+    void thePageCeilingFromConfigStopsARunawayCursor() {
+        assertFailsClosed([ordersPage([order("M1")], true, "C1"), assocsPage([]),
+                           ordersPage([order("M2")], true, "C2"), assocsPage([])],
+                "page ceiling", CONFIG + [maxOrdersPageCount: 1])
+    }
 }

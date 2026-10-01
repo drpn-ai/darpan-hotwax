@@ -1,5 +1,6 @@
 package darpan.hotwax.oms
 
+import groovy.xml.XmlSlurper
 import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertTrue
@@ -76,5 +77,26 @@ class OmsGqlConnectorWiringTests {
         String script = read("src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsGqlOrders.groovy")
         new GroovyShell().parse(script, "extractOmsGqlOrders.groovy")
         assertTrue(script.contains("ExcludedRecordsSidecar.writeBeside("))
+    }
+
+    private static final String FIELDS = "../darpan/data/SourceSystemConnectorFieldSeedData.xml"
+
+    @Test
+    void omsGqlFieldPillsOfferOnlyFieldsTheDocumentCarries() {
+        // Review I1: the rules board offers API-side fields only from these rows. Every OMS_GQL pill must
+        // be a field the GraphQL document can supply — a pill on salesChannelEnumId would build a
+        // filter the extract then refuses.
+        def doc = new XmlSlurper().parseText(read(FIELDS))
+        List<String> paths = doc.'**'.findAll {
+            it.name() == 'darpan.reconciliation.SourceSystemConnectorField' && it.@systemEnumId == 'OMS_GQL'
+        }.collect { it.@fieldPath.toString().replace('$.records[*].', '') }
+        assertTrue(paths.containsAll(["orderId", "externalId", "hasPaymentPreference"]), paths.toString())
+        Set<String> suppliable = OmsGqlQueries.HEADER_FIELDS + OmsGqlQueries.DERIVED_FIELDS
+        assertTrue(paths.every { suppliable.contains(it) }, "unsuppliable pill(s): ${paths.findAll { !suppliable.contains(it) }}")
+    }
+
+    @Test
+    void shopifyOffersTheHasPaymentTransactionPill() {
+        assertTrue(read(FIELDS).contains('systemEnumId="SHOPIFY" fieldPath="$.records[*].hasPaymentTransaction"'))
     }
 }

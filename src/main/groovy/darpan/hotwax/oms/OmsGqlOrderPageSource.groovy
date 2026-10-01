@@ -50,12 +50,18 @@ class OmsGqlOrderPageSource {
 
         String filter = OmsGqlQueries.windowFilter(iso((Long) ctx.fromMillis), iso((Long) ctx.thruMillis))
         Closure pageConsumer = (Closure) ctx.pageConsumer
+        int maxPages = maxPageCount((Map) ctx.config)
         try {
             String cursor = null
+            Set<String> seenCursors = [] as Set
             while (true) {
+                if ((pagination.pageCount as int) >= maxPages) {
+                    throw new OmsGqlException("MALFORMED", "hit the page ceiling of ${maxPages} with more pages still " +
+                            "reported (maxOrdersPageCount); refusing to return a truncated extract")
+                }
                 Map page = client.execute((String) plan.document,
                         OmsGqlQueries.pageVariables(filter, (int) plan.pageSize, cursor), (int) plan.reservation)
-                Map connection = (Map) (((Map) (page.data ?: [:])).orders ?: [:])
+                Map connection = requireConnection(page, "orders")
                 List<Map> nodes = OmsGqlOrderGrainAssembler.edgeNodes(connection)
                 pagination.pageCount = (pagination.pageCount as int) + 1
 
@@ -72,9 +78,8 @@ class OmsGqlOrderPageSource {
                     pageConsumer.call(bundle)
                 }
 
-                Map pageInfo = (Map) (connection.pageInfo ?: [:])
-                cursor = pageInfo.endCursor as String
-                if (pageInfo.hasNextPage != true || !cursor) break
+                cursor = nextCursor(connection, seenCursors, "orders")
+                if (cursor == null) break
             }
         } catch (OmsGqlException e) {
             // Never an empty extract: THROTTLED in particular arrives as HTTP 200 with no data.
@@ -86,17 +91,50 @@ class OmsGqlOrderPageSource {
     private static List<Map> fetchExchangeAssocs(OmsGqlClient client, List<String> orderIds, Map pagination) {
         List<Map> all = []
         String cursor = null
+        Set<String> seenCursors = [] as Set
         while (true) {
             Map page = client.execute(OmsGqlQueries.exchangeAssocsDocument(),
                     OmsGqlQueries.exchangeAssocsVariables(orderIds, cursor), OmsGqlQueries.ASSOC_RESERVATION)
             pagination.exchangeAssocCalls = (pagination.exchangeAssocCalls as int) + 1
-            Map connection = (Map) (((Map) (page.data ?: [:])).orderItemAssocs ?: [:])
+            Map connection = requireConnection(page, "orderItemAssocs")
             all.addAll(OmsGqlOrderGrainAssembler.edgeNodes(connection))
-            Map pageInfo = (Map) (connection.pageInfo ?: [:])
-            cursor = pageInfo.endCursor as String
-            if (pageInfo.hasNextPage != true || !cursor) break
+            cursor = nextCursor(connection, seenCursors, "orderItemAssocs")
+            if (cursor == null) break
         }
         return all
+    }
+
+    /**
+     * The connection, or MALFORMED. A 200 whose body lacks it (data:null, a proxy's {}, orders:null)
+     * must never read as an empty page — that is a clean, empty, wrong extract (review I2).
+     */
+    private static Map requireConnection(Map page, String root) {
+        Object data = page?.data
+        Object connection = (data instanceof Map) ? ((Map) data).get(root) : null
+        if (!(connection instanceof Map) || !(((Map) connection).get("edges") instanceof List)) {
+            throw new OmsGqlException("MALFORMED", "response carried no ${root} connection with edges: ${String.valueOf(data).take(200)}")
+        }
+        return (Map) connection
+    }
+
+    /** The next cursor, null when done; MALFORMED on "more" without a cursor, or a cursor seen before. */
+    private static String nextCursor(Map connection, Set<String> seenCursors, String root) {
+        Map pageInfo = (Map) (connection.pageInfo ?: [:])
+        if (pageInfo.hasNextPage != true) return null
+        String cursor = pageInfo.endCursor as String
+        if (!cursor) throw new OmsGqlException("MALFORMED", "${root} reported hasNextPage with no endCursor; refusing to truncate")
+        if (!seenCursors.add(cursor)) throw new OmsGqlException("MALFORMED", "${root} repeated cursor ${cursor}; refusing to loop")
+        return cursor
+    }
+
+    private static int maxPageCount(Map config) {
+        Object raw = config?.maxOrdersPageCount
+        try {
+            int value = raw == null ? OmsRestSourceSupport.MAX_ORDERS_PAGE_COUNT : (raw.toString().trim() as int)
+            return Math.max(1, value)
+        } catch (Exception ignored) {
+            return OmsRestSourceSupport.MAX_ORDERS_PAGE_COUNT
+        }
     }
 
     private static String iso(Long millis) {

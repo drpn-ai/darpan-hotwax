@@ -42,14 +42,18 @@ class OmsGqlQueries {
             shipGroups     : [selection: "shipGroups(first: 3) { edges { node { shipGroupSeqId facilityId shipmentMethodTypeId carrierPartyId } } }", cost: 12.5d],
     ]
 
+    /**
+     * The fields the run reads: the projection plus every source-filter field. Filter fields are added
+     * EVEN WITHOUT a projection (review C1): a filter on a field the document never selected excludes
+     * nothing. Null only when there is neither a projection nor a filter.
+     */
     static Set<String> requiredFields(Set<String> keepFieldSet, List<Map> excludeRules) {
-        if (keepFieldSet == null) return null
-        Set<String> required = new LinkedHashSet<String>(keepFieldSet)
+        Set<String> required = new LinkedHashSet<String>(keepFieldSet ?: [])
         (excludeRules ?: []).each { Map rule ->
             String field = (rule?.get("fieldExpression") as String)?.trim()
             if (field) required.add(field)
         }
-        return required
+        return (keepFieldSet == null && required.isEmpty()) ? null : required
     }
 
     static Map orderGrainPagePlan(Set<String> requiredFields) {

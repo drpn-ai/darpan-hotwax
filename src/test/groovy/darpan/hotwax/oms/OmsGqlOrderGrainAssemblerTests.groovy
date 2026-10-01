@@ -95,4 +95,20 @@ class OmsGqlOrderGrainAssemblerTests {
         assertTrue(o.shipGroups instanceof List)
         assertEquals("99", ((Map) ((List) o.shipGroups)[0]).facilityId)
     }
+
+    @Test
+    void orderDateAndGrandTotalTakeTheRestTypes() {
+        // Review I5: REST emits orderDate as epoch millis and grandTotal as a number; GraphQL sends an
+        // ISO instant and a decimal string. The extract promises REST's record shape.
+        Map o = OmsGqlOrderGrainAssembler.assemble([order("M1") + [orderDate: "2026-09-24T17:00:00Z", grandTotal: "96.98"]], [])[0]
+        assertEquals(java.time.Instant.parse("2026-09-24T17:00:00Z").toEpochMilli(), o.orderDate)
+        assertEquals(new BigDecimal("96.98"), o.grandTotal)
+    }
+
+    @Test
+    void valuesThatDoNotParseAreLeftAsTheyCame() {
+        Map o = OmsGqlOrderGrainAssembler.assemble([order("M1") + [orderDate: "not-a-date", grandTotal: null]], [])[0]
+        assertEquals("not-a-date", o.orderDate)
+        assertEquals(null, o.grandTotal)
+    }
 }

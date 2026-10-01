@@ -21,6 +21,16 @@ class OmsGqlOrderGrainAssembler {
         return edges.collect { ((it as Map)?.node) as Map }.findAll { it != null }
     }
 
+    private static Object toEpochMillis(Object value) {
+        if (!(value instanceof CharSequence)) return value
+        try { return java.time.Instant.parse(value.toString()).toEpochMilli() } catch (Exception ignored) { return value }
+    }
+
+    private static Object toDecimal(Object value) {
+        if (!(value instanceof CharSequence)) return value
+        try { return new BigDecimal(value.toString().trim()) } catch (Exception ignored) { return value }
+    }
+
     static List<Map> assemble(List<Map> orderNodes, List<Map> assocNodes) {
         Map<String, List<Map>> exchangeByOrder = [:]
         for (Map row : (assocNodes ?: [])) {
@@ -43,6 +53,11 @@ class OmsGqlOrderGrainAssembler {
             order.put("paymentPreferenceSlotsFull", opps.size() >= OmsGqlQueries.PAYMENT_PREF_SLOTS)
 
             if (order.containsKey("shipGroups")) order.put("shipGroups", edgeNodes(order.get("shipGroups")))
+
+            // REST's value types (review I5): orderDate as epoch millis, grandTotal as a number. A value
+            // that does not parse is kept as it came rather than dropped.
+            order.put("orderDate", toEpochMillis(order.get("orderDate")))
+            order.put("grandTotal", toDecimal(order.get("grandTotal")))
 
             List<Map> grafts = exchangeByOrder.get(orderId)
             if (grafts) order.put("orderItemAssocs", grafts)

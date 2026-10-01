@@ -97,4 +97,12 @@ class OmsGqlQueriesTests {
         assertEquals(600, OmsGqlQueries.estimatedPageCost(25, 3, 0, []))
         assertEquals(400, OmsGqlQueries.estimatedPageCost(25, 1, 0, []))
     }
+
+    @Test
+    void requiredFieldsKeepsFilterFieldsWhenThereIsNoProjection() {
+        // Review C1: with no projection the filter fields were discarded, so a filter on a field the
+        // document never selected excluded nothing.
+        assertEquals(["productStoreId"] as Set, OmsGqlQueries.requiredFields(null,
+                [[fieldExpression: "productStoreId", operator: "EXCLUDE_IN", sequenceNum: 1]]))
+    }
 }
