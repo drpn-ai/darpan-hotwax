@@ -138,7 +138,8 @@ class OmsRestSourceSupport {
     static Map<String, Object> extractOrdersToFile(Object rawConfig, Object windowStart, Object windowEnd,
                                                    File targetFile, List keepRecordFields = null,
                                                    Closure pageProgressListener = null,
-                                                   List excludeFilters = null, Map extractOptions = null) {
+                                                   List excludeFilters = null, Map extractOptions = null,
+                                                   Closure pageFetcher = null) {
         OrdersDocumentSink sink = new OrdersDocumentSink({ ->
             targetFile.getParentFile()?.mkdirs()
             return new BufferedWriter(new OutputStreamWriter(new FileOutputStream(targetFile), StandardCharsets.UTF_8))
@@ -146,7 +147,7 @@ class OmsRestSourceSupport {
         Map<String, Object> result
         try {
             result = extractOrdersInternal(rawConfig, windowStart, windowEnd, sink, keepRecordFields,
-                    pageProgressListener, excludeFilters, extractOptions)
+                    pageProgressListener, excludeFilters, extractOptions, pageFetcher)
         } catch (Exception e) {
             sink.abort()
             targetFile.delete()
@@ -163,7 +164,8 @@ class OmsRestSourceSupport {
     private static Map<String, Object> extractOrdersInternal(Object rawConfig, Object windowStart, Object windowEnd,
                                                              OrdersDocumentSink sink, List keepRecordFields = null,
                                                              Closure pageProgressListener = null,
-                                                             List excludeFilters = null, Map extractOptions = null) {
+                                                             List excludeFilters = null, Map extractOptions = null,
+                                                             Closure pageFetcher = null) {
         Set<String> keepFieldSet = normalizeKeepFields(keepRecordFields)
         Map<String, Object> options = normalizeExtractOptions(extractOptions)
         Map config = toPlainMap(rawConfig)
@@ -337,8 +339,17 @@ class OmsRestSourceSupport {
             // put a spurious orderTypeId=SALES_ORDER on the wire — breaking the byte-identical
             // sales-order URL contract. The raw, possibly-null extractOptions carries the same
             // information and normalizes correctly exactly once at each leaf.
-            extraction = extractAllOrderPages(endpointUrl, fromMillis, thruMillis, headers, config, warnings,
-                    pageConsumer, keepFieldSet, excludeRules, extractOptions)
+            // DAR-BE-064: an injected page source (the GraphQL transport) feeds the SAME pageConsumer,
+            // so every counter, the exchange manifest, the sidecar collector, the sink and the filter
+            // metadata below are shared with REST rather than re-implemented.
+            extraction = pageFetcher != null
+                    ? (Map<String, Object>) pageFetcher.call([config      : config, headers: headers,
+                                                             fromMillis  : fromMillis, thruMillis: thruMillis,
+                                                             keepFieldSet: keepFieldSet, excludeRules: excludeRules,
+                                                             extractOptions: extractOptions, warnings: warnings,
+                                                             pageConsumer: pageConsumer])
+                    : extractAllOrderPages(endpointUrl, fromMillis, thruMillis, headers, config, warnings,
+                            pageConsumer, keepFieldSet, excludeRules, extractOptions)
         } catch (IOException e) {
             sink.abort()
             errors.add("Failed writing OMS extract output: ${e.message}".toString())
@@ -355,6 +366,11 @@ class OmsRestSourceSupport {
         requestMetadata.attemptCount = extraction.attemptCount ?: 0
         if (extraction.retriedWithTrailingSlash) requestMetadata.retriedWithTrailingSlash = true
         requestMetadata.pagination = extraction.pagination ?: requestMetadata.pagination
+        // Only an injected transport adds this key, so the REST metadata shape is byte-identical.
+        if (extraction.transport) {
+            requestMetadata.transport = extraction.transport
+            requestMetadata.method = "POST"
+        }
         if (requestMetadata.pagination instanceof Map) {
             ((Map) requestMetadata.pagination).fetchConcurrency = resolveOrdersFetchConcurrency(config)
         }
