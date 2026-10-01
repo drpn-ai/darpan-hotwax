@@ -121,4 +121,13 @@ class OmsGqlClientTests {
         OmsGqlException thrown = assertThrows(OmsGqlException) { c.execute("query { orders }", null, 400) }
         assertTrue(thrown.message.contains("502"))
     }
+
+    @Test
+    void aSuccessfulResponseCarryingAnEmptyErrorsListIsNotAnError() {
+        // Found by the live diff gate (2026-10-01): gorjana answers every successful query with
+        // "errors": []. Reading any non-null `errors` as a REST rejection failed every page.
+        Map body = okBody([orders: [edges: []]]) + [errors: []]
+        Map result = client([[body: body]]).execute("query { orders { edges { node { orderId } } } }", null, 400)
+        assertEquals([edges: []], ((Map) result.data).orders)
+    }
 }

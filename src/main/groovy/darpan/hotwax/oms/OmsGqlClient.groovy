@@ -86,7 +86,10 @@ class OmsGqlClient {
             String code = (first.extensions instanceof Map) ? ((Map) first.extensions).code as String : null
             throw new OmsGqlException(code ?: "GRAPHQL_ERROR", first.message as String)
         }
-        if (body.errors != null) throw new OmsGqlException("REST_REJECTED", "HTTP ${status}: ${body.errors}")
+        // An EMPTY list is success: moqui-gql answers every successful query with "errors": [].
+        if (body.errors != null && !(body.errors instanceof List)) {
+            throw new OmsGqlException("REST_REJECTED", "HTTP ${status}: ${body.errors}")
+        }
         if (status < 200 || status >= 300) throw new OmsGqlException("HTTP_${status}", "HTTP ${status} with no error body")
         return [data: body.data, errors: [], extensions: body.extensions]
     }
