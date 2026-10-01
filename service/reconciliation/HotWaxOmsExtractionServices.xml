@@ -78,6 +78,86 @@
         </out-parameters>
     </service>
 
+    <service verb="extract" noun="HotWaxOmsGqlOrders" type="script" transaction="ignore" allow-remote="false" authenticate="true"
+            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsGqlOrders.groovy">
+        <description>Extract HotWax OMS sales orders at ORDER grain over the GraphQL endpoint (/rest/s1/graphql) instead
+            of /rest/s1/oms/orders. Same parameters, same output document, same exclusions, filters and
+            projection as extract#HotWaxOmsOrders: the REST pipeline runs unchanged over GraphQL pages
+            (OmsGqlOrderPageSource). Adds hasPaymentPreference / paymentMethodTypeIds for the presence OPP rule
+            (DAR-BE-064). A DISTINCT service name is required: the connector registry resolves rows by it.</description>
+        <in-parameters>
+            <parameter name="omsRestSourceConfigId" required="true">
+                <description>Tenant-owned HotWaxOmsRestSourceConfig identifier.</description>
+            </parameter>
+            <parameter name="automationExecutionId">
+                <description>Automation execution id used to choose the default data-manager output folder.</description>
+            </parameter>
+            <parameter name="companyUserGroupId">
+                <description>Trusted automation owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
+            </parameter>
+            <parameter name="windowStart" required="true">
+                <description>Start of the automation window; accepts Timestamp, Date, ISO-8601 text, SQL timestamp text, or epoch milliseconds.</description>
+            </parameter>
+            <parameter name="windowEnd" required="true">
+                <description>End of the automation window; accepts Timestamp, Date, ISO-8601 text, SQL timestamp text, or epoch milliseconds.</description>
+            </parameter>
+            <parameter name="outputLocation">
+                <description>Optional output directory. Defaults to runtime://datamanager/reconciliation-runs/{automationExecutionId}/{timestamp}/.</description>
+            </parameter>
+            <parameter name="fileName">
+                <description>Optional output file name. Defaults to oms-orders-{fromMillis}-{thruMillis}.json.</description>
+            </parameter>
+            <parameter name="keepRecordFields" type="List">
+                <parameter name="fieldName"/>
+                <description>Optional projection: top-level record fields to keep in the output file. When
+                    present, each order is trimmed to these fields after reconciliation filtering and before
+                    writing (callers compute the list from the rule set's join-key and rule fields plus the
+                    display fields). Absent means full untrimmed records (backward compatible).</description>
+            </parameter>
+            <parameter name="sourceFilters" type="List">
+                <parameter name="filterRule" type="Map">
+                    <parameter name="sequenceNum" type="Integer"/>
+                    <parameter name="fieldExpression"/>
+                    <parameter name="operator"/>
+                    <parameter name="filterValues"/>
+                </parameter>
+                <description>Optional record-exclusion rules. Each rule names a top-level record field and a
+                    comma-separated list of exact values; matching orders are dropped before the extract file is
+                    written and counted per rule in requestMetadata.filters.configuredExclusions. Absent or empty
+                    means no configured exclusions (backward compatible).</description>
+            </parameter>
+            <parameter name="reconciliationRunResultId">
+                <description>Optional observability run id. On its own it is enough for the extractor to
+                    heartbeat a running order count onto the run's RUNNING extract step as pages are
+                    consumed, so the live view can show the count climbing. Advisory only.</description>
+            </parameter>
+            <parameter name="progressStageCode">
+                <description>Which extract stage this run is: EXTRACT_FILE1 or EXTRACT_FILE2. Required for
+                    progress to land, because the heartbeat targets the RUNNING step for this stage and the
+                    same extractor runs on either side depending on the saved run's source order. Defaults
+                    to EXTRACT_FILE2 for callers that predate this parameter.</description>
+            </parameter>
+            <parameter name="expectedRecordCount" type="Integer">
+                <description>Optional expected total, which adds a progress percent alongside the count —
+                    typically the other side's extracted record count for the same window. Only the second
+                    extract of a run can supply one; the first has nothing finished to divide against.</description>
+            </parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="dataAvailable" type="Boolean"/>
+            <parameter name="fileLocation"/>
+            <parameter name="exchangeManifestFileLocation">
+                <description>Location of the exchange-manifest sidecar written when the window contained
+                    excluded exchange orders; null otherwise. Identities/amounts only, capped at 500 entries.</description>
+            </parameter>
+            <parameter name="fileName"/>
+            <parameter name="recordCount" type="Integer"/>
+            <parameter name="requestMetadata" type="Map"/>
+            <parameter name="warnings" type="List"/>
+            <parameter name="errors" type="List"/>
+        </out-parameters>
+    </service>
+
     <service verb="extract" noun="HotWaxOmsReconciliationOrders" type="script" transaction="ignore" allow-remote="false" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsReconciliationOrders.groovy">
         <description>Extract HotWax OMS orders for an automation window from the purpose-built
