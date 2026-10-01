@@ -99,4 +99,15 @@ class OmsGqlConnectorWiringTests {
     void shopifyOffersTheHasPaymentTransactionPill() {
         assertTrue(read(FIELDS).contains('systemEnumId="SHOPIFY" fieldPath="$.records[*].hasPaymentTransaction"'))
     }
+
+    @Test
+    void itSharesTheHotwaxOrdersRemoteBecauseSavingARunValidatesIt() {
+        // Found in the browser E2E (2026-10-01): the create flow sends connector.remoteId as the source's
+        // systemMessageRemoteId and save validates it against SystemMessageRemote rows (or the virtual
+        // HOTWAX_ORDERS_API remote). An invented remote id made "Save run" fail outright.
+        String seed = read(SEED)
+        assertTrue(row(seed, 'systemEnumId="OMS"').contains('remoteId="HOTWAX_ORDERS_API"'))
+        assertTrue(row(seed, 'systemEnumId="OMS_GQL"').contains('remoteId="HOTWAX_ORDERS_API"'),
+                "OMS_GQL must use the same remote as every other HotWax connector row")
+    }
 }
