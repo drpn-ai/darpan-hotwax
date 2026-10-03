@@ -4,6 +4,7 @@ import darpan.hotwax.oms.OmsReturnsSourceSupport
 ok = false
 foundIds = []
 missingIds = []
+unresolvedIds = []
 errors = []
 
 String configIdValue = omsRestSourceConfigId?.toString()?.trim()
@@ -27,4 +28,5 @@ Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(sourceConfig, (Li
 ok = result.ok
 foundIds = result.foundIds
 missingIds = result.missingIds
+unresolvedIds = result.unresolvedIds ?: []
 errors = result.errors

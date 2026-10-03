@@ -3,6 +3,7 @@ package darpan.hotwax.oms
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
@@ -21,9 +22,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue
  */
 class OmsReturnsExtractTests {
 
+    @BeforeEach
+    void graphQlFindsNothing() {
+        // The by-id lookup's GraphQL pass (DAR-BE-040) has its own transport. These cases exercise the
+        // REST passes, so GraphQL answers "no identification" — never a real socket.
+        OmsReturnsSourceSupport.setGqlClientFactory { Map config ->
+            OmsGqlClient c = new OmsGqlClient(config, { String url, Map headers, String body ->
+                [statusCode: 200, body: JsonOutput.toJson([data: [returnIdentifications: [edges: [],
+                        pageInfo: [hasNextPage: false]]], errors: []])]
+            })
+            c.sleeper = { long ms -> }
+            return c
+        }
+    }
+
     @AfterEach
     void resetClient() {
         OmsReturnsSourceSupport.resetHttpClient()
+        OmsReturnsSourceSupport.resetGqlClientFactory()
     }
 
     @Test

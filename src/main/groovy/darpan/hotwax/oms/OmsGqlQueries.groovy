@@ -126,4 +126,30 @@ class OmsGqlQueries {
         if (after) vars.put("after", after)
         return vars
     }
+
+    // --- DAR-BE-040: returns by-id lookup ------------------------------------------------------
+
+    /**
+     * Identification types that name the Shopify return. SHOPIFY_RETURN_ID is the enum going forward;
+     * returns created before the switch keep SHOPIFY_RTN_ID. Both were live on gorjana 2026-10-03.
+     */
+    static final Set<String> SHOPIFY_RETURN_IDENTIFICATION_TYPES = ["SHOPIFY_RETURN_ID", "SHOPIFY_RTN_ID"] as Set
+    static final int RETURN_LOOKUP_CHUNK_SIZE = 20
+    /** Two slots per id: a return can carry the same id under both types. */
+    static final int RETURN_LOOKUP_PAGE_SIZE = 40
+    static final int RETURN_LOOKUP_RESERVATION = 300  // ~100 per page + 3 scalars x 40 slots, flat
+
+    static String returnIdentificationsDocument() {
+        return '''query OmsReturnIdentifications($q: String, $first: Int) {
+  returnIdentifications(query: $q, first: $first) {
+    edges { node { returnId returnIdentificationTypeId idValue } }
+    pageInfo { hasNextPage }
+  }
+}'''
+    }
+
+    /** `idValue:` takes a comma-separated `in` — 20 ids, 20 hits, one call (live 2026-10-03). */
+    static Map returnIdentificationsVariables(List<String> idValues) {
+        return [q: "idValue:${idValues.join(',')}".toString(), first: RETURN_LOOKUP_PAGE_SIZE]
+    }
 }

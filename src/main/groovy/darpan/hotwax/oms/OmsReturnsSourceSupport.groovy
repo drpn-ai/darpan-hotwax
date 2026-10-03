@@ -70,6 +70,18 @@ class OmsReturnsSourceSupport {
         OmsRestSourceSupport.resetHttpClient()
     }
 
+    private static final Closure DEFAULT_GQL_CLIENT_FACTORY = { Map config -> new OmsGqlClient(config) }
+    private static Closure gqlClientFactory = DEFAULT_GQL_CLIENT_FACTORY
+
+    /** Test seam for the by-id lookup's GraphQL pass: config -> OmsGqlClient. */
+    static void setGqlClientFactory(Closure factory) {
+        gqlClientFactory = factory ?: DEFAULT_GQL_CLIENT_FACTORY
+    }
+
+    static void resetGqlClientFactory() {
+        gqlClientFactory = DEFAULT_GQL_CLIENT_FACTORY
+    }
+
     /**
      * Delegates to OmsRestSourceSupport.safeFileName for the same reason setHttpClient does above:
      * one sanitization seam, not a reimplementation. The fallback is returns-specific
@@ -441,8 +453,79 @@ class OmsReturnsSourceSupport {
                 found.addAll((Collection<String>) second.found)
             }
         }
+
+        // GRAPHQL PASS (DAR-BE-040, 2026-10-03). reconciliationReturns now serves REFUNDED returns only:
+        // all 268 RETURN_REQUESTED returns on gorjana since Oct 1 were absent from it, and 10 sampled by
+        // their SHOPIFY_RETURN_ID resolved 0/10 through both passes above and 10/10 through GraphQL. So
+        // every pending return was being reported "confirmed missing in HotWax". Ids GraphQL cannot
+        // CHECK are unresolved, never missing: REST is blind to pending returns, so its NOT FOUND alone
+        // is not evidence of absence.
+        List<String> restMissing = ids.findAll { !found.contains(it) }
+        if (!restMissing) return [ok: true, foundIds: new ArrayList<String>(found), missingIds: [], unresolvedIds: [], errors: []]
+        Map gql = lookupShopifyReturnIdentifications(config, restMissing)
+        found.addAll((Collection<String>) gql.found)
+        Set<String> unresolved = (Set<String>) gql.unresolved
         return [ok: true, foundIds: new ArrayList<String>(found),
-                missingIds: ids.findAll { !found.contains(it) }, errors: []]
+                missingIds: ids.findAll { !found.contains(it) && !unresolved.contains(it) },
+                unresolvedIds: ids.findAll { unresolved.contains(it) },
+                errors: (List) gql.errors]
+    }
+
+    /**
+     * GraphQL returnIdentifications(idValue:) over every identification type, accepting only the
+     * Shopify return types — a NetSuite RMA id with the same digits is not the Shopify return.
+     * Returns [found: Set, unresolved: Set, errors: List]. A failed call, an ignored filter (no node
+     * echoes a requested id) or a truncated page leaves the affected ids unresolved.
+     */
+    private static Map lookupShopifyReturnIdentifications(Map config, List<String> ids) {
+        Set<String> found = new LinkedHashSet<String>()
+        Set<String> unresolved = new LinkedHashSet<String>()
+        List<String> errors = []
+        // The search string is `key:value,value`; an id carrying a separator would corrupt it.
+        List<String> askable = ids.findAll { it ==~ /[A-Za-z0-9_\-]+/ }
+        unresolved.addAll(ids.findAll { !askable.contains(it) })
+
+        OmsGqlClient client
+        try {
+            client = (OmsGqlClient) gqlClientFactory.call(config)
+        } catch (Exception e) {
+            unresolved.addAll(askable)
+            errors.add("OMS GraphQL returns lookup unavailable: ${e.message}".toString())
+            return [found: found, unresolved: unresolved, errors: errors]
+        }
+        for (List<String> chunk : askable.collate(OmsGqlQueries.RETURN_LOOKUP_CHUNK_SIZE)) {
+            Map data
+            try {
+                Map response = client.execute(OmsGqlQueries.returnIdentificationsDocument(),
+                        OmsGqlQueries.returnIdentificationsVariables(chunk), OmsGqlQueries.RETURN_LOOKUP_RESERVATION)
+                data = (response?.data instanceof Map) ? (Map) response.data : [:]
+            } catch (Exception e) {
+                unresolved.addAll(chunk)
+                errors.add("OMS GraphQL returns lookup failed for ${chunk.size()} id(s): ${e.message}".toString())
+                continue
+            }
+            Map connection = (data.returnIdentifications instanceof Map) ? (Map) data.returnIdentifications : [:]
+            List edges = (connection.edges instanceof List) ? (List) connection.edges : []
+            Set<String> requested = new HashSet<String>(chunk)
+            Set<String> echoed = new HashSet<String>()
+            Set<String> matched = new HashSet<String>()
+            edges.each { Object edge ->
+                Map node = (edge instanceof Map && ((Map) edge).node instanceof Map) ? (Map) ((Map) edge).node : null
+                String value = normalize(node?.idValue)
+                if (!value || !requested.contains(value)) return
+                echoed.add(value)
+                if (OmsGqlQueries.SHOPIFY_RETURN_IDENTIFICATION_TYPES.contains(normalize(node.returnIdentificationTypeId))) matched.add(value)
+            }
+            if (!edges.isEmpty() && echoed.isEmpty()) {
+                unresolved.addAll(chunk)
+                errors.add("OMS GraphQL returns lookup did not honor the idValue filter (no identification echoed a requested id).")
+                continue
+            }
+            found.addAll(matched)
+            boolean truncated = (connection.pageInfo instanceof Map) && ((Map) connection.pageInfo).hasNextPage == true
+            if (truncated) unresolved.addAll(chunk.findAll { !matched.contains(it) })
+        }
+        return [found: found, unresolved: unresolved, errors: errors]
     }
 
 

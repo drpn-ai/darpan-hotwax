@@ -629,7 +629,11 @@
             The endpoint honours a CSV externalId filter, so ids are checked in batches, and every returned
             record is echo-checked against the ids actually requested — a sibling filter (orderExternalId)
             was proven to be silently ignored while still answering HTTP 200 with an unfiltered corpus.
-            A failed lookup returns ok=false with both id lists empty — it never classifies an id as missing.</description>
+            A failed lookup returns ok=false with both id lists empty — it never classifies an id as missing.
+
+            Ids neither REST pass resolves get a GraphQL returnIdentifications(idValue:) pass (DAR-BE-040):
+            the REST endpoint serves refunded returns only, so a pending return is invisible to it. Ids the
+            GraphQL pass cannot check come back in unresolvedIds — unchecked, never confirmed missing.</description>
         <in-parameters>
             <parameter name="omsRestSourceConfigId" required="true">
                 <description>Tenant-owned HotWaxOmsRestSourceConfig identifier.</description>
@@ -645,6 +649,7 @@
             <parameter name="ok" type="Boolean"/>
             <parameter name="foundIds" type="List"/>
             <parameter name="missingIds" type="List"/>
+            <parameter name="unresolvedIds" type="List"/>
             <parameter name="errors" type="List"/>
         </out-parameters>
     </service>
