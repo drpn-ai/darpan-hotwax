@@ -108,7 +108,7 @@ class OmsGqlOrderPageSource {
      * The connection, or MALFORMED. A 200 whose body lacks it (data:null, a proxy's {}, orders:null)
      * must never read as an empty page — that is a clean, empty, wrong extract (review I2).
      */
-    private static Map requireConnection(Map page, String root) {
+    static Map requireConnection(Map page, String root) {
         Object data = page?.data
         Object connection = (data instanceof Map) ? ((Map) data).get(root) : null
         if (!(connection instanceof Map) || !(((Map) connection).get("edges") instanceof List)) {
@@ -118,7 +118,7 @@ class OmsGqlOrderPageSource {
     }
 
     /** The next cursor, null when done; MALFORMED on "more" without a cursor, or a cursor seen before. */
-    private static String nextCursor(Map connection, Set<String> seenCursors, String root) {
+    static String nextCursor(Map connection, Set<String> seenCursors, String root) {
         Map pageInfo = (Map) (connection.pageInfo ?: [:])
         if (pageInfo.hasNextPage != true) return null
         String cursor = pageInfo.endCursor as String

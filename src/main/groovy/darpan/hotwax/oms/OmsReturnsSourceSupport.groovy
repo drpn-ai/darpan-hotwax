@@ -162,6 +162,76 @@ class OmsReturnsSourceSupport {
         Map<String, Object> fieldAbsentCounts = [:]
         long cumulativeRaw = 0L
 
+        // One record pipeline for both transports: client filters, the join-key fallback, projection,
+        // the sink. The REST loop below and an optional page fetcher (DAR-BE-040 fix 3, the GraphQL
+        // transport) both feed it, so nothing downstream can tell them apart except `transport`.
+        Closure consumePage = { List pageReturns ->
+            pageReturns.each { Object raw ->
+                if (!(raw instanceof Map)) return
+                Map<String, Object> record = (Map<String, Object>) raw
+                // Configured exclusions run CLIENT-side: the endpoint has no knowledge of tenant
+                // rules. They cannot double-count against excludedNoShopifyRefCount because that
+                // filter is server-side — those returns never arrive here at all (design §9.5).
+                Map<String, Object> verdict = SourceFilterSupport.evaluate(record, parsedFilters)
+                if (verdict != null) {
+                    String key = String.valueOf(((Map) verdict.get("rule")).get("sequenceNum"))
+                    // Two buckets, one rejection: an include rule that drops a whole row class
+                    // for want of the field must not read as "the rule matched many values".
+                    Map<String, Object> bucket = SourceFilterSupport.REASON_FIELD_ABSENT == verdict.get("reason")
+                            ? fieldAbsentCounts
+                            : exclusionCounts
+                    bucket.put(key, normalizeInt(bucket.get(key), 0) + 1)
+                    return
+                }
+                applyJoinKeyFallback(record)
+                Map<String, Object> projected = projectRecord(record, keepRecordFields)
+                sink.write(projected)
+                if (retainRecords) collected.add(projected)
+            }
+        }
+
+        Closure pageFetcher = (options?.pageFetcher instanceof Closure) ? (Closure) options.pageFetcher : null
+        if (pageFetcher != null) {
+            String transport = null
+            try {
+                Map fetched = (Map) pageFetcher.call([config: config, fromMillis: fromMillis, thruMillis: thruMillis,
+                        pageConsumer: { List pageReturns ->
+                            cumulativeRaw += pageReturns.size()
+                            consumePage(pageReturns)
+                            if (pageProgressListener != null) pageProgressListener.call(cumulativeRaw)
+                        }])
+                errors.addAll((List<String>) (fetched?.errors ?: []))
+                warnings.addAll((List<String>) (fetched?.warnings ?: []))
+                serverCounts.putAll((Map) (fetched?.serverCounts ?: [:]))
+                transport = fetched?.transport as String
+                if (errors) {
+                    sink.abort()
+                } else {
+                    sink.finish(withTransport(buildMetadata(serverCounts, exclusionCounts, fieldAbsentCounts, parsedFilters), transport))
+                }
+            } catch (Exception e) {
+                sink.abort()
+                errors.add("OMS returns extraction failed: ${e.message}".toString())
+            } finally {
+                sink.close()
+            }
+            if (errors) {
+                if (targetFile != null) targetFile.delete()
+                return failure(errors, warnings, retainRecords)
+            }
+            int fetchedCount = sink.writtenCount
+            Map<String, Object> fetchedResult = [
+                    recordCount    : fetchedCount,
+                    dataAvailable  : fetchedCount > 0,
+                    requestMetadata: withTransport(buildMetadata(serverCounts, exclusionCounts, fieldAbsentCounts, parsedFilters), transport),
+                    warnings       : warnings,
+                    errors         : [],
+                    fileName       : OmsRestSourceSupport.buildDefaultFileName(fromMillis, thruMillis, DEFAULT_FILE_NAME_PREFIX),
+            ]
+            if (retainRecords) fetchedResult.put("records", collected)
+            return fetchedResult
+        }
+
         try {
             int pageIndex = 0
             boolean hasMore = true
@@ -190,28 +260,7 @@ class OmsReturnsSourceSupport {
                 List pageReturns = (body.get("returns") instanceof List) ? (List) body.get("returns") : []
                 cumulativeRaw += pageReturns.size()
 
-                pageReturns.each { Object raw ->
-                    if (!(raw instanceof Map)) return
-                    Map<String, Object> record = (Map<String, Object>) raw
-                    // Configured exclusions run CLIENT-side: the endpoint has no knowledge of tenant
-                    // rules. They cannot double-count against excludedNoShopifyRefCount because that
-                    // filter is server-side — those returns never arrive here at all (design §9.5).
-                    Map<String, Object> verdict = SourceFilterSupport.evaluate(record, parsedFilters)
-                    if (verdict != null) {
-                        String key = String.valueOf(((Map) verdict.get("rule")).get("sequenceNum"))
-                        // Two buckets, one rejection: an include rule that drops a whole row class
-                        // for want of the field must not read as "the rule matched many values".
-                        Map<String, Object> bucket = SourceFilterSupport.REASON_FIELD_ABSENT == verdict.get("reason")
-                                ? fieldAbsentCounts
-                                : exclusionCounts
-                        bucket.put(key, normalizeInt(bucket.get(key), 0) + 1)
-                        return
-                    }
-                    applyJoinKeyFallback(record)
-                    Map<String, Object> projected = projectRecord(record, keepRecordFields)
-                    sink.write(projected)
-                    if (retainRecords) collected.add(projected)
-                }
+                consumePage(pageReturns)
 
                 // M1: window-wide totals repeat on every page; the first page's copy is the
                 // authoritative one and is the only one guaranteed to exist (a window with no
@@ -598,6 +647,10 @@ class OmsReturnsSourceSupport {
         Map<String, Object> filters = [:]
         filters.put("excludedNoShopifyRefCount", normalizeInt(serverCounts.get("excludedNoShopifyRefCount"), 0))
         filters.put("serverReportedReturnsCount", normalizeInt(serverCounts.get("returnsCount"), 0))
+        // Only the GraphQL transport reports it: REST never served a cancelled return to count.
+        if (serverCounts.containsKey("excludedCancelledCount")) {
+            filters.put("excludedCancelledCount", normalizeInt(serverCounts.get("excludedCancelledCount"), 0))
+        }
 
         // parseRules returns the rule list directly — no "rules" wrapper key to unwrap.
         List<Map<String, Object>> rules = parsedFilters ?: []
@@ -619,6 +672,12 @@ class OmsReturnsSourceSupport {
             })
         }
         return [filters: filters]
+    }
+
+    /** REST metadata carries no transport key; a page fetcher's does. */
+    private static Map<String, Object> withTransport(Map<String, Object> metadata, String transport) {
+        if (transport) metadata.put("transport", transport)
+        return metadata
     }
 
     // retainRecords, NOT unconditional: extractReturnsToFile's contract is "same Map minus records"

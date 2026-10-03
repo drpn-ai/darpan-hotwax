@@ -152,4 +152,85 @@ class OmsGqlQueries {
     static Map returnIdentificationsVariables(List<String> idValues) {
         return [q: "idValue:${idValues.join(',')}".toString(), first: RETURN_LOOKUP_PAGE_SIZE]
     }
+
+    // --- DAR-BE-040 fix 3: the returns EXTRACT over GraphQL ---------------------------------------
+    // Costs measured on gorjana prod 2026-10-03: returns with identifications(4) ~27 per row
+    // (first: 50 -> 1450, COST_EXCEEDED); returnItems at 14 fields x 100 -> 1500 (COST_EXCEEDED).
+    // Flat passes keyed by id, never nested lists, so cost stays linear and a full page pages again.
+
+    // Cost is charged on the REQUESTED page size and the bucket refills at 50/s, so a call costs time
+    // whether or not it fills. Each lookup therefore covers a whole returns page in ONE call where it
+    // fits under the 1000 cap (a return averages ~1 item, an order ~3), paging only on overflow:
+    // ~2,200 per page of 25 returns, against ~4,400 with per-10-id chunks. Throttle-bound either way.
+    static final int RETURNS_PAGE_SIZE = 25
+    static final int RETURNS_RESERVATION = 800       // 100 + 25 x ~27
+    static final int RETURN_ITEMS_ID_CHUNK = 25
+    static final int RETURN_ITEMS_PAGE_SIZE = 50
+    static final int RETURN_ITEMS_RESERVATION = 700  // 100 + 50 x 11
+    static final int ORDERS_ID_CHUNK = 25
+    static final int ORDERS_RESERVATION = 200        // 100 + 25 x 2
+    static final int ORDER_ITEMS_ID_CHUNK = 25
+    static final int ORDER_ITEMS_PAGE_SIZE = 100
+    static final int ORDER_ITEMS_RESERVATION = 450   // 100 + 100 x 3
+    static final int PRODUCTS_ID_CHUNK = 25
+    static final int PRODUCTS_RESERVATION = 200      // 100 + 25 x 2
+
+    /** Half-open on entryDate, like REST. It MAY contain `<`: it travels as a variable, never inside the document. */
+    static String returnsWindowFilter(String fromIso, String thruIso) {
+        return "entryDate:>=${fromIso} entryDate:<${thruIso}".toString()
+    }
+
+    static String returnsDocument() {
+        return '''query OmsReturns($q: String, $first: Int, $after: String) {
+  returns(query: $q, sortKey: RETURN_ID, first: $first, after: $after) {
+    edges { node { returnId statusId entryDate externalId currencyUomId returnChannelEnumId
+      identifications(first: 4) { returnIdentificationTypeId idValue thruDate } } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
+    static String returnItemsDocument() {
+        return '''query OmsReturnItems($q: String, $first: Int, $after: String) {
+  returnItems(query: $q, first: $first, after: $after) {
+    edges { node { returnId returnItemSeqId orderId orderItemSeqId productId returnQuantity receivedQuantity
+      returnPrice returnReasonId statusId returnTypeId } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
+    static String orderExternalIdsDocument() {
+        return '''query OmsOrderExternalIds($q: String, $first: Int, $after: String) {
+  orders(query: $q, first: $first, after: $after) {
+    edges { node { orderId externalId } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
+    static String orderItemExternalIdsDocument() {
+        return '''query OmsOrderItemExternalIds($q: String, $first: Int, $after: String) {
+  orderItems(query: $q, first: $first, after: $after) {
+    edges { node { orderId orderItemSeqId externalId } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
+    static String productNamesDocument() {
+        return '''query OmsProductNames($q: String, $first: Int, $after: String) {
+  products(query: $q, first: $first, after: $after) {
+    edges { node { productId internalName } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
+    /** `key:a,b,c` — the comma `in` every flat lookup above relies on. */
+    static Map inVariables(String key, List<String> ids, int first, String after) {
+        Map vars = [q: "${key}:${ids.join(',')}".toString(), first: first]
+        if (after) vars.put("after", after)
+        return vars
+    }
 }
