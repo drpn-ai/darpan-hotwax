@@ -64,6 +64,23 @@ class OmsReturnsPageFetcherSeamTests {
     }
 
     @Test
+    void anIncludeRuleOnTheOriginOrderStoreKeepsOnlyThatStore() {
+        // DAR-BE-068: the store pill filters before projection, so it works without being in keepFieldsBase.
+        List filters = [[sequenceNum: 1, fieldExpression: "orderProductStoreId", operator: "INCLUDE_IN", values: ["STORE_US"]]]
+        Map result = OmsReturnsSourceSupport.extractReturns(CONFIG, "2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z",
+                ["returnId", "externalId"], null, filters,
+                [pageFetcher: fetcher([[pending("M1", "111", [orderProductStoreId: "STORE_US"]),
+                                        pending("M2", "222", [orderProductStoreId: "STORE_CA"]),
+                                        pending("M3", "333")]])])
+        assertEquals([], result.errors)
+        assertEquals(["M1"], ((List<Map>) result.records)*.returnId)
+        assertFalse(((List<Map>) result.records)[0].containsKey("orderProductStoreId"), "projection strips it")
+        Map rule = ((List<Map>) ((Map) ((Map) result.requestMetadata).filters).configuredExclusions)[0]
+        assertEquals(1, rule.excludedCount, "M2: another store")
+        assertEquals(1, rule.fieldAbsentCount, "M3: no origin order, so no store")
+    }
+
+    @Test
     void theFetchersCountsReachTheMetadata() {
         Map result = OmsReturnsSourceSupport.extractReturns(CONFIG, "2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z",
                 null, null, null, [pageFetcher: fetcher([[pending("M1", "111")]])])

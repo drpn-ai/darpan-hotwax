@@ -105,4 +105,13 @@ class OmsGqlQueriesTests {
         assertEquals(["productStoreId"] as Set, OmsGqlQueries.requiredFields(null,
                 [[fieldExpression: "productStoreId", operator: "EXCLUDE_IN", sequenceNum: 1]]))
     }
+
+    @Test
+    void theReturnsOriginOrderLookupSelectsTheStoreWithinItsReservation() {
+        // DAR-BE-068: one more scalar on a lookup already made, so the store costs no extra call.
+        String doc = OmsGqlQueries.orderExternalIdsDocument()
+        assertTrue(doc.contains("productStoreId"), doc)
+        assertTrue(100 + OmsGqlQueries.ORDERS_ID_CHUNK * 3 <= OmsGqlQueries.ORDERS_RESERVATION,
+                "100 per page + 3 scalars x ${OmsGqlQueries.ORDERS_ID_CHUNK} rows must fit the reservation")
+    }
 }

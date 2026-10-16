@@ -28,7 +28,7 @@ class OmsGqlReturnAssemblerTests {
 
     private static Map lookups() {
         return [orderExternalIds: [GR1: "7186636636291"], orderItemExternalIds: ["GR1|00101": "16501091238019"],
-                productNames: ["10203": "219-001-G"]]
+                productNames: ["10203": "219-001-G"], orderProductStoreIds: [GR1: "STORE"]]
     }
 
     @Test
@@ -43,8 +43,10 @@ class OmsGqlReturnAssemblerTests {
 
         Map built = OmsGqlReturnAssembler.build(node(), [item()], lookups())
 
-        assertEquals(expected.keySet().toList(), built.keySet().toList(), "same keys, same order as REST")
-        assertEquals(expected.toString(), normalized(built).toString())
+        // orderProductStoreId (DAR-BE-068) is the one GraphQL-only key: filterable, never in keepFieldsBase, so
+        // projection strips it and the compared record stays identical to REST's.
+        assertEquals(expected.keySet().toList(), built.keySet().toList() - "orderProductStoreId", "same keys, same order as REST")
+        assertEquals(expected.toString(), normalized(built.findAll { it.key != "orderProductStoreId" }).toString())
     }
 
     @Test
@@ -74,6 +76,22 @@ class OmsGqlReturnAssemblerTests {
         assertFalse(built.containsKey("orderExternalId"))
         assertEquals("0", built.returnTotal.toString())
         assertEquals([], built.items)
+    }
+
+    @Test
+    void aReturnCarriesItsOriginOrdersProductStore() {
+        // DAR-BE-068. Return.productStoreId was null on all 400 gorjana returns sampled 2026-10-16, so the
+        // store a return belongs to is its ORIGIN ORDER's — the same order orderExternalId names.
+        Map built = OmsGqlReturnAssembler.build(node(), [item()], lookups())
+        assertEquals("STORE", built.orderProductStoreId)
+    }
+
+    @Test
+    void aReturnWithNoItemsHasNoOriginOrderProductStoreKey() {
+        // No item, no origin order: absent, so an INCLUDE_IN store rule drops it as FIELD_ABSENT and an
+        // EXCLUDE_IN rule keeps it — the filter's own semantics, not a guessed store.
+        Map built = OmsGqlReturnAssembler.build(node(), [], lookups())
+        assertFalse(built.containsKey("orderProductStoreId"))
     }
 
     @Test

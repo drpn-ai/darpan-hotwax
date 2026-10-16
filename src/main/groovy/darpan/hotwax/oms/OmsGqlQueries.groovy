@@ -168,7 +168,7 @@ class OmsGqlQueries {
     static final int RETURN_ITEMS_PAGE_SIZE = 50
     static final int RETURN_ITEMS_RESERVATION = 700  // 100 + 50 x 11
     static final int ORDERS_ID_CHUNK = 25
-    static final int ORDERS_RESERVATION = 200        // 100 + 25 x 2
+    static final int ORDERS_RESERVATION = 200        // 100 + 25 x 3 (productStoreId, DAR-BE-068)
     static final int ORDER_ITEMS_ID_CHUNK = 25
     static final int ORDER_ITEMS_PAGE_SIZE = 100
     static final int ORDER_ITEMS_RESERVATION = 450   // 100 + 100 x 3
@@ -203,7 +203,7 @@ class OmsGqlQueries {
     static String orderExternalIdsDocument() {
         return '''query OmsOrderExternalIds($q: String, $first: Int, $after: String) {
   orders(query: $q, first: $first, after: $after) {
-    edges { node { orderId externalId } }
+    edges { node { orderId externalId productStoreId } }
     pageInfo { hasNextPage endCursor }
   }
 }'''

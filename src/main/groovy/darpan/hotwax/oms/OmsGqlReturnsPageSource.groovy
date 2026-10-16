@@ -81,11 +81,15 @@ class OmsGqlReturnsPageSource {
 
         List<String> orderIds = items.collect { it.orderId as String }.findAll { it }.unique()
         Map<String, String> orderExternalIds = [:]
+        Map<String, String> orderProductStoreIds = [:]
         Map<String, String> orderItemExternalIds = [:]
         if (orderIds) {
             fetchByIds(client, OmsGqlQueries.orderExternalIdsDocument(), "orders", "orderId", orderIds,
                     OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_RESERVATION, pagination)
-                    .each { Map n -> orderExternalIds[n.orderId as String] = n.externalId as String }
+                    .each { Map n ->
+                        orderExternalIds[n.orderId as String] = n.externalId as String
+                        orderProductStoreIds[n.orderId as String] = n.productStoreId as String
+                    }
             fetchByIds(client, OmsGqlQueries.orderItemExternalIdsDocument(), "orderItems", "orderId", orderIds,
                     OmsGqlQueries.ORDER_ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.ORDER_ITEMS_RESERVATION, pagination)
                     .each { Map n -> orderItemExternalIds["${n.orderId}|${n.orderItemSeqId}".toString()] = n.externalId as String }
@@ -97,7 +101,8 @@ class OmsGqlReturnsPageSource {
                     OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_RESERVATION, pagination)
                     .each { Map n -> productNames[n.productId as String] = n.internalName as String }
         }
-        Map lookups = [orderExternalIds: orderExternalIds, orderItemExternalIds: orderItemExternalIds, productNames: productNames]
+        Map lookups = [orderExternalIds: orderExternalIds, orderProductStoreIds: orderProductStoreIds,
+                       orderItemExternalIds: orderItemExternalIds, productNames: productNames]
         return kept.collect { Map n -> OmsGqlReturnAssembler.build(n, itemsByReturn[n.returnId as String] ?: [], lookups) }
     }
 

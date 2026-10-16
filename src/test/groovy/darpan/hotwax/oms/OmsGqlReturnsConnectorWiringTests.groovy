@@ -4,6 +4,7 @@ import groovy.xml.XmlSlurper
 import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
+import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
@@ -63,16 +64,31 @@ class OmsGqlReturnsConnectorWiringTests {
         assertEquals("Y", rest.enabled, "the REST row stays enabled; tenants without the GraphQL upgrade still need it")
     }
 
+    /** Pills only the GraphQL record can carry (DAR-BE-068): REST's record has no orderId to reach the order by. */
+    private static final Set<String> GQL_ONLY_FIELDS = ["\$.records[*].orderProductStoreId"] as Set
+
     @Test
     void itExposesTheSameFieldsAsTheRestRow() {
         Map<String, Map<String, String>> rest = fields(FIELDS, "OMS_RETURNS")
         Map<String, Map<String, String>> gql = fields(FIELDS, "OMS_RETURNS_GQL")
-        assertEquals(rest.keySet(), gql.keySet())
+        assertEquals(rest.keySet(), gql.keySet() - GQL_ONLY_FIELDS, "every REST pill, plus only the GraphQL-only ones")
         rest.each { String path, Map<String, String> r ->
             ["label", "fieldType", "isPrimaryIdCandidate", "sequenceNum"].each { String k ->
                 assertEquals(r[k], gql[path][k], "${path}.${k}")
             }
         }
+    }
+
+    @Test
+    void theOriginOrderStoreIsAFilterPillNotAProjectedField() {
+        // DAR-BE-068, the DAR-BE-017 shape: filters run before projection, so the pill works without
+        // joining keepFieldsBase, and keepFieldsBase must stay equal to REST's (itMirrorsTheRestRow...).
+        Map<String, String> pill = fields(FIELDS, "OMS_RETURNS_GQL")["\$.records[*].orderProductStoreId"]
+        assertTrue(pill != null, "no orderProductStoreId pill on OMS_RETURNS_GQL")
+        assertEquals("N", pill.isPrimaryIdCandidate ?: "N")
+        assertEquals("10", pill.sequenceNum)
+        assertFalse(connector(SEED, "OMS_RETURNS_GQL").keepFieldsBase.split(",").contains("orderProductStoreId"))
+        assertEquals(pill, fields(UPGRADE, "OMS_RETURNS_GQL")["\$.records[*].orderProductStoreId"], "upgrade pack carries it verbatim")
     }
 
     @Test

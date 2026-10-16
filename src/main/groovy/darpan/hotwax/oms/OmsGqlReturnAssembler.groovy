@@ -59,11 +59,13 @@ class OmsGqlReturnAssembler {
 
     /**
      * One REST-shaped record. `lookups` carries orderExternalIds (orderId -> Shopify order id),
-     * orderItemExternalIds ("orderId|orderItemSeqId" -> Shopify line id) and productNames
-     * (productId -> internalName, which is REST's sku). A lookup miss leaves the field null — never a guess.
+     * orderProductStoreIds (orderId -> the origin order's productStoreId), orderItemExternalIds
+     * ("orderId|orderItemSeqId" -> Shopify line id) and productNames (productId -> internalName, which is
+     * REST's sku). A lookup miss leaves the field null — never a guess.
      */
     static Map<String, Object> build(Map node, List<Map> items, Map lookups) {
         Map orderExternalIds = (Map) (lookups?.orderExternalIds ?: [:])
+        Map orderProductStoreIds = (Map) (lookups?.orderProductStoreIds ?: [:])
         Map orderItemExternalIds = (Map) (lookups?.orderItemExternalIds ?: [:])
         Map productNames = (Map) (lookups?.productNames ?: [:])
         List<Map> sorted = (items ?: []).findAll { it != null }.sort(false) { normalize(it.returnItemSeqId) ?: "" }
@@ -93,6 +95,10 @@ class OmsGqlReturnAssembler {
         record.externalId = normalize(node.externalId)
         // REST omits the key for a return with no items rather than sending null.
         if (sorted) record.orderExternalId = orderExternalIds.get(sorted.first().orderId as String)
+        // DAR-BE-068: the ONE key REST lacks. Return.productStoreId is null on gorjana, so a return's store is
+        // its origin order's (the order orderExternalId names). Filterable only: not in keepFieldsBase, so
+        // projection strips it before the compare and the compared record stays identical to REST's.
+        if (sorted) record.orderProductStoreId = orderProductStoreIds.get(sorted.first().orderId as String)
         record.statusId = node.statusId
         String entry = normalize(node.entryDate)
         record.entryDate = entry ? Instant.parse(entry).toEpochMilli() : null
