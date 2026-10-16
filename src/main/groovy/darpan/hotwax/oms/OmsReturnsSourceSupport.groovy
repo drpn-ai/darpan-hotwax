@@ -542,15 +542,26 @@ class OmsReturnsSourceSupport {
             errors.add("OMS GraphQL returns lookup unavailable: ${e.message}".toString())
             return [found: found, unresolved: unresolved, errors: errors]
         }
-        for (List<String> chunk : askable.collate(OmsGqlQueries.RETURN_LOOKUP_CHUNK_SIZE)) {
+        // Failures are counted per message and reported once each: gorjana result 101474 (DAR-BE-067)
+        // carried the same OMS 400 six times, once per chunk.
+        Map<String, Integer> failedCounts = new LinkedHashMap<String, Integer>()
+        List<List<String>> chunks = askable.collate(OmsGqlQueries.RETURN_LOOKUP_CHUNK_SIZE)
+        for (int i = 0; i < chunks.size(); i++) {
+            List<String> chunk = chunks[i]
             Map data
             try {
                 Map response = client.execute(OmsGqlQueries.returnIdentificationsDocument(),
                         OmsGqlQueries.returnIdentificationsVariables(chunk), OmsGqlQueries.RETURN_LOOKUP_RESERVATION)
                 data = (response?.data instanceof Map) ? (Map) response.data : [:]
             } catch (Exception e) {
-                unresolved.addAll(chunk)
-                errors.add("OMS GraphQL returns lookup failed for ${chunk.size()} id(s): ${e.message}".toString())
+                // An error the OMS ANSWERED (a Moqui REST rejection, a GraphQL error) is the answer to the
+                // document, and every chunk sends the same document, so the rest are not sent. A transport
+                // failure says nothing about the next chunk, so the pass carries on.
+                List<String> skipped = (e instanceof OmsGqlException) ? chunks.drop(i).flatten() as List<String> : chunk
+                unresolved.addAll(skipped)
+                String message = e.message ?: e.class.simpleName
+                failedCounts.put(message, (failedCounts.get(message) ?: 0) + skipped.size())
+                if (e instanceof OmsGqlException) break
                 continue
             }
             Map connection = (data.returnIdentifications instanceof Map) ? (Map) data.returnIdentifications : [:]
@@ -573,6 +584,9 @@ class OmsReturnsSourceSupport {
             found.addAll(matched)
             boolean truncated = (connection.pageInfo instanceof Map) && ((Map) connection.pageInfo).hasNextPage == true
             if (truncated) unresolved.addAll(chunk.findAll { !matched.contains(it) })
+        }
+        failedCounts.each { String message, Integer count ->
+            errors.add("OMS GraphQL returns lookup failed for ${count} id(s): ${message}".toString())
         }
         return [found: found, unresolved: unresolved, errors: errors]
     }

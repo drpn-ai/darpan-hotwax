@@ -158,6 +158,60 @@ class OmsReturnsGqlLookupTests {
     }
 
     @Test
+    void aServerErrorStopsThePassAndIsReportedOnce() {
+        // DAR-BE-067, gorjana result 101474: the OMS entity layer answered every chunk with the same
+        // Moqui REST 400, so 6 calls produced 6 identical warnings. Every chunk sends the same document,
+        // so one server error is the answer for all of them.
+        OmsReturnsSourceSupport.setGqlClientFactory { Map config ->
+            OmsGqlClient c = new OmsGqlClient(config, { String url, Map headers, String body ->
+                gqlRequests.add((Map) new JsonSlurper().parseText(body))
+                [statusCode: 400, body: JsonOutput.toJson([errorCode: 400,
+                        errors: "Invalid entity relationship, org.apache.ofbiz.product.store.ProductStoreFacilityPurpose " +
+                                "not found in definition for entity org.apache.ofbiz.product.facility.Facility"])]
+            })
+            c.sleeper = { long ms -> }
+            return c
+        }
+
+        List<String> ids = (1..45).collect { "id${it}".toString() }
+        Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(CONFIG, ids)
+
+        assertEquals(1, gqlRequests.size(), "no further chunks after the server rejected the document")
+        assertEquals(ids, result.unresolvedIds)
+        assertEquals([], result.missingIds)
+        assertEquals(1, (result.errors as List).size(), "${result.errors}")
+        String error = (result.errors as List)[0] as String
+        assertTrue(error.contains("45 id(s)") && error.contains("ProductStoreFacilityPurpose"), error)
+    }
+
+    @Test
+    void aTransportFailureOnOneChunkStillChecksTheRest() {
+        // A timeout says nothing about the next chunk, unlike a server error.
+        int call = 0
+        OmsReturnsSourceSupport.setGqlClientFactory { Map config ->
+            OmsGqlClient c = new OmsGqlClient(config, { String url, Map headers, String body ->
+                gqlRequests.add((Map) new JsonSlurper().parseText(body))
+                if (call++ == 0) throw new java.net.http.HttpTimeoutException("request timed out")
+                String q = ((Map) gqlRequests[-1].variables).q as String
+                List<String> asked = (q - "idValue:").split(",").toList()
+                [statusCode: 200, body: JsonOutput.toJson([data: [returnIdentifications: [
+                        edges: asked.collect { [node: ident(it)] }, pageInfo: [hasNextPage: false]]], errors: []])]
+            })
+            c.sleeper = { long ms -> }
+            return c
+        }
+
+        List<String> ids = (1..45).collect { "id${it}".toString() }
+        Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(CONFIG, ids)
+
+        assertEquals(3, gqlRequests.size())
+        assertEquals(ids.take(20), result.unresolvedIds)
+        assertEquals(ids.drop(20) as Set, result.foundIds as Set)
+        assertEquals(1, (result.errors as List).size(), "${result.errors}")
+        assertTrue(((result.errors as List)[0] as String).contains("20 id(s)"), "${result.errors}")
+    }
+
+    @Test
     void aGraphQlAnswerThatEchoesNoRequestedIdIsAnIgnoredFilter() {
         // Same guard as the REST pass: a filter the server did not apply answers 200 with unrelated rows.
         gqlAnswers { List<String> ids -> [ident("something-else")] }
