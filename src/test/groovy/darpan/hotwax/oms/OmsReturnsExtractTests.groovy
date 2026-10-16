@@ -36,10 +36,20 @@ class OmsReturnsExtractTests {
         }
     }
 
+    /** Every wait the by-id lookup asks for, in order. Recorded, never slept: a real retry waits a minute. */
+    List<Long> lookupWaits = []
+
+    @BeforeEach
+    void lookupWaitsAreRecorded() {
+        lookupWaits = []
+        OmsReturnsSourceSupport.setLookupSleeper { long ms -> lookupWaits.add(ms) }
+    }
+
     @AfterEach
     void resetClient() {
         OmsReturnsSourceSupport.resetHttpClient()
         OmsReturnsSourceSupport.resetGqlClientFactory()
+        OmsReturnsSourceSupport.resetLookupSleeper()
     }
 
     @Test
@@ -660,6 +670,65 @@ class OmsReturnsExtractTests {
         assertFalse(result.ok as Boolean)
         assertEquals([], result.foundIds)
         assertEquals([], result.missingIds, "a failed lookup must never classify an id as missing")
+    }
+
+    // --- by-id lookup retry (DAR-BE-070) --------------------------------------------------------
+    // A returns run reported "Verification lookup for HotWax returns failed; 71 missing differences left
+    // as reported. OMS returns lookup failed with HTTP 504." One gateway blip left every candidate
+    // unverified. The lookup now waits a minute and asks again, up to three times.
+
+    @Test
+    void theLookupWaitsAMinuteAndRetriesA504() {
+        int calls = 0
+        OmsReturnsSourceSupport.setHttpClient { Map request ->
+            calls++
+            if (calls == 1) return [statusCode: 504, body: "<html>gateway timeout</html>"]
+            if ((request.url as String).contains("shopifyReturnId=")) return [statusCode: 200, body: returnsBody([], false)]
+            return [statusCode: 200, body: returnsBody([[returnId: "M1", externalId: "aaa"]], false)]
+        }
+
+        Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(baseConfig(), ["aaa"])
+
+        assertTrue(result.ok as Boolean, "a 504 that clears on retry must not fail the lookup: ${result.errors}")
+        assertEquals(["aaa"], result.foundIds)
+        assertEquals([60000L], lookupWaits, "one retry, after a one-minute wait")
+        assertEquals(2, calls)
+    }
+
+    @Test
+    void theLookupGivesUpAfterThreeRetries() {
+        int calls = 0
+        OmsReturnsSourceSupport.setHttpClient { Map request -> calls++; return [statusCode: 504, body: ""] }
+
+        Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(baseConfig(), ["aaa"])
+
+        assertFalse(result.ok as Boolean)
+        assertEquals([], result.missingIds, "a failed lookup must never classify an id as missing")
+        assertEquals(4, calls, "the first request plus three retries")
+        assertEquals([60000L, 60000L, 60000L], lookupWaits)
+        String error = (result.errors as List).join(" ")
+        assertTrue(error.contains("504") && error.contains("4 attempts"), "the error names the status and the attempts: ${error}")
+    }
+
+    @Test
+    void theLookupRetriesEveryTransientStatusButNot500() {
+        [429, 502, 503].each { int status ->
+            lookupWaits.clear()
+            int calls = 0
+            OmsReturnsSourceSupport.setHttpClient { Map request ->
+                calls++
+                return calls == 1 ? [statusCode: status, body: ""] : [statusCode: 200, body: returnsBody([], false)]
+            }
+            assertTrue(OmsReturnsSourceSupport.lookupReturnsByExternalId(baseConfig(), ["aaa"]).ok as Boolean, "status ${status}")
+            assertEquals([60000L], lookupWaits, "status ${status} is retried")
+        }
+
+        lookupWaits.clear()
+        int calls = 0
+        OmsReturnsSourceSupport.setHttpClient { Map request -> calls++; return [statusCode: 500, body: "{}"] }
+        assertFalse(OmsReturnsSourceSupport.lookupReturnsByExternalId(baseConfig(), ["aaa"]).ok as Boolean)
+        assertEquals(1, calls, "a 500 is deterministic, so it is not retried")
+        assertEquals([], lookupWaits)
     }
 
     // --- transient gateway failure resilience -------------------------------------------------

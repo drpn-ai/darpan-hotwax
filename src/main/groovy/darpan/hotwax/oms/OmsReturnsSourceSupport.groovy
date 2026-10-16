@@ -53,7 +53,28 @@ class OmsReturnsSourceSupport {
      */
     static final Set<Integer> RETRYABLE_STATUS_CODES = [429, 502, 503, 504] as Set
 
+    /**
+     * By-id lookup retry (DAR-BE-070). A verify pass that gives up on one gateway 504 leaves every
+     * candidate unverified, so the lookup waits and asks again. A minute, not the extract's 2s step:
+     * the lookup is one request a run, and a gateway that just timed out needs time to drain.
+     */
+    static final long LOOKUP_RETRY_DELAY_MILLIS = 60000L
+    /** Retries after the first request, so a lookup request is tried at most 4 times. */
+    static final int LOOKUP_MAX_RETRIES = 3
+
     private static final JsonSlurper JSON_SLURPER = new JsonSlurper()
+
+    private static final Closure DEFAULT_LOOKUP_SLEEPER = { long ms -> sleepQuietly(ms) }
+    private static Closure lookupSleeper = DEFAULT_LOOKUP_SLEEPER
+
+    /** Test seam for the by-id lookup's retry wait: millis -> void. */
+    static void setLookupSleeper(Closure sleeper) {
+        lookupSleeper = sleeper ?: DEFAULT_LOOKUP_SLEEPER
+    }
+
+    static void resetLookupSleeper() {
+        lookupSleeper = DEFAULT_LOOKUP_SLEEPER
+    }
 
     /**
      * No client field of its own. callOmsEndpoint (reused below, not reimplemented — see class doc)
@@ -608,14 +629,23 @@ class OmsReturnsSourceSupport {
                 .append("&pageIndex=0&pageSize=").append(Math.max(ids.size() * 2, 50))
                 .toString()
         Map response
-        try {
-            response = OmsRestSourceSupport.callOmsEndpoint(url, headers, config)
-        } catch (Exception e) {
-            return [found: found, error: "OMS returns lookup failed: ${e.message}".toString()]
+        int statusCode = 0
+        int attempts = 0
+        while (true) {
+            attempts++
+            try {
+                response = OmsRestSourceSupport.callOmsEndpoint(url, headers, config)
+            } catch (Exception e) {
+                return [found: found, error: "OMS returns lookup failed: ${e.message}".toString()]
+            }
+            statusCode = normalizeInt(response?.statusCode, 0)
+            // Same transient set as the extract's page retry; a 500 is deterministic and fails at once.
+            if (!RETRYABLE_STATUS_CODES.contains(statusCode) || attempts > LOOKUP_MAX_RETRIES) break
+            lookupSleeper.call(LOOKUP_RETRY_DELAY_MILLIS)
         }
-        int statusCode = normalizeInt(response?.statusCode, 0)
         if (statusCode < 200 || statusCode >= 300) {
-            return [found: found, error: "OMS returns lookup failed with HTTP ${statusCode}.".toString()]
+            String attemptsNote = attempts > 1 ? " after ${attempts} attempts" : ""
+            return [found: found, error: "OMS returns lookup failed with HTTP ${statusCode}${attemptsNote}.".toString()]
         }
         Map body
         try {
