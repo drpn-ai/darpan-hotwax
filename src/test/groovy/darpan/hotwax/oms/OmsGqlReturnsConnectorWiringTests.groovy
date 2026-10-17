@@ -79,6 +79,31 @@ class OmsGqlReturnsConnectorWiringTests {
         }
     }
 
+    /**
+     * DAR-BE-071. The ID card offers exactly the two Shopify ids a return can carry, named as the Shopify
+     * side names them: the return id (in-progress and completed) and refund-or-return (refund id once one
+     * exists, else the return id). Return ID is HotWax-only and Shopify order ID repeats across an order's
+     * returns, so neither is offered as the key. Explicit "N", not omitted: a data load never clears a column.
+     */
+    @Test
+    void theIdCardOffersOnlyTheTwoShopifyReturnIds() {
+        Map<String, String> expected = [
+                "\$.records[*].shopifyReturnId": "Shopify return ID",
+                "\$.records[*].externalId"     : "Refund or return ID",
+        ]
+        [FIELDS, UPGRADE].each { String path ->
+            ["OMS_RETURNS", "OMS_RETURNS_GQL"].each { String system ->
+                Map<String, Map<String, String>> rows = fields(path, system)
+                Map<String, String> candidates = rows.findAll { it.value.isPrimaryIdCandidate == "Y" }
+                        .collectEntries { [(it.key): it.value.label] }
+                assertEquals(expected, candidates, "${system} ID candidates in ${path}")
+                ["\$.records[*].returnId", "\$.records[*].orderExternalId"].each { String demoted ->
+                    assertEquals("N", rows[demoted]?.isPrimaryIdCandidate, "${system} ${demoted} in ${path}")
+                }
+            }
+        }
+    }
+
     @Test
     void theOriginOrderStoreIsAFilterPillNotAProjectedField() {
         // DAR-BE-068, the DAR-BE-017 shape: filters run before projection, so the pill works without
