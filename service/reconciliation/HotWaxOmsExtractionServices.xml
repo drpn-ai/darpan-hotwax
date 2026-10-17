@@ -85,77 +85,7 @@
             projection as extract#HotWaxOmsOrders: the REST pipeline runs unchanged over GraphQL pages
             (OmsGqlOrderPageSource). Adds hasPaymentPreference / paymentMethodTypeIds for the presence OPP rule
             (DAR-BE-064). A DISTINCT service name is required: the connector registry resolves rows by it.</description>
-        <in-parameters>
-            <parameter name="omsRestSourceConfigId" required="true">
-                <description>Tenant-owned HotWaxOmsRestSourceConfig identifier.</description>
-            </parameter>
-            <parameter name="automationExecutionId">
-                <description>Automation execution id used to choose the default data-manager output folder.</description>
-            </parameter>
-            <parameter name="companyUserGroupId">
-                <description>Trusted automation owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
-            </parameter>
-            <parameter name="windowStart" required="true">
-                <description>Start of the automation window; accepts Timestamp, Date, ISO-8601 text, SQL timestamp text, or epoch milliseconds.</description>
-            </parameter>
-            <parameter name="windowEnd" required="true">
-                <description>End of the automation window; accepts Timestamp, Date, ISO-8601 text, SQL timestamp text, or epoch milliseconds.</description>
-            </parameter>
-            <parameter name="outputLocation">
-                <description>Optional output directory. Defaults to runtime://datamanager/reconciliation-runs/{automationExecutionId}/{timestamp}/.</description>
-            </parameter>
-            <parameter name="fileName">
-                <description>Optional output file name. Defaults to oms-orders-{fromMillis}-{thruMillis}.json.</description>
-            </parameter>
-            <parameter name="keepRecordFields" type="List">
-                <parameter name="fieldName"/>
-                <description>Optional projection: top-level record fields to keep in the output file. When
-                    present, each order is trimmed to these fields after reconciliation filtering and before
-                    writing (callers compute the list from the rule set's join-key and rule fields plus the
-                    display fields). Absent means full untrimmed records (backward compatible).</description>
-            </parameter>
-            <parameter name="sourceFilters" type="List">
-                <parameter name="filterRule" type="Map">
-                    <parameter name="sequenceNum" type="Integer"/>
-                    <parameter name="fieldExpression"/>
-                    <parameter name="operator"/>
-                    <parameter name="filterValues"/>
-                </parameter>
-                <description>Optional record-exclusion rules. Each rule names a top-level record field and a
-                    comma-separated list of exact values; matching orders are dropped before the extract file is
-                    written and counted per rule in requestMetadata.filters.configuredExclusions. Absent or empty
-                    means no configured exclusions (backward compatible).</description>
-            </parameter>
-            <parameter name="reconciliationRunResultId">
-                <description>Optional observability run id. On its own it is enough for the extractor to
-                    heartbeat a running order count onto the run's RUNNING extract step as pages are
-                    consumed, so the live view can show the count climbing. Advisory only.</description>
-            </parameter>
-            <parameter name="progressStageCode">
-                <description>Which extract stage this run is: EXTRACT_FILE1 or EXTRACT_FILE2. Required for
-                    progress to land, because the heartbeat targets the RUNNING step for this stage and the
-                    same extractor runs on either side depending on the saved run's source order. Defaults
-                    to EXTRACT_FILE2 for callers that predate this parameter.</description>
-            </parameter>
-            <parameter name="expectedRecordCount" type="Integer">
-                <description>Optional expected total, which adds a progress percent alongside the count —
-                    typically the other side's extracted record count for the same window. Only the second
-                    extract of a run can supply one; the first has nothing finished to divide against.</description>
-            </parameter>
-        </in-parameters>
-        <out-parameters>
-            <parameter name="dataAvailable" type="Boolean"/>
-            <parameter name="fileLocation"/>
-            <parameter name="exchangeManifestFileLocation">
-                <description>Location of the exchange-manifest sidecar written when the window contained
-                    excluded exchange orders; null otherwise. Identities/amounts only, capped at 500 entries.</description>
-            </parameter>
-            <parameter name="fileName"/>
-            <parameter name="recordCount" type="Integer"/>
-            <parameter name="requestMetadata" type="Map"/>
-            <parameter name="warnings" type="List"/>
-            <parameter name="errors" type="List"/>
-        </out-parameters>
+        <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrders"/>
     </service>
 
     <service verb="extract" noun="HotWaxOmsReconciliationOrders" type="script" transaction="ignore" allow-remote="false" authenticate="true"
@@ -177,47 +107,33 @@
             rule set, verify that rule set's join key and every field-comparison field fall inside
             {orderId, externalId, orderName, grandTotal, orderDate, statusId}. A rule set needing any
             other field must stay on extract#HotWaxOmsOrders.</description>
+        <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrders"/>
+        <!-- Same parameters as extract#HotWaxOmsOrders; only the descriptions restated below differ. -->
         <in-parameters>
-            <parameter name="omsRestSourceConfigId" required="true">
+            <parameter name="omsRestSourceConfigId">
                 <description>Tenant-owned HotWaxOmsRestSourceConfig identifier. Reuses the same OMS
                     credentials and baseUrl as sales-order extraction; only the path differs, and the
                     path is fixed by the extractor rather than read from the config's ordersPath.</description>
             </parameter>
-            <parameter name="automationExecutionId">
-                <description>Automation execution id used to choose the default data-manager output folder.</description>
-            </parameter>
-            <parameter name="companyUserGroupId">
-                <description>Trusted automation owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
-            </parameter>
-            <parameter name="windowStart" required="true">
+            <parameter name="windowStart">
                 <description>Start of the automation window; accepts Timestamp, Date, ISO-8601 text, SQL timestamp text, or epoch milliseconds. Sent as the half-open lower bound orderDateFrom.</description>
             </parameter>
-            <parameter name="windowEnd" required="true">
+            <parameter name="windowEnd">
                 <description>End of the automation window, same accepted formats as windowStart. Sent
                     as orderDateThru, which the endpoint treats as EXCLUSIVE — an order timestamped
                     exactly at the bound belongs to the next window, so consecutive chunks do not
                     double-count their boundary.</description>
             </parameter>
-            <parameter name="outputLocation">
-                <description>Optional output directory. Defaults to runtime://datamanager/reconciliation-runs/{automationExecutionId}/{timestamp}/.</description>
-            </parameter>
             <parameter name="fileName">
                 <description>Optional output file name. Defaults to oms-orders-{fromMillis}-{thruMillis}.json, matching the legacy extractor so saved-run file-side matching is unaffected.</description>
             </parameter>
-            <parameter name="keepRecordFields" type="List">
-                <parameter name="fieldName"/>
+            <parameter name="keepRecordFields">
                 <description>Optional projection: top-level record fields to keep in the output file.
                     Normally a no-op here because the endpoint already projects server-side; retained
                     so the parameter contract matches extract#HotWaxOmsOrders and so a caller asking
                     for a narrower set than the endpoint's still gets it.</description>
             </parameter>
-            <parameter name="sourceFilters" type="List">
-                <parameter name="filterRule" type="Map">
-                    <parameter name="sequenceNum" type="Integer"/>
-                    <parameter name="fieldExpression"/>
-                    <parameter name="operator"/>
-                    <parameter name="filterValues"/>
-                </parameter>
+            <parameter name="sourceFilters">
                 <description>Optional record-exclusion rules, same semantics as extract#HotWaxOmsOrders.
                     These stay client-side on this connector too: the endpoint has no knowledge of
                     tenant exclusion rules, so matching runs in the extractor before output.</description>
@@ -228,24 +144,17 @@
             <parameter name="progressStageCode">
                 <description>Which extract stage this run is: EXTRACT_FILE1 or EXTRACT_FILE2. Defaults to EXTRACT_FILE2.</description>
             </parameter>
-            <parameter name="expectedRecordCount" type="Integer">
+            <parameter name="expectedRecordCount">
                 <description>Optional expected total, which adds a progress percent alongside the count.</description>
             </parameter>
         </in-parameters>
         <out-parameters>
-            <parameter name="dataAvailable" type="Boolean"/>
-            <parameter name="fileLocation"/>
             <parameter name="exchangeManifestFileLocation">
                 <description>Location of the exchange-manifest sidecar written when the window
                     contained exchange orders; null otherwise. Same shape and same 500-entry cap as
                     the legacy extractor, but built from the endpoint's inline originalOrderId /
                     originalExternalId fields, so it costs no pair-lookup round-trips.</description>
             </parameter>
-            <parameter name="fileName"/>
-            <parameter name="recordCount" type="Integer"/>
-            <parameter name="requestMetadata" type="Map"/>
-            <parameter name="warnings" type="List"/>
-            <parameter name="errors" type="List"/>
         </out-parameters>
     </service>
 
@@ -340,65 +249,24 @@
             as excludedNoShopifyRefCount) and, by default, RETURN_CANCELLED (excludedCancelledCount), which
             the Shopify side suppresses (DAR-BE-027). Needs the OMS GraphQL upgrade (gorjana 2026-09-30); on an
             OMS without it the extract FAILS rather than returning an empty file.</description>
+        <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsReturns"/>
+        <!-- Same parameters as extract#HotWaxOmsReturns; only the descriptions restated below differ. -->
         <in-parameters>
-            <parameter name="omsRestSourceConfigId" required="true">
-                <description>Tenant-owned HotWaxOmsRestSourceConfig identifier. Reuses the same OMS credentials
-                    and baseUrl as order extraction; the returns path is pinned by the extractor.</description>
-            </parameter>
-            <parameter name="automationExecutionId">
-                <description>Automation execution id used to choose the default data-manager output folder.</description>
-            </parameter>
-            <parameter name="companyUserGroupId">
-                <description>Trusted automation owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
-            </parameter>
-            <parameter name="windowStart" required="true">
+            <parameter name="windowStart">
                 <description>Start of the automation window; accepts Timestamp, Date, ISO-8601 text, SQL timestamp text, or epoch milliseconds. Sent as the half-open lower bound on entryDate.</description>
             </parameter>
-            <parameter name="windowEnd" required="true">
+            <parameter name="windowEnd">
                 <description>End of the automation window, same accepted formats. Exclusive upper bound on entryDate, so consecutive chunks do not double-count their boundary.</description>
-            </parameter>
-            <parameter name="outputLocation">
-                <description>Optional output directory. Defaults to runtime://datamanager/reconciliation-runs/{automationExecutionId}/{timestamp}/.</description>
             </parameter>
             <parameter name="fileName">
                 <description>Optional output file name. Defaults to oms-returns-{fromMillis}-{thruMillis}.json, the REST extract's name, because the file is the same contract.</description>
             </parameter>
-            <parameter name="keepRecordFields" type="List">
-                <parameter name="fieldName"/>
-                <description>Optional projection of top-level record fields. items[] is always retained
-                    regardless of this list, because the nested-line contract (RQ-21) does not survive a
-                    projection that names only header fields.</description>
-            </parameter>
-            <parameter name="sourceFilters" type="List">
-                <parameter name="filterRule" type="Map">
-                    <parameter name="sequenceNum" type="Integer"/>
-                    <parameter name="fieldExpression"/>
-                    <parameter name="operator"/>
-                    <parameter name="filterValues"/>
-                </parameter>
+            <parameter name="sourceFilters">
                 <description>Optional record-exclusion rules, same semantics as the order extractors. These
                     run client-side, after the built-in exclusions. The expected
                     rule here excludes returns whose returnChannelEnumId never has a Shopify counterpart.</description>
             </parameter>
-            <parameter name="reconciliationRunResultId">
-                <description>Optional observability run id for progress heartbeats. Advisory only.</description>
-            </parameter>
-            <parameter name="progressStageCode">
-                <description>Which extract stage this run is: EXTRACT_FILE1 or EXTRACT_FILE2. Defaults to EXTRACT_FILE2.</description>
-            </parameter>
-            <parameter name="expectedRecordCount" type="Integer">
-                <description>Optional expected total, which adds a progress percent alongside the count.</description>
-            </parameter>
         </in-parameters>
-        <out-parameters>
-            <parameter name="dataAvailable" type="Boolean"/>
-            <parameter name="fileLocation"/>
-            <parameter name="fileName"/>
-            <parameter name="recordCount" type="Integer"/>
-            <parameter name="requestMetadata" type="Map"/>
-            <parameter name="warnings" type="List"/>
-            <parameter name="errors" type="List"/>
-        </out-parameters>
     </service>
 
     <service verb="extract" noun="HotWaxOmsTransferOrders" type="script" transaction="ignore" allow-remote="false" authenticate="true"
@@ -598,74 +466,30 @@
 
             Source filters run per UNIT (D3), against the order's top-level fields overlaid by the
             unit row, so unitState and item statusId can be filtered on.</description>
+        <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrderLineUnits"/>
+        <!-- Same parameters as extract#HotWaxOmsOrderLineUnits; only the descriptions restated below differ. -->
         <in-parameters>
-            <parameter name="omsRestSourceConfigId" required="true">
+            <parameter name="omsRestSourceConfigId">
                 <description>Tenant-owned HotWaxOmsRestSourceConfig identifier. Item extraction reuses
                     the same OMS credentials and baseUrl as sales-order extraction.</description>
-            </parameter>
-            <parameter name="automationExecutionId">
-                <description>Automation execution id used to choose the default data-manager output folder.</description>
-            </parameter>
-            <parameter name="companyUserGroupId">
-                <description>Trusted automation owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
-            </parameter>
-            <parameter name="windowStart" required="true">
-                <description>Start of the automation window; accepts Timestamp, Date, ISO-8601 text,
-                    SQL timestamp text, or epoch milliseconds.</description>
-            </parameter>
-            <parameter name="windowEnd" required="true">
-                <description>End of the automation window, same accepted formats as windowStart.</description>
             </parameter>
             <parameter name="windowFieldName">
                 <description>OrderHeader date field the window filters on. Defaults to orderDate. Changing one
                     side of a pair only produces the DAR-BE-038 skew: structurally guaranteed false
                     positives on every run.</description>
             </parameter>
-            <parameter name="orderStatusIds" type="List">
-                <parameter name="statusId"/>
-                <description>Optional statuses to include, sent to the OMS as a server-side IN filter.</description>
-            </parameter>
-            <parameter name="outputLocation">
-                <description>Optional output directory. Defaults to runtime://datamanager/reconciliation-runs/{automationExecutionId}/{timestamp}/.</description>
-            </parameter>
-            <parameter name="fileName">
-                <description>Optional output file name.</description>
-            </parameter>
-            <parameter name="sourceFilters" type="List">
-                <parameter name="filterRule" type="Map">
-                    <parameter name="sequenceNum" type="Integer"/>
-                    <parameter name="fieldExpression"/>
-                    <parameter name="operator"/>
-                    <parameter name="filterValues"/>
-                </parameter>
+            <parameter name="sourceFilters">
                 <description>Optional include/exclude rules, same operators as extract#HotWaxOmsOrders,
                     evaluated per UNIT against the order's top-level fields overlaid by the unit row (the
                     unit wins on a shared name such as statusId). Per-rule counts are units.</description>
             </parameter>
-            <parameter name="reconciliationRunResultId">
-                <description>Optional observability run id for progress heartbeats. Advisory only.</description>
-            </parameter>
-            <parameter name="progressStageCode">
-                <description>Which extract stage this run is: EXTRACT_FILE1 or EXTRACT_FILE2.</description>
-            </parameter>
-            <parameter name="expectedRecordCount" type="Integer">
-                <description>Optional expected total, which adds a progress percent alongside the count.</description>
-            </parameter>
         </in-parameters>
         <out-parameters>
-            <parameter name="dataAvailable" type="Boolean"/>
-            <parameter name="fileLocation"/>
-            <parameter name="fileName"/>
-            <parameter name="recordCount" type="Integer">
-                <description>Number of UNITS written, not orders.</description>
-            </parameter>
-            <parameter name="requestMetadata" type="Map">
+            <parameter name="requestMetadata">
                 <description>Carries keptNullShopifyIdCount (items emitted with a null Shopify id),
                     droppedNullLineIdCount (structurally zero here) and nonUnitQuantityCount beside the
                     usual filter counts.</description>
             </parameter>
-            <parameter name="warnings" type="List"/>
-            <parameter name="errors" type="List"/>
         </out-parameters>
     </service>
 

@@ -76,7 +76,9 @@ class OmsGqlConnectorWiringTests {
         // would surface only in a live run. Parsing resolves every import against the test classpath.
         String script = read("src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsGqlOrders.groovy")
         new GroovyShell().parse(script, "extractOmsGqlOrders.groovy")
-        assertTrue(script.contains("ExcludedRecordsSidecar.writeBeside("))
+        // The sidecar write itself lives in the shared service edge; the script opts in.
+        assertTrue((script =~ /excludedRecordsSidecar\s*:\s*true/).find(), "the GraphQL orders extract must write the excluded-records sidecar")
+        assertTrue(read("src/main/groovy/darpan/hotwax/oms/OmsScriptServiceSupport.groovy").contains("ExcludedRecordsSidecar.writeBeside("))
     }
 
     private static final String FIELDS = "../darpan/data/SourceSystemConnectorFieldSeedData.xml"

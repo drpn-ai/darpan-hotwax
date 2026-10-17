@@ -1,24 +1,13 @@
 import darpan.hotwax.oms.OmsRestSourceSupport
+import darpan.hotwax.oms.OmsScriptServiceSupport
 
 ok = false
 ordersByExternalId = [:]
 errors = []
 
-String configIdValue = omsRestSourceConfigId?.toString()?.trim()
-String companyUserGroupIdValue = companyUserGroupId?.toString()?.trim()
-if (!configIdValue) { errors = ["OMS REST Source Config ID is required."]; return }
-
-def sourceConfig = ec.entity.find("darpan.hotwax.HotWaxOmsRestSourceConfig")
-        .condition("omsRestSourceConfigId", configIdValue)
-        .disableAuthz()
-        .useCache(false)
-        .one()
-
-OmsRestSourceSupport.requireUsableOmsConfig(ec, sourceConfig, configIdValue, companyUserGroupIdValue, "OMS")
-if (sourceConfig && (sourceConfig.isActive ?: "Y").toString().equalsIgnoreCase("N")) {
-    ec.message.addError("OMS REST source config ${configIdValue} is inactive.")
-}
-if (ec.message.hasError()) { errors = (ec.message?.getErrors() ?: []) as List; return }
+Map gate = OmsScriptServiceSupport.gateConfig(ec, omsRestSourceConfigId, companyUserGroupId, "OMS")
+if (!gate.usable) { errors = gate.errors; return }
+def sourceConfig = gate.sourceConfig
 
 // Default window: 10 years back from tomorrow. Originals can be years older than their exchange
 // (live run 2026-07-31: a 400-day default windowed out 18 old originals, turning every one into a
