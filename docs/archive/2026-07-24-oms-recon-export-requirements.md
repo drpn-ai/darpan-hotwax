@@ -1,7 +1,7 @@
 # OMS Reconciliation Export — Requirements
 
-> **SUPERSEDED 2026-08-03** by `2026-08-03-oms-recon-data-requirements.md` in this
-> folder. Two decisions changed: scope now includes returns (header and line-item
+> **SUPERSEDED 2026-08-03** by `../oms/2026-08-03-oms-recon-data-requirements.md`.
+> Two decisions changed: scope now includes returns (header and line-item
 > level), and the async export-job-plus-file transport is withdrawn in favour of a
 > faster synchronous endpoint. The join key, field set, filter rules, exclusion
 > counts, auth modes, and open questions OQ-3/OQ-6/OQ-7 are carried forward intact
@@ -13,7 +13,7 @@
 | Status | SUPERSEDED — see banner above. Was DRAFT, never signed off. |
 | Consumer | Darpan reconciliation (component `darpan-hotwax` is the integration edge) |
 | Implementer | HotWax OMS ("maarg", Moqui-based) team — their architect owns all design |
-| Supersedes | Nothing. The current integration is documented in `rest-order-extraction.md` (same folder) and remains in service (RQ-19). |
+| Supersedes | Nothing. The current integration is documented in `../oms/rest-order-extraction.md` and remains in service (RQ-19). |
 
 This is a requirements document. It states WHO / WHAT / WHEN and the externally
 observable contract Darpan depends on. HOW the OMS implements it — entities,

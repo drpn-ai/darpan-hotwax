@@ -4,6 +4,8 @@ Component: `darpan-hotwax`
 
 The component owns HotWax/OMS integration artifacts that do not belong in the core `darpan` component. The first contract is tenant-scoped order extraction for reconciliation automation.
 
+This page covers the REST order connectors (`OMS`, `OMS_RECON_ORDERS`). Returns are in `rest-return-extraction.md`; the GraphQL connectors (`OMS_GQL`, `OMS_RETURNS_GQL`) are in `graphql-connector.md`.
+
 ## Source Config
 
 Entity: `darpan.hotwax.HotWaxOmsRestSourceConfig`
@@ -26,6 +28,22 @@ Required fields:
 - `timeZone`, default `UTC`, used by setup and source metadata displays for HotWax date-window interpretation
 - `canReadOrders`, default `Y`
 
+Other columns: `authType`, `username`, `password` (encrypted), `apiToken` (encrypted), `headersJson`, `connectTimeoutSeconds` (default 30), `readTimeoutSeconds` (default 60), `returnsPageSize` (default 500, returns only), `isActive`, `description`. The entity is `darpan-hotwax/entity/HotWaxOmsConfigEntities.xml`.
+
+### Knobs the code reads but the entity does not have
+
+`OmsRestSourceSupport` reads three tuning keys from the config map that are **not columns** on `HotWaxOmsRestSourceConfig`. A config row loaded from the database never carries them, so each always resolves to its code default and cannot be changed per source today:
+
+| Key read by the code | Effective value | Where |
+|---|---|---|
+| `ordersPageSize` | 500 (bounded 1..1000) | `resolveOrdersPageSize`, `DEFAULT_ORDERS_PAGE_SIZE` |
+| `ordersFetchConcurrency` | 2 (bounded 1..4) | `resolveOrdersFetchConcurrency`, `DEFAULT_ORDERS_FETCH_CONCURRENCY` |
+| `maxOrdersPageCount` | 20,000 pages | `MAX_ORDERS_PAGE_COUNT` (also the page ceiling of the GraphQL order extract) |
+
+The same applies to `maxReturnsPageCount` on the returns path (20,000, `MAX_RETURNS_PAGE_COUNT`). `returnsPageSize` is the only page-size setting that is a real column.
+
+One consequence an operator can see: when `/reconciliationOrders` rejects a page as `PAGE_SIZE_TOO_LARGE`, the error text advises lowering `ordersPageSize` on the source config. There is no such field to lower; the page size stays 500.
+
 The dev OMS Swagger document describes the orders API at `/rest/s1/oms/orders`, with `GET /` used to list `OrderHeader` records and Basic or `api_key` header authentication available. Darpan uses that Swagger contract for setup metadata and keeps `/rest/s1/oms/orders` as the default orders path. At runtime the extractor retries the list route with a trailing slash if the first request returns `404`, matching Swagger implementations that require `/rest/s1/oms/orders/`.
 
 Supported auth modes are `NONE`, `BASIC`, `BEARER`, and `API_KEY`. `API_KEY` stores the token in the encrypted API token field and sends it in the Swagger-documented `api_key` header.
@@ -42,9 +60,11 @@ GET {baseUrl}{ordersPath}?orderDate_from=<startEpochMillis>&orderDate_thru=<endE
 
 `windowStart` and `windowEnd` accept `Timestamp`, `Date`, ISO-8601 text, SQL timestamp text emitted by Moqui service serialization, or epoch milliseconds. Both parameters are always sent as epoch milliseconds.
 
-The extractor paginates order reads before writing the normalized source file. It first uses `pageIndex`/`pageSize`, then falls back to `viewIndex`/`viewSize` for OMS environments that expose that list contract. Pagination stops when the next page is empty, repeats the previous page, or is shorter than the previous page. The default requested page size is 500, with a high safety ceiling to avoid runaway loops while still allowing month-scale reconciliation runs.
+The extractor paginates order reads before writing the normalized source file. It first uses `pageIndex`/`pageSize`, then falls back to `viewIndex`/`viewSize` for OMS environments that expose that list contract. Pagination stops when the next page is empty, repeats the previous page, or is shorter than the previous page. The requested page size is 500, with a ceiling of 20,000 pages to stop runaway loops while still allowing month-scale reconciliation runs (see the knobs table above: neither is configurable per source).
 
-Requests advertise `Accept-Encoding: gzip` and decode compressed responses, which multiplies effective throughput on long-haul connections (the OMS itself needs no change — this is standard HTTP content negotiation). Once the pagination strategy is committed, remaining pages are fetched through a small concurrent window (`ordersFetchConcurrency`, default 2, capped at 4) while output is written strictly in page order. Worker threads hand back pre-filtered, pre-serialized page text rather than parsed record graphs, so the window costs roughly one serialized page of memory per slot — sized for resource-constrained production hosts. A stop condition (empty/repeated/shorter page) may leave up to window-minus-one speculative page requests already issued; their responses are discarded.
+**Retries on the orders path are narrow.** A page that times out is retried once with compression disabled (a gzip-buffering proxy can hold the whole response past the read timeout), and a `404` is retried once with a trailing slash before the query string. Any other non-2xx status fails the page and the extract; there is no `429`/`502`/`503`/`504` page retry on the orders path. That retry exists on the returns path only (`rest-return-extraction.md`). When the automation layer retries a failed extract (`AutomationExecutionSupport.buildFailureFields`, component `darpan`), it re-fetches the window from page 0.
+
+Requests advertise `Accept-Encoding: gzip` and decode compressed responses, which multiplies effective throughput on long-haul connections (the OMS itself needs no change — this is standard HTTP content negotiation). Once the pagination strategy is committed, remaining pages are fetched through a small concurrent window (two pages in flight; the code would honour an `ordersFetchConcurrency` key capped at 4, but it is not a config column, so the window is always 2) while output is written strictly in page order. Worker threads hand back pre-filtered, pre-serialized page text rather than parsed record graphs, so the window costs roughly one serialized page of memory per slot — sized for resource-constrained production hosts. A stop condition (empty/repeated/shorter page) may leave up to window-minus-one speculative page requests already issued; their responses are discarded.
 
 When the caller passes `keepRecordFields` (the SourceSystemConnector registry declares the parameter and base field set; dispatch adds the rule set's join-key fields), each order is projected down to those top-level fields after the reconciliation filter and before writing. Full ~14 KB order documents become a few hundred bytes each — a 99k-order window writes tens of MB instead of ~1.4 GB, which also keeps the Spark compare read (unsplittable multiLine JSON) inside constrained heaps. Projection is skipped automatically for rule sets that define field-comparison rules until rule-field extraction is wired into the keep-list.
 
@@ -105,13 +125,13 @@ knowledge of tenant exclusion rules.
 
 ### Configurable record exclusion
 
-Beyond the two built-in filters above, a rule set can configure its own per-field exclusion rules on either source's extraction. These are ordinary tenant-configured rules — a field to test and a set of values that disqualify a record — layered on top of the built-in `SALES_ORDER`/`EXCHANGE` filtering rather than replacing it.
+Beyond the two built-in filters above, a rule set can configure its own per-field exclusion rules on either source's extraction. Rules use the operator `EXCLUDE_IN` (drop records whose value is listed) or `INCLUDE_IN` (keep only records whose value is listed; a record with no value for the field is dropped and counted separately as field-absent). These are ordinary tenant-configured rules — a field to test and a set of values that disqualify a record — layered on top of the built-in `SALES_ORDER`/`EXCHANGE` filtering rather than replacing it.
 
 `extract#HotWaxOmsOrders` accepts an optional `sourceFilters` parameter: a list of rule Maps, each with `sequenceNum` (Integer), `fieldExpression`, `operator`, and `filterValues` (comma-separated). The parsing and matching semantics live in the connector-agnostic `darpan.reconciliation.source.SourceFilterSupport` (component `darpan`), which `OmsRestSourceSupport` calls into so configured and built-in exclusions behave identically:
 
 - **Field names** are trimmed and matched **case-sensitively** against each record's top-level keys.
 - **Values** are trimmed and matched **case-insensitively** against the field's value.
-- A record that **lacks the configured field is kept** — an exclusion rule can only remove a record for carrying a matching value, never for missing one.
+- Under `EXCLUDE_IN`, a record that **lacks the configured field is kept** — an exclusion rule can only remove a record for carrying a matching value, never for missing one. Under `INCLUDE_IN` the same record is dropped.
 
 `SourceFilterSupport.parseRules` validates and normalizes the raw rule list once, before extraction starts (`extractOrdersInternal`, `OmsRestSourceSupport.groovy`), ahead of building request headers or issuing any HTTP call. A malformed rule (no field, no values, an unsupported operator, or more than `MAX_RULES_PER_SOURCE`/`MAX_VALUES_PER_RULE`) is recorded as a pre-flight error and the extraction returns immediately with no request ever sent — never a failure discovered mid-window on some later page.
 
@@ -125,7 +145,7 @@ The two built-in branches are checked first, and a record is attributed to exact
 
 **Filtering runs before projection.** A page is filtered (`filterComparableOrderRecords`) before the `keepRecordFields` projection trims it (`prepareOrdersPage`), because the `EXCHANGE`-association scan needs the full order document. A practical consequence: a configured exclusion can target a field such as `salesChannelEnumId` or `productStoreId` even though neither is part of the connector's declared keep-field set — filtering sees the untrimmed record regardless of what the eventual output projection keeps.
 
-**Which fields the rules board offers.** The exclusion editor has no free-text field entry: a field is excludable only if it appears in the connector's pill list, `AutomationFacadeSupport.HOTWAX_OMS_ORDER_FIELD_OPTIONS` (component `darpan`). That list is `keepFieldsBase` plus the two exclusion-only fields above. Because a record that *lacks* the configured field is kept, a pill naming a field the order document does not actually carry would persist a rule that matches nothing, excludes nothing, and reports no error — so every entry must name a real top-level key on the OMS order document (`org.apache.ofbiz.order.order.OrderHeader`). Nested paths do not work either: `SourceFilterSupport` reduces a stored expression via `CompareIdExpressionSupport.topLevelRecordField`, which keeps only the first segment after `[*]`.
+**Which fields the rules board offers.** The exclusion editor has no free-text field entry: a field is excludable only if it has a `SourceSystemConnectorField` row for the connector's `systemEnumId` (seed: `darpan/data/SourceSystemConnectorFieldSeedData.xml`, read by `AutomationFacadeSupport.fieldOptionsForSystem`). For `OMS` that is the `keepFieldsBase` fields plus the two exclusion-only fields above (`salesChannelEnumId`, `productStoreId`). Because a record that *lacks* the configured field is kept, a pill naming a field the order document does not actually carry would persist a rule that matches nothing, excludes nothing, and reports no error — so every entry must name a real top-level key on the OMS order document (`org.apache.ofbiz.order.order.OrderHeader`). Nested paths do not work either: `SourceFilterSupport` reduces a stored expression via `CompareIdExpressionSupport.topLevelRecordField`, which keeps only the first segment after `[*]`.
 
 Matched exclusions are reported in `requestMetadata.filters.configuredExclusions`, one entry per configured rule:
 
