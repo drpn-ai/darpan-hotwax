@@ -16,8 +16,9 @@ Both services are in `service/reconciliation/HotWaxOmsExtractionServices.xml` an
 REST twin's service, so the in/out parameters are identical. The service names are distinct
 because the connector registry resolves a row by its extract service name.
 
-Status: on `main` (darpan-hotwax after v0.8.0, darpan after v1.5.1), not in a released tag. The
-seed rows ship in darpan's next-release `data/upgrade-data.xml`. Backlog: DAR-BE-064 (orders),
+Status: released in darpan-hotwax v0.9.0 with darpan 2.0.0, whose `data/upgrade-data.xml` carries
+the seed rows. The two tags deploy together: v0.8.0 lacks these extract services, and v0.9.0 calls
+darpan 2.0 classes (`SourceFilterSupport.evaluate`, `ExcludedRecordsSidecar`). Backlog: DAR-BE-064 (orders),
 DAR-BE-040 fix 3 (returns), DAR-BE-068 (origin-order store filter), DAR-BE-052 (the wider
 REST-to-GraphQL migration).
 
@@ -213,7 +214,7 @@ All in component `darpan`, `data/`:
 | `DarpanSystemSourceSeedData.xml` | Enumerations `OMS_GQL` (code `HOTWAX_GQL`) and `OMS_RETURNS_GQL` (code `HOTWAX_GQL_RETURNS`), both under parent `OMS`. Required for the endpoint gate and the automation-source foreign key. |
 | `SourceSystemConnectorSeedData.xml` | The two `SourceSystemConnector` rows (`sendUrlTemplate={baseUrl}/rest/s1/graphql`). |
 | `SourceSystemConnectorFieldSeedData.xml` | Nine pills for `OMS_GQL`, ten for `OMS_RETURNS_GQL`. |
-| `upgrade-data.xml` | The same rows, copied verbatim, for the next release. Loading them is inert until a rule set points at one of the new source types. |
+| `upgrade-data.xml` | The same rows, copied verbatim, in the 2.0.0 delta. Loading them is inert until a rule set points at one of the new source types. |
 
 ## Tests
 
