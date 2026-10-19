@@ -57,7 +57,7 @@ class OmsGqlReturnsConnectorWiringTests {
         Map gql = connector(SEED, "OMS_RETURNS_GQL")
         ["configEntityName", "configParameterName", "remoteId", "dateFromParameterName", "dateToParameterName",
          "keepFieldsParameterName", "keepFieldsBase", "filterParameterName", "preserveWindowInstants",
-         "healthCheckServiceName", "orderStateLookupServiceName", "lookupServiceName", "lookupIdsParameterName",
+         "healthCheckServiceName", "orderStateLookupServiceName", "returnLinesLookupServiceName", "lookupServiceName", "lookupIdsParameterName",
          "lookupMaxIds"].each { String k ->
             assertEquals(rest[k], gql[k], "${k} must match OMS_RETURNS")
         }

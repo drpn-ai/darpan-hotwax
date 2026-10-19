@@ -516,6 +516,32 @@
         </out-parameters>
     </service>
 
+    <service verb="lookup" noun="HotWaxOmsReturnLinesByOrderExternalId" type="script" transaction="ignore"
+            allow-remote="false" authenticate="true"
+            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/lookup/lookupOmsReturnLinesByOrderExternalId.groovy">
+        <description>Order lines OMS booked a return against, keyed by the originating Shopify order id, over
+            GraphQL (DAR-BE-085, DAR-BE-086). The returns verify stage pairs a missing-in-OMS Shopify event by
+            order and line when no shared id can exist: AfterShip warranty returns (keyed WARRANTY-uuid in OMS)
+            and returns on Shopify orders older than the 60-day read limit (rebuilt without a refund id).
+            Cancelled returns are left out. A failed lookup returns ok=false with an empty map; it never
+            pairs anything.</description>
+        <in-parameters>
+            <parameter name="omsRestSourceConfigId" required="true"/>
+            <parameter name="externalIds" type="List" required="true">
+                <description>Shopify order ids (OMS OrderHeader.externalId).</description>
+            </parameter>
+            <parameter name="companyUserGroupId">
+                <description>Trusted run owner tenant; when present, config access is checked against it
+                    instead of a user-session active tenant.</description>
+            </parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="returnLinesByExternalId" type="Map"/>
+            <parameter name="errors" type="List"/>
+        </out-parameters>
+    </service>
+
     <service verb="lookup" noun="HotWaxOmsReturnsByExternalId" type="script" transaction="ignore" allow-remote="false" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/lookup/lookupOmsReturnsByExternalId.groovy">
         <description>Point-existence check for OMS return ids against the reconciliation returns endpoint,

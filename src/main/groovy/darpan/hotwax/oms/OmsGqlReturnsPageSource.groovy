@@ -106,8 +106,8 @@ class OmsGqlReturnsPageSource {
         return kept.collect { Map n -> OmsGqlReturnAssembler.build(n, itemsByReturn[n.returnId as String] ?: [], lookups) }
     }
 
-    /** Every node for `ids`, chunked and paged to exhaustion. */
-    private static List<Map> fetchByIds(OmsGqlClient client, String document, String root, String key, List<String> ids,
+    /** Every node for `ids`, chunked and paged to exhaustion. Shared with OmsReturnLinesLookupSupport. */
+    static List<Map> fetchByIds(OmsGqlClient client, String document, String root, String key, List<String> ids,
                                         int chunkSize, int pageSize, int reservation, Map pagination) {
         List<Map> all = []
         ids.collate(chunkSize).each { List<String> chunk ->
