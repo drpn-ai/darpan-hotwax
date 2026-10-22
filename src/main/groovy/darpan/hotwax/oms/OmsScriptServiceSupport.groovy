@@ -151,10 +151,11 @@ class OmsScriptServiceSupport {
         Closure pageProgressListener = throttledProgressListener(ec, context.get("reconciliationRunResultId"),
                 context.get("progressStageCode"), context.get("expectedRecordCount"))
 
+        Map extraction = null
         try {
             Object keepRecordFields = context.get("keepRecordFields")
             Object sourceFilters = context.get("sourceFilters")
-            Map extraction = (Map) ((Closure) spec.extract).call([
+            extraction = (Map) ((Closure) spec.extract).call([
                     sourceConfig        : sourceConfig,
                     workFile            : workFile,
                     keepRecordFields    : (keepRecordFields instanceof List) ? (List) keepRecordFields : null,
@@ -201,6 +202,8 @@ class OmsScriptServiceSupport {
             }
         } finally {
             if (workFile.exists()) workFile.delete()
+            // The excluded-records spill holds customer records: gone whether the sidecar was written, not wanted, or failed.
+            ExcludedRecordsSidecar.discard((Map) extraction?.excludedCollector)
         }
     }
 
