@@ -22,12 +22,16 @@ import java.time.Instant
  */
 class OmsGqlReturnsPageSource {
 
-    static Closure fetcher(OmsGqlClient client) {
-        return { Map ctx -> fetchAll(client, ctx) }
+    static Closure fetcher(OmsGqlClient client, Map options = [:]) {
+        return { Map ctx -> fetchAll(client, ctx + (options ?: [:])) }
     }
 
     static Map fetchAll(OmsGqlClient client, Map ctx) {
         Map serverCounts = [returnsCount: 0, excludedNoShopifyRefCount: 0, excludedCancelledCount: 0]
+        // DAR-BE-094 R8 ("every return reaches NetSuite"): a check about NetSuite, not Shopify, keeps the returns Shopify
+        // never sees (the OMS's own Happiness Guarantee and sellable returns, numeric ids, no Shopify reference).
+        boolean keepNoShopifyRef = ctx.includeReturnsWithoutShopifyRef == true
+        if (keepNoShopifyRef) serverCounts.keptNoShopifyRefCount = 0
         Map pagination = [strategy: "GRAPHQL_CURSOR", pageCount: 0, lookupCalls: 0]
         Closure failed = { String message ->
             [errors: [message], warnings: [], serverCounts: serverCounts, pagination: pagination, transport: "GRAPHQL"]
@@ -58,6 +62,10 @@ class OmsGqlReturnsPageSource {
                 nodes.each { Map n ->
                     String verdict = OmsGqlReturnAssembler.classify(n)
                     if (verdict == OmsGqlReturnAssembler.CANCELLED) serverCounts.excludedCancelledCount = (serverCounts.excludedCancelledCount as int) + 1
+                    else if (verdict == OmsGqlReturnAssembler.NO_SHOPIFY_REF && keepNoShopifyRef) {
+                        serverCounts.keptNoShopifyRefCount = (serverCounts.keptNoShopifyRefCount as int) + 1
+                        kept.add(n)
+                    }
                     else if (verdict == OmsGqlReturnAssembler.NO_SHOPIFY_REF) serverCounts.excludedNoShopifyRefCount = (serverCounts.excludedNoShopifyRefCount as int) + 1
                     else kept.add(n)
                 }

@@ -18,6 +18,7 @@ OmsScriptServiceSupport.runExtract(ec, context, [
             // fed by GraphQL pages, which still carry the returns reconciliationReturns stopped serving.
             OmsReturnsSourceSupport.extractReturnsToFile(a.sourceConfig, windowStart, windowEnd,
                     a.workFile, a.keepRecordFields, a.pageProgressListener, a.sourceFilters,
-                    [pageFetcher: OmsGqlReturnsPageSource.fetcher(new OmsGqlClient(OmsRestSourceSupport.toPlainMap(a.sourceConfig)))])
+                    [pageFetcher: OmsGqlReturnsPageSource.fetcher(new OmsGqlClient(OmsRestSourceSupport.toPlainMap(a.sourceConfig)),
+                            [includeReturnsWithoutShopifyRef: includeReturnsWithoutShopifyRef == true])])
         },
 ])

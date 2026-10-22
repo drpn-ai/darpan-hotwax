@@ -266,6 +266,12 @@
                     run client-side, after the built-in exclusions. The expected
                     rule here excludes returns whose returnChannelEnumId never has a Shopify counterpart.</description>
             </parameter>
+                    <parameter name="includeReturnsWithoutShopifyRef" type="Boolean" default="false">
+                <description>DAR-BE-094. Keep the returns with no Shopify reference (counted as keptNoShopifyRefCount) instead
+                    of excluding them: the OMS's own Happiness Guarantee and sellable returns, which Shopify never sees but
+                    NetSuite must. For a check against NetSuite (R8), set in the automation source's
+                    safeMetadataJson.parameters; every Shopify comparison leaves it off.</description>
+            </parameter>
         </in-parameters>
     </service>
 

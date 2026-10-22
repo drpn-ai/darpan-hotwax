@@ -84,6 +84,22 @@ class OmsGqlReturnsPageSourceTests {
     }
 
     @Test
+    void aCheckAgainstNetSuiteKeepsTheReturnsShopifyNeverSees() {
+        Map<String, Closure> h = lookupsAnswering() + [returns: { Map v ->
+            conn([ret("M0001"), ret("628087", [identifications: [], returnChannelEnumId: "HAPPINESS_GUARANTEE", statusId: "RETURN_COMPLETED"]),
+                  ret("M0002", [statusId: "RETURN_CANCELLED"])])
+        }]
+        List<List<Map>> pages = []
+        Map result = OmsGqlReturnsPageSource.fetcher(client(h), [includeReturnsWithoutShopifyRef: true]).call(
+                [fromMillis: FROM, thruMillis: THRU, config: CONFIG, pageConsumer: { List<Map> records -> pages.add(records) }])
+        assertEquals([], result.errors)
+        assertEquals(["M0001", "628087"], (pages.flatten() as List<Map>)*.returnId)
+        assertEquals(null, (pages.flatten() as List<Map>)[1].shopifyReturnId)
+        assertEquals([returnsCount: 3, excludedNoShopifyRefCount: 0, excludedCancelledCount: 1, keptNoShopifyRefCount: 1], result.serverCounts,
+                "cancelled stays out; the kept ones are counted")
+    }
+
+    @Test
     void theWindowIsHalfOpenOnEntryDateAndTravelsAsAVariable() {
         Map result = run(client([returns: { Map v -> conn([]) }]))
         assertEquals([], result.errors)
