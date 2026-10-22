@@ -272,6 +272,11 @@
                     NetSuite must. For a check against NetSuite (R8), set in the automation source's
                     safeMetadataJson.parameters; every Shopify comparison leaves it off.</description>
             </parameter>
+            <parameter name="onlyCancelledReturns" type="Boolean" default="false">
+                <description>DAR-BE-094 R16. Read ONLY the returns the OMS cancelled (asked of the OMS by status), with or
+                    without a Shopify reference: for a check that nothing stays open in NetSuite for them. Set in the
+                    automation source's safeMetadataJson.parameters.</description>
+            </parameter>
         </in-parameters>
     </service>
 

@@ -100,6 +100,20 @@ class OmsGqlReturnsPageSourceTests {
     }
 
     @Test
+    void aCheckOfCancelledReturnsAsksOnlyForThemAndKeepsEveryOne() {
+        Map<String, Closure> h = lookupsAnswering() + [returns: { Map v ->
+            conn([ret("M0002", [statusId: "RETURN_CANCELLED"]), ret("628087", [identifications: [], statusId: "RETURN_CANCELLED"]),
+                  ret("M0001")])
+        }]
+        List<List<Map>> pages = []
+        Map result = OmsGqlReturnsPageSource.fetcher(client(h), [onlyCancelledReturns: true]).call(
+                [fromMillis: FROM, thruMillis: THRU, config: CONFIG, pageConsumer: { List<Map> records -> pages.add(records) }])
+        assertEquals([], result.errors)
+        assertTrue((requests.find { it.root == "returns" }.variables.q as String).startsWith("statusId:RETURN_CANCELLED entryDate:>="))
+        assertEquals(["M0002", "628087"], (pages.flatten() as List<Map>)*.returnId, "cancelled ones kept, Shopify reference or not; a stray status dropped")
+    }
+
+    @Test
     void theWindowIsHalfOpenOnEntryDateAndTravelsAsAVariable() {
         Map result = run(client([returns: { Map v -> conn([]) }]))
         assertEquals([], result.errors)

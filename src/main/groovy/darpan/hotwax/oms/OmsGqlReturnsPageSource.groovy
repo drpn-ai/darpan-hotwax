@@ -31,6 +31,10 @@ class OmsGqlReturnsPageSource {
         // DAR-BE-094 R8 ("every return reaches NetSuite"): a check about NetSuite, not Shopify, keeps the returns Shopify
         // never sees (the OMS's own Happiness Guarantee and sellable returns, numeric ids, no Shopify reference).
         boolean keepNoShopifyRef = ctx.includeReturnsWithoutShopifyRef == true
+        // R16 ("a cancelled exchange leaves nothing open in NetSuite"): only the cancelled returns, asked of the OMS by
+        // status, every one kept (a cancelled Happiness Guarantee return has no Shopify reference either).
+        boolean onlyCancelled = ctx.onlyCancelledReturns == true
+        if (onlyCancelled) keepNoShopifyRef = true
         if (keepNoShopifyRef) serverCounts.keptNoShopifyRefCount = 0
         Map pagination = [strategy: "GRAPHQL_CURSOR", pageCount: 0, lookupCalls: 0]
         Closure failed = { String message ->
@@ -40,6 +44,7 @@ class OmsGqlReturnsPageSource {
             return failed("The OMS GraphQL returns extract requires a date window.")
         }
         String filter = OmsGqlQueries.returnsWindowFilter(iso((Long) ctx.fromMillis), iso((Long) ctx.thruMillis))
+        if (ctx.onlyCancelledReturns == true) filter = "statusId:RETURN_CANCELLED ${filter}".toString()
         Closure pageConsumer = (Closure) ctx.pageConsumer
         int maxPages = maxPageCount((Map) ctx.config)
         try {
@@ -61,7 +66,9 @@ class OmsGqlReturnsPageSource {
                 List<Map> kept = []
                 nodes.each { Map n ->
                     String verdict = OmsGqlReturnAssembler.classify(n)
-                    if (verdict == OmsGqlReturnAssembler.CANCELLED) serverCounts.excludedCancelledCount = (serverCounts.excludedCancelledCount as int) + 1
+                    if (verdict == OmsGqlReturnAssembler.CANCELLED && onlyCancelled) kept.add(n)
+                    else if (onlyCancelled) { /* the OMS answered a status it was not asked for: not R16's */ }
+                    else if (verdict == OmsGqlReturnAssembler.CANCELLED) serverCounts.excludedCancelledCount = (serverCounts.excludedCancelledCount as int) + 1
                     else if (verdict == OmsGqlReturnAssembler.NO_SHOPIFY_REF && keepNoShopifyRef) {
                         serverCounts.keptNoShopifyRefCount = (serverCounts.keptNoShopifyRefCount as int) + 1
                         kept.add(n)

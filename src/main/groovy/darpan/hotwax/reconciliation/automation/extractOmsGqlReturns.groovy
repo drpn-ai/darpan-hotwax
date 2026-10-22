@@ -19,6 +19,7 @@ OmsScriptServiceSupport.runExtract(ec, context, [
             OmsReturnsSourceSupport.extractReturnsToFile(a.sourceConfig, windowStart, windowEnd,
                     a.workFile, a.keepRecordFields, a.pageProgressListener, a.sourceFilters,
                     [pageFetcher: OmsGqlReturnsPageSource.fetcher(new OmsGqlClient(OmsRestSourceSupport.toPlainMap(a.sourceConfig)),
-                            [includeReturnsWithoutShopifyRef: includeReturnsWithoutShopifyRef == true])])
+                            [includeReturnsWithoutShopifyRef: includeReturnsWithoutShopifyRef == true,
+                             onlyCancelledReturns: onlyCancelledReturns == true])])
         },
 ])
