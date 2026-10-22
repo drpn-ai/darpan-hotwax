@@ -1,5 +1,7 @@
 package darpan.hotwax.oms
 
+import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
+
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import org.junit.jupiter.api.AfterEach
@@ -297,7 +299,7 @@ class OmsOrderLineUnitExtractTests {
                 [:], [[sequenceNum: 1, fieldExpression: "unitState", operator: "INCLUDE_IN", filterValues: "COMPLETED"]])
         Map c = (Map) result.excludedCollector
         assertEquals(1, c.total)
-        Map dropped = (Map) ((List) c.records)[0]
+        Map dropped = (Map) ExcludedRecordsSidecar.records(c)[0]
         assertEquals("CANCELLED", dropped.unitState)
         assertFalse(dropped.containsKey("productStoreId"), "order-only header fields decide, they are not written")
         assertEquals("1:unitState", dropped._excludedBy)
