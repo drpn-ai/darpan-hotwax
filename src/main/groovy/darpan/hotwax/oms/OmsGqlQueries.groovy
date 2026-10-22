@@ -172,6 +172,8 @@ class OmsGqlQueries {
     static final int ORDER_ITEMS_ID_CHUNK = 25
     static final int ORDER_ITEMS_PAGE_SIZE = 100
     static final int ORDER_ITEMS_RESERVATION = 450   // 100 + 100 x 3
+    static final int ORDER_STATUSES_ID_CHUNK = 50
+    static final int ORDER_STATUSES_RESERVATION = 150 // 100 + 50 x 1, three scalar fields (live RAILS 2026-10-22)
     static final int PRODUCTS_ID_CHUNK = 25
     static final int PRODUCTS_RESERVATION = 200      // 100 + 25 x 2
 
@@ -204,6 +206,16 @@ class OmsGqlQueries {
         return '''query OmsOrderExternalIds($q: String, $first: Int, $after: String) {
   orders(query: $q, first: $first, after: $after) {
     edges { node { orderId externalId productStoreId } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
+    /** DAR-BE-111. An order's status by OMS order id: NetSuite's never-shipped, never-billed orders asked of HotWax. */
+    static String orderStatusesDocument() {
+        return '''query OmsOrderStatuses($q: String, $first: Int, $after: String) {
+  orders(query: $q, first: $first, after: $after) {
+    edges { node { orderId statusId orderDate } }
     pageInfo { hasNextPage endCursor }
   }
 }'''

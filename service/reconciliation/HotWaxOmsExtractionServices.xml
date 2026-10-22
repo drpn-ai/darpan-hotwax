@@ -553,6 +553,31 @@
         </out-parameters>
     </service>
 
+    <service verb="lookup" noun="HotWaxOmsOrderStatuses" type="script" transaction="ignore"
+            allow-remote="false" authenticate="true"
+            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/lookup/lookupOmsOrderStatuses.groovy">
+        <description>DAR-BE-111. Each order's HotWax statusId by OMS order id, over GraphQL: the NetSuite orders an audit
+            check found never shipped and never billed, asked of HotWax (completed or cancelled there is a finding).
+            Ids are asked in chunks and every answer is echo-checked. A failed lookup returns ok=false with nothing
+            classified; it never calls an order missing.</description>
+        <in-parameters>
+            <parameter name="omsRestSourceConfigId" required="true"/>
+            <parameter name="orderIds" type="List" required="true">
+                <description>OMS order ids (NetSuite custbody_hc_order_id).</description>
+            </parameter>
+            <parameter name="companyUserGroupId">
+                <description>Trusted run owner tenant; when present, config access is checked against it
+                    instead of a user-session active tenant.</description>
+            </parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="statusByOrderId" type="Map"><description>OMS order id -> statusId.</description></parameter>
+            <parameter name="missingIds" type="List"><description>Ids HotWax has no order for.</description></parameter>
+            <parameter name="errors" type="List"/>
+        </out-parameters>
+    </service>
+
     <service verb="lookup" noun="HotWaxOmsReturnsByExternalId" type="script" transaction="ignore" allow-remote="false" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/lookup/lookupOmsReturnsByExternalId.groovy">
         <description>Point-existence check for OMS return ids against the reconciliation returns endpoint,
