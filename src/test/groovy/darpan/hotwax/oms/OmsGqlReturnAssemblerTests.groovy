@@ -46,8 +46,8 @@ class OmsGqlReturnAssemblerTests {
 
         // orderProductStoreId (DAR-BE-068) is the one GraphQL-only key: filterable, never in keepFieldsBase, so
         // projection strips it and the compared record stays identical to REST's.
-        assertEquals(expected.keySet().toList(), built.keySet().toList() - ["orderProductStoreId", "orderNetsuiteId", "fromPartyId"], "same keys, same order as REST")
-        assertEquals(expected.toString(), normalized(built.findAll { !(it.key in ["orderProductStoreId", "orderNetsuiteId", "fromPartyId"]) }).toString())
+        assertEquals(expected.keySet().toList(), built.keySet().toList() - ["orderProductStoreId", "orderNetsuiteId", "fromPartyId", "returnDate", "daysBeforeEntry"], "same keys, same order as REST")
+        assertEquals(expected.toString(), normalized(built.findAll { !(it.key in ["orderProductStoreId", "orderNetsuiteId", "fromPartyId", "returnDate", "daysBeforeEntry"]) }).toString())
     }
 
     @Test
@@ -85,6 +85,21 @@ class OmsGqlReturnAssemblerTests {
         // store a return belongs to is its ORIGIN ORDER's — the same order orderExternalId names.
         Map built = OmsGqlReturnAssembler.build(node(), [item()], lookups())
         assertEquals("STORE", built.orderProductStoreId)
+    }
+
+    /**
+     * DAR-BE-116 R8, Aditi 2026-10-23: "this is an old return that is not expected to be synced to NS.. from 2022". OMS entered
+     * gorjana's M263611 on 2026-10-21 for a return dated 2022-06-06; how long before its entry a return was made is what
+     * tells an old return recorded late from a new one.
+     */
+    @Test
+    void aReturnCarriesItsOwnDateAndHowLongBeforeItsEntryItWasMade() {
+        Map old = OmsGqlReturnAssembler.build(node(entryDate: "2026-10-21T21:31:59.301Z", returnDate: "2022-06-06T20:37:51Z"), [item()], lookups())
+        assertEquals(java.time.Instant.parse("2022-06-06T20:37:51Z").toEpochMilli(), old.returnDate)
+        assertEquals(1598L, old.daysBeforeEntry)
+        Map fresh = OmsGqlReturnAssembler.build(node(entryDate: "2026-10-21T16:48:40.064Z", returnDate: "2026-10-21T16:32:59Z"), [item()], lookups())
+        assertEquals(0L, fresh.daysBeforeEntry)
+        assertNull(OmsGqlReturnAssembler.build(node(), [item()], lookups()).daysBeforeEntry, "no return date: unknown, not zero")
     }
 
     /** DAR-BE-116 R8, Aditi 2026-10-23: "the source order is not in NS... that is why this also is not in NS". */

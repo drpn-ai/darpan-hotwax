@@ -106,6 +106,12 @@ class OmsGqlReturnAssembler {
         record.statusId = node.statusId
         String entry = normalize(node.entryDate)
         record.entryDate = entry ? Instant.parse(entry).toEpochMilli() : null
+        // DAR-BE-116 R8: the return's own date and how many whole days before its OMS entry it was made. A 2022 return
+        // OMS records today (gorjana M263611) is old, not new, and was never meant to reach NetSuite. GraphQL only.
+        String made = normalize(node.returnDate)
+        record.returnDate = made ? Instant.parse(made).toEpochMilli() : null
+        record.daysBeforeEntry = record.entryDate != null && record.returnDate != null ?
+                Math.floorDiv(((long) record.entryDate) - ((long) record.returnDate), 86_400_000L) : null
         record.returnTotal = number(total)
         record.currencyUomId = node.currencyUomId
         record.returnChannelEnumId = node.returnChannelEnumId
