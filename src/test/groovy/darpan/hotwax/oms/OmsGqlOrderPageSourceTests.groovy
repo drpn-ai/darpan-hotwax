@@ -63,16 +63,201 @@ class OmsGqlOrderPageSourceTests {
         } finally { out.delete() }
     }
 
+    /** DAR-BE-116: one exchange pass covers every buffered orders page, not one pass per page. */
     @Test
-    void cursorsAdvanceAndEveryOrdersPageGetsItsOwnExchangePass() {
+    void cursorsAdvanceAndOneExchangePassCoversTheBufferedPages() {
         ScriptedClient client = new ScriptedClient([
-                ordersPage([order("M1")], true, "C1"), assocsPage([]),
+                ordersPage([order("M1")], true, "C1"),
                 ordersPage([order("M2")], false), assocsPage([])])
         File out = File.createTempFile("gql-", ".json")
         try {
             assertEquals(2, run(client, out).recordCount)
-            assertEquals("C1", ((Map) client.calls[2].variables).after)
+            assertEquals("C1", ((Map) client.calls[1].variables).after)
+            assertEquals("orderId:M1,M2 orderItemAssocTypeId:EXCHANGE", ((Map) client.calls[2].variables).q)
+            assertEquals(3, client.calls.size())
+        } finally { out.delete() }
+    }
+
+    @Test
+    void theExchangePassRunsWhenTheBufferFillsNotOnlyAtTheEnd() {
+        List<Map> big = (1..OmsGqlOrderPageSource.ASSOC_BATCH_ORDER_IDS).collect { order("B${it}") }
+        ScriptedClient client = new ScriptedClient([
+                ordersPage(big, true, "C1"), assocsPage([]),
+                ordersPage([order("M2")], false), assocsPage([])])
+        File out = File.createTempFile("gql-", ".json")
+        try {
+            assertEquals(big.size() + 1, run(client, out).recordCount)
+            assertTrue(((Map) client.calls[1].variables).q.toString().startsWith("orderId:B1,"))
             assertEquals("orderId:M2 orderItemAssocTypeId:EXCHANGE", ((Map) client.calls[3].variables).q)
+        } finally { out.delete() }
+    }
+
+    /** DAR-BE-116: the page is sized for a raised budget; a server that caps one query lower gets a smaller page, once. */
+    @Test
+    void costExceededHalvesThePageAndRetriesTheSameCursor() {
+        ScriptedClient client = new ScriptedClient([
+                ordersPage([order("M1")], true, "C1"),
+                [thrown: new OmsGqlException("COST_EXCEEDED", "query cost 1700 exceeds 1000")],
+                ordersPage([order("M2")], false), assocsPage([])])
+        File out = File.createTempFile("gql-", ".json")
+        try {
+            assertEquals(2, run(client, out).recordCount)
+            int first = ((Map) client.calls[0].variables).first as int
+            assertEquals("C1", ((Map) client.calls[2].variables).after, "the rejected page is asked again")
+            assertEquals(first.intdiv(2), ((Map) client.calls[2].variables).first)
+        } finally { out.delete() }
+    }
+
+    /** DAR-BE-116: a multi-day window is fetched as day slices in parallel; every slice's orders arrive once. */
+    @Test
+    void aMultiDayWindowIsFetchedAsContiguousDaySlices() {
+        List<String> filters = Collections.synchronizedList([])
+        OmsGqlClient client = new OmsGqlClient(CONFIG, { String u, Map h, String b -> [statusCode: 200, body: "{}"] }) {
+            @Override
+            Map execute(String document, Map variables, int reservation) {
+                String q = variables.q as String
+                if (document.contains("orderItemAssocs")) return [data: assocsPage([]).data]
+                filters.add(q)
+                String day = (q =~ /orderDate:>=(\S+)/)[0][1]
+                return [data: ordersPage([order("O" + day.take(10))], false).data]
+            }
+        }
+        File out = File.createTempFile("gql-", ".json")
+        try {
+            Map result = OmsRestSourceSupport.extractOrdersToFile(CONFIG, "2026-09-21T07:00:00Z", "2026-09-24T07:00:00Z",
+                    out, KEEP, null, null, null, OmsGqlOrderPageSource.fetcher(client))
+            assertEquals([], result.errors)
+            List<Map> recs = (List<Map>) (new JsonSlurper().parse(out) as Map).records
+            assertEquals(["O2026-09-21", "O2026-09-22", "O2026-09-23"], recs*.orderId.sort())
+            List<String> bounds = filters.collect { (it =~ /orderDate:>=(\S+) orderDate:<(\S+)/)[0] }
+                    .collect { it[1] + ".." + it[2] }.sort()
+            assertEquals(["2026-09-21T07:00:00Z..2026-09-22T07:00:00Z", "2026-09-22T07:00:00Z..2026-09-23T07:00:00Z",
+                          "2026-09-23T07:00:00Z..2026-09-24T07:00:00Z"], bounds)
+        } finally { out.delete() }
+    }
+
+    // ---- DAR-BE-116: ORDER_LINE_UNIT grain over GraphQL (the OMS order-items extract, off REST) ----
+
+    private static final Map UNIT_OPTIONS = [emitGrain: "ORDER_LINE_UNIT", applyExchangeExclusion: false, requireShopifyLineId: false]
+
+    private static Map unitOrder(String id) {
+        return order(id) + [identifications: [[orderIdentificationTypeId: "NETSUITE_ORDER_ID", idValue: "NS" + id]],
+                            shipGroups: [edges: [[node: [shipGroupSeqId: "00001", facilityId: "STORE_1"]],
+                                                 [node: [shipGroupSeqId: "00002", facilityId: "WH"]]]]]
+    }
+
+    private static Map itemsPage(List nodes, boolean hasNext = false, String endCursor = null) {
+        return [data: [orderItems: [edges: nodes.collect { [node: it] }, pageInfo: [hasNextPage: hasNext, endCursor: endCursor]]]]
+    }
+
+    private static Map item(String orderId, String seq, String group, String status = "ITEM_COMPLETED", int quantity = 1) {
+        return [orderId: orderId, orderItemSeqId: seq, externalId: "L" + seq, productId: "P" + seq, quantity: quantity,
+                statusId: status, shipGroupSeqId: group]
+    }
+
+    @Test
+    void unitGrainWritesTheRestUnitRecordWithEachItemUnderItsShipGroup() {
+        ScriptedClient client = new ScriptedClient([
+                ordersPage([unitOrder("M1")], false),
+                itemsPage([item("M1", "00101", "00001", "ITEM_COMPLETED", 2), item("M1", "00102", "00002", "ITEM_CANCELLED")])])
+        File out = File.createTempFile("gql-", ".json")
+        try {
+            Map result = run(client, out, null, null, UNIT_OPTIONS)
+            assertEquals([], result.errors)
+            List<Map> recs = (List<Map>) (new JsonSlurper().parse(out) as Map).records
+            assertEquals(3, recs.size(), "quantity 2 is two units, plus one")
+            Map first = recs.find { it.orderItemSeqId == "00101" }
+            assertEquals("SHM1", first.shopifyOrderId)
+            assertEquals("M1", first.omsOrderId)
+            assertEquals("STORE_1", first.facilityId)
+            assertEquals("WH", recs.find { it.orderItemSeqId == "00102" }.facilityId)
+            assertEquals(2, client.calls.size(), "orders, then one orderItems pass; no exchange pass when exclusion is off")
+            // DAR-BE-116 lean unit read: the ship groups (facility) and the header, nothing a unit never reads.
+            String doc = client.calls[0].document as String
+            assertTrue(doc.contains("shipGroups(first: 2)"))
+            assertFalse(doc.contains("identifications"))
+            assertFalse(doc.contains("paymentPreferences"))
+            assertFalse(doc.contains("grandTotal"))
+            assertEquals("orderId:M1", ((Map) client.calls[1].variables).q)
+        } finally { out.delete() }
+    }
+
+    @Test
+    void aUnitLevelFilterIsAppliedToUnitsNotRefusedAsAnOrderField() {
+        ScriptedClient client = new ScriptedClient([
+                ordersPage([unitOrder("M1")], false),
+                itemsPage([item("M1", "00101", "00001"), item("M1", "00102", "00002", "ITEM_CANCELLED")])])
+        File out = File.createTempFile("gql-", ".json")
+        try {
+            Map result = run(client, out, null, [[fieldExpression: "unitState", operator: "INCLUDE_IN", filterValues: "COMPLETED", sequenceNum: 1]], UNIT_OPTIONS)
+            assertEquals([], result.errors)
+            List<Map> recs = (List<Map>) (new JsonSlurper().parse(out) as Map).records
+            assertEquals(["00101"], recs*.orderItemSeqId)
+        } finally { out.delete() }
+    }
+
+    @Test
+    void aFilterOnAFieldTheGraphqlUnitDoesNotCarryFailsTheExtract() {
+        ["salesChannelEnumId", '$.records[*].netsuiteOrderId'].each { String field ->
+            ScriptedClient client = new ScriptedClient([])
+            File out = File.createTempFile("gql-", ".json"); out.delete()
+            Map result = run(client, out, null, [[fieldExpression: field, operator: "EXCLUDE_IN", filterValues: "X", sequenceNum: 1]], UNIT_OPTIONS)
+            assertTrue(((List) result.errors)[0].toString().contains(field.replace('$.records[*].', '')), "${result.errors}")
+            assertEquals(0, client.calls.size())
+        }
+    }
+
+    /** DAR-BE-116: R1/R3 and R15 read the same order items for the same days; with sharing on, OMS is asked once. */
+    @Test
+    void twoUnitExtractsOfOneWindowShareOneReadAndKeepTheirOwnFilters() {
+        OmsGqlSharedRead.reset()
+        List<String> asked = Collections.synchronizedList([])
+        java.util.concurrent.CountDownLatch both = new java.util.concurrent.CountDownLatch(2)
+        OmsGqlClient client = new OmsGqlClient(CONFIG, { String u, Map h, String b -> [statusCode: 200, body: "{}"] }) {
+            @Override
+            Map execute(String document, Map variables, int reservation) {
+                asked.add(document.contains("orderItems(") ? "items" : "orders")
+                both.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                if (document.contains("orderItems(")) {
+                    return [data: itemsPage([item("M1", "00101", "00001"), item("M1", "00102", "00002", "ITEM_CANCELLED")]).data]
+                }
+                return [data: ordersPage([unitOrder("M1")], false).data]
+            }
+        }
+        Map config = CONFIG + [gqlSharedReads: true]
+        def pool = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            List<List> filters = [[[fieldExpression: "unitState", operator: "INCLUDE_IN", filterValues: "COMPLETED", sequenceNum: 1]],
+                                  [[fieldExpression: "facilityId", operator: "EXCLUDE_IN", filterValues: "STORE_1", sequenceNum: 1]]]
+            List<File> outs = filters.collect { File.createTempFile("gql-", ".json") }
+            List futures = (0..1).collect { int i ->
+                pool.submit({ ->
+                    both.countDown()
+                    OmsRestSourceSupport.extractOrdersToFile(config, FROM, THRU, outs[i], null, null, filters[i], UNIT_OPTIONS,
+                            OmsGqlOrderPageSource.fetcher(client))
+                } as java.util.concurrent.Callable)
+            }
+            futures.each { assertEquals([], ((Map) it.get(10, java.util.concurrent.TimeUnit.SECONDS)).errors) }
+            assertEquals(["items", "orders"], asked.sort(), "one orders page and one items pass, for both extracts")
+            assertEquals(["00101"], ((List<Map>) (new JsonSlurper().parse(outs[0]) as Map).records)*.orderItemSeqId)
+            assertEquals(["00102"], ((List<Map>) (new JsonSlurper().parse(outs[1]) as Map).records)*.orderItemSeqId)
+            outs*.delete()
+        } finally {
+            pool.shutdownNow()
+            OmsGqlSharedRead.reset()
+        }
+    }
+
+    @Test
+    void orderItemsFollowTheirOwnCursor() {
+        ScriptedClient client = new ScriptedClient([
+                ordersPage([unitOrder("M1")], false),
+                itemsPage([item("M1", "00101", "00001")], true, "I1"),
+                itemsPage([item("M1", "00102", "00001")], false)])
+        File out = File.createTempFile("gql-", ".json")
+        try {
+            assertEquals(2, run(client, out, null, null, UNIT_OPTIONS).recordCount)
+            assertEquals("I1", ((Map) client.calls[2].variables).after)
         } finally { out.delete() }
     }
 
@@ -106,7 +291,7 @@ class OmsGqlOrderPageSourceTests {
     @Test
     void aThrottledPageMidWindowFailsTheExtractAndWritesNoFile() {
         ScriptedClient client = new ScriptedClient([
-                ordersPage([order("M1")], true, "C1"), assocsPage([]),
+                ordersPage([order("M1")], true, "C1"),
                 [thrown: new OmsGqlException("THROTTLED", "throttled")]])
         File out = File.createTempFile("gql-", ".json")
         out.delete()
@@ -215,8 +400,8 @@ class OmsGqlOrderPageSourceTests {
 
     @Test
     void aRepeatedCursorIsAnErrorNotAnEndlessLoop() {
-        assertFailsClosed([ordersPage([order("M1")], true, "C1"), assocsPage([]),
-                           ordersPage([order("M2")], true, "C1"), assocsPage([])], "MALFORMED")
+        assertFailsClosed([ordersPage([order("M1")], true, "C1"),
+                           ordersPage([order("M2")], true, "C1")], "MALFORMED")
     }
 
     @Test
@@ -227,8 +412,8 @@ class OmsGqlOrderPageSourceTests {
 
     @Test
     void thePageCeilingFromConfigStopsARunawayCursor() {
-        assertFailsClosed([ordersPage([order("M1")], true, "C1"), assocsPage([]),
-                           ordersPage([order("M2")], true, "C2"), assocsPage([])],
+        assertFailsClosed([ordersPage([order("M1")], true, "C1"),
+                           ordersPage([order("M2")], true, "C2")],
                 "page ceiling", CONFIG + [maxOrdersPageCount: 1])
     }
 }

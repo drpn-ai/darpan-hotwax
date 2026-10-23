@@ -38,13 +38,27 @@ class OmsReturnsGqlLookupTests {
         OmsReturnsSourceSupport.resetGqlClientFactory()
     }
 
-    /** GraphQL answers each request with the identifications `answer` builds from the requested ids. */
-    private void gqlAnswers(Closure<List<Map>> answer, boolean hasNextPage = false) {
+    private List<Map> returnsRequests = []
+
+    /**
+     * GraphQL answers by root. returnIdentifications: the identifications `answer` builds from the
+     * requested ids. returns (the returnId / externalId passes, DAR-BE-116): the rows `returnsAnswer`
+     * builds from (field, ids) — none by default, so those passes find nothing.
+     */
+    private void gqlAnswers(Closure<List<Map>> answer, boolean hasNextPage = false,
+                            Closure<List<Map>> returnsAnswer = { String field, List<String> ids -> [] }) {
         OmsReturnsSourceSupport.setGqlClientFactory { Map config ->
             OmsGqlClient c = new OmsGqlClient(config, { String url, Map headers, String body ->
                 Map payload = (Map) new JsonSlurper().parseText(body)
-                gqlRequests.add(payload)
                 String q = ((Map) payload.variables).q as String
+                if ((payload.query as String).contains("returns(")) {
+                    returnsRequests.add(payload)
+                    String field = q.substring(0, q.indexOf(":"))
+                    List<Map> rows = returnsAnswer.call(field, q.substring(q.indexOf(":") + 1).split(",").toList())
+                    return [statusCode: 200, body: JsonOutput.toJson([data: [returns: [
+                            edges: rows.collect { [node: it] }, pageInfo: [hasNextPage: false]]], errors: []])]
+                }
+                gqlRequests.add(payload)
                 List<String> ids = (q - "idValue:").split(",").toList()
                 List<Map> nodes = answer.call(ids)
                 return [statusCode: 200, body: JsonOutput.toJson([data: [returnIdentifications: [
@@ -94,13 +108,9 @@ class OmsReturnsGqlLookupTests {
     }
 
     @Test
-    void graphQlIsAskedOnlyForIdsRestLeftUnresolved() {
-        OmsReturnsSourceSupport.setHttpClient { Map request ->
-            String url = request.url as String
-            if (url.contains("shopifyReturnId=")) return [statusCode: 200, body: restBody([])]
-            return [statusCode: 200, body: restBody([[returnId: "M1", externalId: "aaa"]])]
-        }
-        gqlAnswers { List<String> ids -> [] }
+    void identificationsAreAskedOnlyForIdsTheReturnsPassesLeft() {
+        gqlAnswers({ List<String> ids -> [] }, false, { String field, List<String> ids ->
+            field == "externalId" ? ids.findAll { it == "aaa" }.collect { [returnId: "M1", externalId: it] } : [] })
 
         Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(CONFIG, ["aaa", "bbb"])
 
@@ -111,27 +121,51 @@ class OmsReturnsGqlLookupTests {
     }
 
     @Test
-    void noGraphQlCallWhenRestResolvedEverything() {
-        OmsReturnsSourceSupport.setHttpClient { Map request ->
-            [statusCode: 200, body: restBody([[returnId: "M1", externalId: "aaa"]])]
-        }
-        gqlAnswers { List<String> ids -> throw new AssertionError("GraphQL must not be called") }
+    void anOmsReturnIdIsFoundByTheFirstPassAndAsksNothingMore() {
+        // DAR-BE-116: a returnId-keyed compare (OMS returns vs NetSuite RMAs) hands the lookup OMS returnIds.
+        gqlAnswers({ List<String> ids -> throw new AssertionError("identifications must not be asked") }, false,
+                { String field, List<String> ids -> field == "returnId" ? ids.collect { [returnId: it, externalId: null] } : [] })
 
-        Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(CONFIG, ["aaa"])
+        Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(CONFIG, ["M246772"])
 
+        assertEquals(["M246772"], result.foundIds)
+        assertEquals(1, returnsRequests.size(), "no externalId pass once returnId resolved everything")
+        assertEquals("returnId:M246772", ((Map) returnsRequests[0].variables).q)
         assertEquals(0, gqlRequests.size())
-        assertEquals(["aaa"], result.foundIds)
     }
 
     @Test
-    void graphQlBatchesTheUnresolvedIds() {
+    void theLookupNeverCallsRest() {
+        OmsReturnsSourceSupport.setHttpClient { Map request -> throw new AssertionError("REST must not be called: ${request.url}") }
         gqlAnswers { List<String> ids -> [] }
 
-        List<String> ids = (1..45).collect { "id${it}".toString() }
+        Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(CONFIG, ["aaa"])
+
+        assertEquals(["aaa"], result.missingIds)
+    }
+
+    @Test
+    void aReturnsFilterTheServerIgnoredLeavesTheChunkUnresolved() {
+        gqlAnswers({ List<String> ids -> [] }, false,
+                { String field, List<String> ids -> field == "externalId" ? [[returnId: "M9", externalId: "unrelated"]] : [] })
+
+        Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(CONFIG, ["aaa"])
+
+        assertEquals([], result.missingIds)
+        assertEquals(["aaa"], result.unresolvedIds)
+        assertTrue((result.errors as List).any { (it as String).contains("externalId") }, "${result.errors}")
+    }
+
+    @Test
+    void everyPassBatchesItsIds() {
+        gqlAnswers { List<String> ids -> [] }
+
+        List<String> ids = (1..120).collect { "id${it}".toString() }
         OmsReturnsSourceSupport.lookupReturnsByExternalId(CONFIG, ids)
 
-        assertEquals(3, gqlRequests.size(), "45 ids at 20 per call is 3 calls, never one per id")
-        assertTrue(gqlRequests.every { !((String) it.query).toLowerCase().contains("mutation") })
+        assertEquals(3, gqlRequests.size(), "120 ids at 50 per call is 3 calls, never one per id")
+        assertEquals(6, returnsRequests.size(), "returnId and externalId passes, 3 chunks each")
+        assertTrue((gqlRequests + returnsRequests).every { !((String) it.query).toLowerCase().contains("mutation") })
     }
 
     @Test
@@ -150,7 +184,7 @@ class OmsReturnsGqlLookupTests {
 
         Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(CONFIG, ["37447008387"])
 
-        assertTrue(result.ok as Boolean, "the REST passes succeeded; the lookup as a whole did not fail")
+        assertTrue(result.ok as Boolean, "a pass that could not run is unresolved ids, not a failed lookup")
         assertEquals([], result.foundIds)
         assertEquals([], result.missingIds)
         assertEquals(["37447008387"], result.unresolvedIds)
@@ -158,10 +192,10 @@ class OmsReturnsGqlLookupTests {
     }
 
     @Test
-    void aServerErrorStopsThePassAndIsReportedOnce() {
+    void aServerErrorStopsEachPassAndIsReportedOncePerPass() {
         // DAR-BE-067, gorjana result 101474: the OMS entity layer answered every chunk with the same
-        // Moqui REST 400, so 6 calls produced 6 identical warnings. Every chunk sends the same document,
-        // so one server error is the answer for all of them.
+        // Moqui REST 400, so 6 calls produced 6 identical warnings. Every chunk of a pass sends the same
+        // document, so one server error is that pass's answer for all of them.
         OmsReturnsSourceSupport.setGqlClientFactory { Map config ->
             OmsGqlClient c = new OmsGqlClient(config, { String url, Map headers, String body ->
                 gqlRequests.add((Map) new JsonSlurper().parseText(body))
@@ -173,27 +207,30 @@ class OmsReturnsGqlLookupTests {
             return c
         }
 
-        List<String> ids = (1..45).collect { "id${it}".toString() }
+        List<String> ids = (1..120).collect { "id${it}".toString() }
         Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(CONFIG, ids)
 
-        assertEquals(1, gqlRequests.size(), "no further chunks after the server rejected the document")
+        assertEquals(3, gqlRequests.size(), "one call per pass, no further chunks after the server rejected the document")
         assertEquals(ids, result.unresolvedIds)
         assertEquals([], result.missingIds)
-        assertEquals(1, (result.errors as List).size(), "${result.errors}")
-        String error = (result.errors as List)[0] as String
-        assertTrue(error.contains("45 id(s)") && error.contains("ProductStoreFacilityPurpose"), error)
+        assertEquals(3, (result.errors as List).size(), "${result.errors}")
+        assertTrue((result.errors as List).every { (it as String).contains("120 id(s)") && (it as String).contains("ProductStoreFacilityPurpose") },
+                "${result.errors}")
     }
 
     @Test
     void aTransportFailureOnOneChunkStillChecksTheRest() {
         // A timeout says nothing about the next chunk, unlike a server error.
-        int call = 0
+        int identificationCalls = 0
         OmsReturnsSourceSupport.setGqlClientFactory { Map config ->
             OmsGqlClient c = new OmsGqlClient(config, { String url, Map headers, String body ->
-                gqlRequests.add((Map) new JsonSlurper().parseText(body))
-                if (call++ == 0) throw new java.net.http.HttpTimeoutException("request timed out")
-                String q = ((Map) gqlRequests[-1].variables).q as String
-                List<String> asked = (q - "idValue:").split(",").toList()
+                Map payload = (Map) new JsonSlurper().parseText(body)
+                if ((payload.query as String).contains("returns(")) {
+                    return [statusCode: 200, body: JsonOutput.toJson([data: [returns: [edges: [], pageInfo: [hasNextPage: false]]], errors: []])]
+                }
+                gqlRequests.add(payload)
+                if (identificationCalls++ == 0) throw new java.net.http.HttpTimeoutException("request timed out")
+                List<String> asked = ((((Map) payload.variables).q as String) - "idValue:").split(",").toList()
                 [statusCode: 200, body: JsonOutput.toJson([data: [returnIdentifications: [
                         edges: asked.collect { [node: ident(it)] }, pageInfo: [hasNextPage: false]]], errors: []])]
             })
@@ -201,14 +238,14 @@ class OmsReturnsGqlLookupTests {
             return c
         }
 
-        List<String> ids = (1..45).collect { "id${it}".toString() }
+        List<String> ids = (1..120).collect { "id${it}".toString() }
         Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(CONFIG, ids)
 
         assertEquals(3, gqlRequests.size())
-        assertEquals(ids.take(20), result.unresolvedIds)
-        assertEquals(ids.drop(20) as Set, result.foundIds as Set)
+        assertEquals(ids.take(50), result.unresolvedIds)
+        assertEquals(ids.drop(50) as Set, result.foundIds as Set)
         assertEquals(1, (result.errors as List).size(), "${result.errors}")
-        assertTrue(((result.errors as List)[0] as String).contains("20 id(s)"), "${result.errors}")
+        assertTrue(((result.errors as List)[0] as String).contains("50 id(s)"), "${result.errors}")
     }
 
     @Test

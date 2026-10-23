@@ -15,7 +15,7 @@ class OmsGqlReturnsPageSourceTests {
     private static final long FROM = 1790812800000L   // 2026-10-01T00:00:00Z
     private static final long THRU = 1790899200000L   // 2026-10-02T00:00:00Z
 
-    private List<Map> requests = []
+    private List<Map> requests = Collections.synchronizedList([])
 
     /** Answers by GraphQL root field; each handler takes the variables and returns the connection map. */
     private OmsGqlClient client(Map<String, Closure> handlers) {
@@ -81,6 +81,93 @@ class OmsGqlReturnsPageSourceTests {
         assertEquals("219-001-G", ((r.items as List)[0] as Map).sku)
         assertEquals([returnsCount: 3, excludedNoShopifyRefCount: 1, excludedCancelledCount: 1], result.serverCounts)
         assertEquals("c1", requests.findAll { it.root == "returns" }[1].variables.after, "second page must follow the cursor")
+    }
+
+    /** DAR-BE-116: lookups run once per buffer of kept returns, not once per returns page. */
+    @Test
+    void oneLookupPassCoversTheBufferedReturnsPages() {
+        int call = 0
+        Map<String, Closure> h = lookupsAnswering() + [returns: { Map v ->
+            call++
+            return call == 1 ? conn([ret("M0001")], "c1") : conn([ret("M0002")])
+        }]
+        List<List<Map>> pages = []
+        Map result = run(client(h), pages)
+        assertEquals([], result.errors)
+        assertEquals(["M0001", "M0002"], (pages.flatten() as List<Map>)*.returnId)
+        List<Map> itemCalls = requests.findAll { it.root == "returnItems" }
+        assertEquals(1, itemCalls.size(), "one returnItems call for both pages")
+        assertEquals("returnId:M0001,M0002", ((Map) itemCalls[0].variables).q)
+    }
+
+    /** DAR-BE-116: a multi-day window runs as contiguous day slices, each return arriving once. */
+    @Test
+    void aMultiDayWindowIsFetchedAsContiguousDaySlices() {
+        List<String> filters = Collections.synchronizedList([])
+        Map<String, Closure> h = lookupsAnswering() + [returns: { Map v ->
+            String q = v.q as String
+            filters.add(q)
+            String day = (q =~ /entryDate:>=(\S+)/)[0][1]
+            return conn([ret("R" + day.substring(8, 10) + "01")])
+        }]
+        List<List<Map>> pages = Collections.synchronizedList([])
+        Map result = OmsGqlReturnsPageSource.fetchAll(client(h), [fromMillis: FROM, thruMillis: FROM + 3 * 86400000L,
+                config: CONFIG, pageConsumer: { List<Map> records -> pages.add(records) }])
+        assertEquals([], result.errors)
+        assertEquals(["R0101", "R0201", "R0301"], (pages.flatten() as List<Map>)*.returnId.sort())
+        assertEquals(["entryDate:>=2026-10-01T00:00:00Z entryDate:<2026-10-02T00:00:00Z",
+                      "entryDate:>=2026-10-02T00:00:00Z entryDate:<2026-10-03T00:00:00Z",
+                      "entryDate:>=2026-10-03T00:00:00Z entryDate:<2026-10-04T00:00:00Z"], filters.sort())
+    }
+
+    /** DAR-BE-116: R8 (keeps returns with no Shopify reference) and R11 (does not) read the month's returns once. */
+    @Test
+    void twoReturnsExtractsOfOneWindowShareOneReadAndKeepTheirOwnScope() {
+        OmsGqlSharedRead.reset()
+        java.util.concurrent.CountDownLatch both = new java.util.concurrent.CountDownLatch(2)
+        Map<String, Closure> h = lookupsAnswering() + [returns: { Map v ->
+            both.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            return conn([ret("M0001"), ret("M0002", [identifications: []]), ret("M0003", [statusId: "RETURN_CANCELLED"])])
+        }]
+        OmsGqlClient c = client(h)
+        Map config = CONFIG + [gqlSharedReads: true]
+        def pool = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            List<List<List<Map>>> pages = [Collections.synchronizedList([]), Collections.synchronizedList([])]
+            List futures = [true, false].withIndex().collect { boolean keepNoRef, int i ->
+                pool.submit({ ->
+                    both.countDown()
+                    OmsGqlReturnsPageSource.fetchAll(c, [fromMillis: FROM, thruMillis: THRU, config: config,
+                            includeReturnsWithoutShopifyRef: keepNoRef, pageConsumer: { List<Map> records -> pages[i].add(records) }])
+                } as java.util.concurrent.Callable)
+            }
+            List<Map> results = futures.collect { (Map) it.get(10, java.util.concurrent.TimeUnit.SECONDS) }
+            results.each { assertEquals([], it.errors) }
+            assertEquals(1, requests.count { it.root == "returns" }, "one returns page for both extracts")
+            assertEquals(["M0001", "M0002"], (pages[0].flatten() as List<Map>)*.returnId.sort())
+            assertEquals(["M0001"], (pages[1].flatten() as List<Map>)*.returnId)
+            assertEquals(1, ((Map) results[1].serverCounts).excludedNoShopifyRefCount)
+            assertEquals(1, ((Map) results[0].serverCounts).keptNoShopifyRefCount)
+            results.each { assertEquals(1, ((Map) it.serverCounts).excludedCancelledCount) }
+            assertFalse((pages[0].flatten() as List<Map>).any { it.containsKey(OmsGqlReturnsPageSource.SHARED_VERDICT) })
+        } finally {
+            pool.shutdownNow()
+            OmsGqlSharedRead.reset()
+        }
+    }
+
+    @Test
+    void costExceededHalvesTheReturnsPageAndAsksAgain() {
+        List<Integer> firsts = []
+        Map<String, Closure> h = lookupsAnswering() + [returns: { Map v ->
+            firsts.add(v.first as int)
+            if (firsts.size() == 1) return [errors: [[message: "cost too high", extensions: [code: "COST_EXCEEDED"]]]]
+            return conn([ret("M0001")])
+        }]
+        List<List<Map>> pages = []
+        assertEquals([], run(client(h), pages).errors)
+        assertEquals(firsts[0].intdiv(2), firsts[1])
+        assertEquals(["M0001"], (pages.flatten() as List<Map>)*.returnId)
     }
 
     @Test

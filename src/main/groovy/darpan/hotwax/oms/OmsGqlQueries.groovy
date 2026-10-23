@@ -15,9 +15,21 @@ package darpan.hotwax.oms
  */
 class OmsGqlQueries {
 
-    static final int MAX_PAGE_SIZE = 50
-    static final int COST_BUDGET = 950               // page cost ceiling, under the 1000 hard max
-    static final int HARD_MAX_COST = 1000
+    /** moqui-gql's `first` ceiling (FIRST_REQUIRED, max 100). */
+    static final int MAX_PAGE_SIZE = 100
+    /**
+     * DAR-BE-116: the per-query cost a page is sized to. Live gorjana 2026-10-23: the BUCKET was raised to
+     * 20000 at 2000/s, but one query is still capped at 1000 (60 returns -> 1260 COST_EXCEEDED, 100
+     * returnItems -> 1110). The page sources halve the page on COST_EXCEEDED, so a server with a higher cap
+     * can be given a bigger budget with -Ddarpan.oms.gql.queryCostBudget=N and a lower one costs one call.
+     */
+    static final String QUERY_COST_BUDGET_PROPERTY = "darpan.oms.gql.queryCostBudget"
+    static final int DEFAULT_QUERY_COST_BUDGET = 950
+
+    static int queryCostBudget() {
+        String raw = System.getProperty(QUERY_COST_BUDGET_PROPERTY)
+        try { return raw ? Math.max(200, raw.trim() as int) : DEFAULT_QUERY_COST_BUDGET } catch (ignored) { return DEFAULT_QUERY_COST_BUDGET }
+    }
     /** Two slots: 1-2 OPPs cover 97% of gorjana orders, and k=3 would force the page down to 40. */
     static final int PAYMENT_PREF_SLOTS = 2
     static final double PAGE_OVERHEAD = 100d
@@ -74,8 +86,9 @@ class OmsGqlQueries {
 
         int extraScalars = scalars.size() - ALWAYS_FIELDS.size()
         double perOrder = perOrderCost(PAYMENT_PREF_SLOTS, extraScalars, nested)
-        int pageSize = Math.max(1, Math.min(MAX_PAGE_SIZE, (int) Math.floor((COST_BUDGET - PAGE_OVERHEAD) / perOrder)))
-        int reservation = Math.min(HARD_MAX_COST, estimatedPageCost(pageSize, PAYMENT_PREF_SLOTS, extraScalars, nested) + 50)
+        int budget = queryCostBudget()
+        int pageSize = Math.max(1, Math.min(MAX_PAGE_SIZE, (int) Math.floor((budget - PAGE_OVERHEAD) / perOrder)))
+        int reservation = Math.min(budget + 50, estimatedPageCost(pageSize, PAYMENT_PREF_SLOTS, extraScalars, nested) + 50)
 
         String selection = (scalars as List).join(" ") +
                 "\n      paymentPreferences(first: ${PAYMENT_PREF_SLOTS}) { paymentMethodTypeId statusId maxAmount }" +
@@ -134,10 +147,24 @@ class OmsGqlQueries {
      * returns created before the switch keep SHOPIFY_RTN_ID. Both were live on gorjana 2026-10-03.
      */
     static final Set<String> SHOPIFY_RETURN_IDENTIFICATION_TYPES = ["SHOPIFY_RETURN_ID", "SHOPIFY_RTN_ID"] as Set
-    static final int RETURN_LOOKUP_CHUNK_SIZE = 20
+    static final int RETURN_LOOKUP_CHUNK_SIZE = 50
     /** Two slots per id: a return can carry the same id under both types. */
-    static final int RETURN_LOOKUP_PAGE_SIZE = 40
-    static final int RETURN_LOOKUP_RESERVATION = 300  // ~100 per page + 3 scalars x 40 slots, flat
+    static final int RETURN_LOOKUP_PAGE_SIZE = 100
+    static final int RETURN_LOOKUP_RESERVATION = 450  // ~100 per page + 3 scalars x 100 slots, flat
+
+    // DAR-BE-116: returns by returnId / externalId, the GraphQL replacement for the REST by-id passes.
+    static final int RETURN_ID_LOOKUP_CHUNK = 50
+    static final int RETURN_ID_LOOKUP_PAGE_SIZE = 100
+    static final int RETURN_ID_LOOKUP_RESERVATION = 350  // 100 + 100 x 2 scalars
+
+    static String returnIdsDocument() {
+        return '''query OmsReturnIds($q: String, $first: Int, $after: String) {
+  returns(query: $q, first: $first, after: $after) {
+    edges { node { returnId externalId } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
 
     static String returnIdentificationsDocument() {
         return '''query OmsReturnIdentifications($q: String, $first: Int) {
@@ -162,20 +189,23 @@ class OmsGqlQueries {
     // whether or not it fills. Each lookup therefore covers a whole returns page in ONE call where it
     // fits under the 1000 cap (a return averages ~1 item, an order ~3), paging only on overflow:
     // ~2,200 per page of 25 returns, against ~4,400 with per-10-id chunks. Throttle-bound either way.
-    static final int RETURNS_PAGE_SIZE = 25
-    static final int RETURNS_RESERVATION = 800       // 100 + 25 x ~27
-    static final int RETURN_ITEMS_ID_CHUNK = 25
-    static final int RETURN_ITEMS_PAGE_SIZE = 50
-    static final int RETURN_ITEMS_RESERVATION = 700  // 100 + 50 x 11
-    static final int ORDERS_ID_CHUNK = 25
-    static final int ORDERS_RESERVATION = 200        // 100 + 25 x 3 (productStoreId, DAR-BE-068)
-    static final int ORDER_ITEMS_ID_CHUNK = 25
+    // DAR-BE-116 (2026-10-23): sized to the 1000 one-query cap from costs logged live on gorjana (returns
+    // 30 -> 690, 60 -> 1260; returnItems 50 -> 560, 100 -> 1110; the by-id lookups 100 -> 210-310). The
+    // bigger bucket is spent by parallel slices, not by bigger pages.
+    static final int RETURNS_PAGE_SIZE = 45
+    static final int RETURNS_RESERVATION = 1000      // ~60 + 45 x 21
+    static final int RETURN_ITEMS_ID_CHUNK = 85
+    static final int RETURN_ITEMS_PAGE_SIZE = 85
+    static final int RETURN_ITEMS_RESERVATION = 1000 // ~10 + 85 x 11
+    static final int ORDERS_ID_CHUNK = 100
+    static final int ORDERS_RESERVATION = 450        // 100 + 100 x 3 (productStoreId, DAR-BE-068)
+    static final int ORDER_ITEMS_ID_CHUNK = 100
     static final int ORDER_ITEMS_PAGE_SIZE = 100
     static final int ORDER_ITEMS_RESERVATION = 450   // 100 + 100 x 3
     static final int ORDER_STATUSES_ID_CHUNK = 50
     static final int ORDER_STATUSES_RESERVATION = 150 // 100 + 50 x 1, three scalar fields (live RAILS 2026-10-22)
-    static final int PRODUCTS_ID_CHUNK = 25
-    static final int PRODUCTS_RESERVATION = 200      // 100 + 25 x 2
+    static final int PRODUCTS_ID_CHUNK = 100
+    static final int PRODUCTS_RESERVATION = 350      // 100 + 100 x 2
 
     /** Half-open on entryDate, like REST. It MAY contain `<`: it travels as a variable, never inside the document. */
     static String returnsWindowFilter(String fromIso, String thruIso) {
@@ -216,6 +246,38 @@ class OmsGqlQueries {
         return '''query OmsOrderStatuses($q: String, $first: Int, $after: String) {
   orders(query: $q, first: $first, after: $after) {
     edges { node { orderId statusId orderDate } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
+    // DAR-BE-116: the ORDER_LINE_UNIT order page. Only what a unit reads from its order: the header scalars and the
+    // ship groups (facilityId). No identifications or paymentPreferences: nested lists are charged per requested slot
+    // per order, and they made a page 18 orders at 770 (live 2026-10-23). Header scalars cost ~1 each per order
+    // (probe 2026-10-23: 100 orders x 4 scalars requested 510); two ship-group slots of two fields ~7.
+    static final int UNIT_ORDERS_PAGE_SIZE = 60
+    static final int UNIT_ORDERS_RESERVATION = 1000
+
+    static String unitOrdersDocument() {
+        return '''query OmsUnitOrders($q: String, $first: Int, $after: String) {
+  orders(query: $q, sortKey: ORDER_DATE, reverse: false, first: $first, after: $after) {
+    edges { node {
+      orderId orderName externalId statusId orderTypeId orderDate
+      shipGroups(first: 2) { edges { node { shipGroupSeqId facilityId } } }
+    } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
+    // DAR-BE-116: the items an ORDER_LINE_UNIT extract flattens, asked by orderId in batches (nesting
+    // shipGroups.orderItems costs ~6400 a page, live 2026-09-30). Seven scalars x 100 + 100.
+    static final int UNIT_ITEMS_RESERVATION = 850
+
+    static String unitOrderItemsDocument() {
+        return '''query OmsUnitOrderItems($q: String, $first: Int, $after: String) {
+  orderItems(query: $q, first: $first, after: $after) {
+    edges { node { orderId orderItemSeqId externalId productId quantity statusId shipGroupSeqId } }
     pageInfo { hasNextPage endCursor }
   }
 }'''

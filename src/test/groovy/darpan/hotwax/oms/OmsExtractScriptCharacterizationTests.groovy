@@ -112,7 +112,6 @@ class OmsExtractScriptCharacterizationTests {
         ec.message.clearErrors()
         OmsRestSourceSupport.resetHttpClient()
         OmsReturnsSourceSupport.resetGqlClientFactory()
-        OmsReturnsSourceSupport.resetLookupSleeper()
         GroovySystem.metaClassRegistry.removeMetaClass(OmsGqlClient)
     }
 
@@ -138,7 +137,8 @@ class OmsExtractScriptCharacterizationTests {
                 "extract#HotWaxOmsGqlOrders"           : [windowedIn, ordersOut],
                 "extract#HotWaxOmsReconciliationOrders": [windowedIn, ordersOut],
                 "extract#HotWaxOmsReturns"             : [windowedIn, plainOut],
-                "extract#HotWaxOmsGqlReturns"          : [windowedIn, plainOut],
+                // DAR-BE-094 R8 / R16 added the two returns-scope switches.
+                "extract#HotWaxOmsGqlReturns"          : [windowedIn + ["includeReturnsWithoutShopifyRef", "onlyCancelledReturns"], plainOut],
                 "extract#HotWaxOmsTransferOrders"      : [windowedIn[0..4] + ["windowFieldName", "orderStatusIds"] + windowedIn[5..-1], plainOut],
                 "extract#HotWaxOmsOrderLineUnits"      : [unitIn, plainOut],
                 "extract#HotWaxOmsOrderItems"          : [unitIn, plainOut],
@@ -661,20 +661,23 @@ class OmsExtractScriptCharacterizationTests {
 
     @Test
     void lookupReturnsSplitsFoundFromMissingAndReportsUnresolved() {
-        OmsReturnsSourceSupport.setLookupSleeper { long ms -> }
         OmsReturnsSourceSupport.setGqlClientFactory { Map config ->
+            // DAR-BE-116: GraphQL only. "aaa" is a Shopify refund id the externalId pass finds; "bbb" is nowhere.
             OmsGqlClient c = new OmsGqlClient(config, { String url, Map headers, String body ->
+                Map payload = (Map) new groovy.json.JsonSlurper().parseText(body)
+                String q = ((Map) payload.variables).q as String
+                if ((payload.query as String).contains("returns(")) {
+                    List rows = q.startsWith("externalId:") && q.contains("aaa") ? [[node: [returnId: "M1", externalId: "aaa"]]] : []
+                    return [statusCode: 200, body: JsonOutput.toJson([data: [returns: [edges: rows,
+                            pageInfo: [hasNextPage: false]]], errors: []])]
+                }
                 [statusCode: 200, body: JsonOutput.toJson([data: [returnIdentifications: [edges: [],
                         pageInfo: [hasNextPage: false]]], errors: []])]
             })
             c.sleeper = { long ms -> }
             return c
         }
-        OmsRestSourceSupport.setHttpClient { Map request ->
-            String url = request.url as String
-            if (url.contains("shopifyReturnId=")) return [statusCode: 200, body: returnsPage([], false)]
-            return [statusCode: 200, body: returnsPage([[returnId: "M1", externalId: "aaa"]], false)]
-        }
+        OmsRestSourceSupport.setHttpClient { Map request -> throw new AssertionError("REST must not be called") }
 
         Map result = callService("lookup#HotWaxOmsReturnsByExternalId", [omsRestSourceConfigId: CONFIG_ID,
                 externalIds: ["aaa", "bbb"], companyUserGroupId: TENANT])

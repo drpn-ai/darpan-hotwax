@@ -34,11 +34,6 @@ class OmsReturnsSourceSupport {
     static final int MIN_RETURNS_PAGE_SIZE = 1
     static final int MAX_RETURNS_PAGE_SIZE = 1000
     static final int MAX_RETURNS_PAGE_COUNT = 20000
-    static final String RETURNS_EXTERNAL_ID_PARAM = "externalId"
-    /** OMS leaves externalId BLANK until a refund exists; this field carries the id from creation. */
-    static final String RETURNS_SHOPIFY_RETURN_ID_PARAM = "shopifyReturnId"
-    /** 20 ids per call is the width live-proven 2026-08-20; the endpoint accepts CSV and repeated params. */
-    static final int RETURNS_LOOKUP_CHUNK_SIZE = 20
     /** Attempts per page, inclusive of the first. 3 covers a gateway blip without hammering a sick host. */
     static final int DEFAULT_MAX_PAGE_ATTEMPTS = 3
     /** Linear backoff step: attempt N waits N x this before re-requesting. */
@@ -53,28 +48,7 @@ class OmsReturnsSourceSupport {
      */
     static final Set<Integer> RETRYABLE_STATUS_CODES = [429, 502, 503, 504] as Set
 
-    /**
-     * By-id lookup retry (DAR-BE-070). A verify pass that gives up on one gateway 504 leaves every
-     * candidate unverified, so the lookup waits and asks again. A minute, not the extract's 2s step:
-     * the lookup is one request a run, and a gateway that just timed out needs time to drain.
-     */
-    static final long LOOKUP_RETRY_DELAY_MILLIS = 60000L
-    /** Retries after the first request, so a lookup request is tried at most 4 times. */
-    static final int LOOKUP_MAX_RETRIES = 3
-
     private static final JsonSlurper JSON_SLURPER = new JsonSlurper()
-
-    private static final Closure DEFAULT_LOOKUP_SLEEPER = { long ms -> sleepQuietly(ms) }
-    private static Closure lookupSleeper = DEFAULT_LOOKUP_SLEEPER
-
-    /** Test seam for the by-id lookup's retry wait: millis -> void. */
-    static void setLookupSleeper(Closure sleeper) {
-        lookupSleeper = sleeper ?: DEFAULT_LOOKUP_SLEEPER
-    }
-
-    static void resetLookupSleeper() {
-        lookupSleeper = DEFAULT_LOOKUP_SLEEPER
-    }
 
     /**
      * No client field of its own. callOmsEndpoint (reused below, not reimplemented — see class doc)
@@ -487,58 +461,94 @@ class OmsReturnsSourceSupport {
         Map<String, Object> config = OmsRestSourceSupport.toPlainMap(rawConfig)
         if (!config) return [ok: false, foundIds: [], missingIds: [], errors: ["OMS REST source config could not be read."]]
 
-        String endpointUrl = OmsRestSourceSupport.buildOrdersEndpointUrl(
-                normalize(config.baseUrl), DEFAULT_RETURNS_PATH)
-        Map<String, String> headers
-        try {
-            headers = OmsRestSourceSupport.buildHeaders(config)
-        } catch (IllegalArgumentException e) {
-            return [ok: false, foundIds: [], missingIds: [], errors: [normalize(e.message) ?: "OMS auth configuration is invalid."]]
-        }
-
-        long thruMillis = System.currentTimeMillis() + 86400000L
-        long fromMillis = thruMillis - 3650L * 86400000L
+        // DAR-BE-116 (2026-10-23): GraphQL only. Every OMS read goes through GraphQL (Aditi); the REST passes
+        // asked 20 ids at a time over a 10-year window, one or two calls per chunk, and a returns run's
+        // VERIFY step spent half an hour on them. The three passes below answer the same three id kinds
+        // the lookup has always been handed: the OMS returnId (a returnId-keyed compare, e.g. OMS returns
+        // vs NetSuite RMAs), the Shopify refund id (Return.externalId), and the Shopify return id
+        // (returnIdentifications). An id is MISSING only when every pass ran and none found it; a pass that
+        // could not run leaves its ids UNRESOLVED, so a degraded OMS over-reports instead of hiding rows.
         Set<String> found = new LinkedHashSet<String>()
+        Set<String> unresolved = new LinkedHashSet<String>()
+        List<String> errors = []
+        List<String> askable = ids.findAll { it ==~ /[A-Za-z0-9_\-]+/ }
+        unresolved.addAll(ids.findAll { !askable.contains(it) })
 
-        for (List<String> chunk : ids.collate(normalizeInt(options?.chunkSize, RETURNS_LOOKUP_CHUNK_SIZE))) {
-            // TWO-FIELD LOOKUP (2026-08-21). externalId alone silently misses every return that has no
-            // refund yet: OMS leaves that column NULL until one exists and carries the id only in
-            // shopifyReturnId. Probed on six live RETURN_REQUESTED rows — 0/6 resolved by externalId,
-            // 6/6 by shopifyReturnId — so a by-externalId-only lookup reported all six as "confirmed
-            // missing" when OMS held every one of them. Same asymmetry the extractor's
-            // applyJoinKeyFallback exists for; this is its lookup-side twin.
-            //
-            // The second call runs ONLY for ids the first did not resolve, so a window of settled
-            // returns still costs one call per chunk.
-            Map first = queryReturnsByField(endpointUrl, headers, config, RETURNS_EXTERNAL_ID_PARAM,
-                    chunk, fromMillis, thruMillis)
-            if (first.error) return [ok: false, foundIds: [], missingIds: [], errors: [first.error]]
-            found.addAll((Collection<String>) first.found)
-
-            List<String> unresolved = chunk.findAll { !found.contains(it) }
-            if (unresolved) {
-                Map second = queryReturnsByField(endpointUrl, headers, config, RETURNS_SHOPIFY_RETURN_ID_PARAM,
-                        unresolved, fromMillis, thruMillis)
-                if (second.error) return [ok: false, foundIds: [], missingIds: [], errors: [second.error]]
-                found.addAll((Collection<String>) second.found)
-            }
+        OmsGqlClient client
+        try {
+            client = (OmsGqlClient) gqlClientFactory.call(config)
+        } catch (Exception e) {
+            return [ok: false, foundIds: [], missingIds: [], unresolvedIds: ids,
+                    errors: ["OMS GraphQL returns lookup unavailable: ${e.message}".toString()]]
         }
-
-        // GRAPHQL PASS (DAR-BE-040, 2026-10-03). reconciliationReturns now serves REFUNDED returns only:
-        // all 268 RETURN_REQUESTED returns on gorjana since Oct 1 were absent from it, and 10 sampled by
-        // their SHOPIFY_RETURN_ID resolved 0/10 through both passes above and 10/10 through GraphQL. So
-        // every pending return was being reported "confirmed missing in HotWax". Ids GraphQL cannot
-        // CHECK are unresolved, never missing: REST is blind to pending returns, so its NOT FOUND alone
-        // is not evidence of absence.
-        List<String> restMissing = ids.findAll { !found.contains(it) }
-        if (!restMissing) return [ok: true, foundIds: new ArrayList<String>(found), missingIds: [], unresolvedIds: [], errors: []]
-        Map gql = lookupShopifyReturnIdentifications(config, restMissing)
-        found.addAll((Collection<String>) gql.found)
-        Set<String> unresolved = (Set<String>) gql.unresolved
-        return [ok: true, foundIds: new ArrayList<String>(found),
+        ["returnId", "externalId"].each { String field ->
+            List<String> remaining = askable.findAll { !found.contains(it) }
+            if (!remaining) return
+            Map pass = lookupReturnsByField(client, field, remaining)
+            found.addAll((Collection<String>) pass.found)
+            unresolved.addAll((Collection<String>) pass.unresolved)
+            errors.addAll((Collection<String>) pass.errors)
+        }
+        List<String> remaining = askable.findAll { !found.contains(it) }
+        if (remaining) {
+            Map gql = lookupShopifyReturnIdentifications(config, remaining)
+            found.addAll((Collection<String>) gql.found)
+            unresolved.addAll((Collection<String>) gql.unresolved)
+            errors.addAll((Collection<String>) gql.errors)
+        }
+        unresolved.removeAll(found)
+        return [ok: true, foundIds: ids.findAll { found.contains(it) },
                 missingIds: ids.findAll { !found.contains(it) && !unresolved.contains(it) },
                 unresolvedIds: ids.findAll { unresolved.contains(it) },
-                errors: (List) gql.errors]
+                errors: errors]
+    }
+
+    /**
+     * returns(query: "<field>:a,b,...") in chunks, each paged to exhaustion and echo-checked on the field
+     * it filtered by. [found, unresolved, errors]: a failed chunk, or one whose answer echoed none of the
+     * ids it asked for (the server ignored the filter), leaves that chunk unresolved, never missing.
+     */
+    private static Map lookupReturnsByField(OmsGqlClient client, String field, List<String> ids) {
+        Set<String> found = new LinkedHashSet<String>()
+        Set<String> unresolved = new LinkedHashSet<String>()
+        List<String> errors = []
+        List<List<String>> chunks = ids.collate(OmsGqlQueries.RETURN_ID_LOOKUP_CHUNK)
+        for (int i = 0; i < chunks.size(); i++) {
+            List<String> chunk = chunks[i]
+            Set<String> requested = new HashSet<String>(chunk)
+            Set<String> echoed = new HashSet<String>()
+            try {
+                String cursor = null
+                Set<String> seenCursors = [] as Set
+                boolean anyRows = false
+                while (true) {
+                    Map page = client.execute(OmsGqlQueries.returnIdsDocument(),
+                            OmsGqlQueries.inVariables(field, chunk, OmsGqlQueries.RETURN_ID_LOOKUP_PAGE_SIZE, cursor),
+                            OmsGqlQueries.RETURN_ID_LOOKUP_RESERVATION)
+                    Map connection = OmsGqlOrderPageSource.requireConnection(page, "returns")
+                    List<Map> nodes = OmsGqlOrderGrainAssembler.edgeNodes(connection)
+                    anyRows = anyRows || !nodes.isEmpty()
+                    nodes.each { Map n ->
+                        String value = normalize(n.get(field))
+                        if (value && requested.contains(value)) echoed.add(value)
+                    }
+                    if (anyRows && echoed.isEmpty()) {
+                        throw new OmsGqlException("FILTER_IGNORED", "returns ${field} filter answered rows for none of the ids asked")
+                    }
+                    cursor = OmsGqlOrderPageSource.nextCursor(connection, seenCursors, "returns")
+                    if (cursor == null) break
+                }
+                found.addAll(echoed)
+            } catch (Exception e) {
+                // An error the OMS ANSWERED is the answer to the document every chunk sends, so the rest of
+                // this pass is not sent (as in the identifications pass); a transport failure is per chunk.
+                List<String> skipped = (e instanceof OmsGqlException) ? chunks.drop(i).flatten() as List<String> : chunk
+                unresolved.addAll(skipped)
+                errors.add("OMS GraphQL returns lookup by ${field} failed for ${skipped.size()} id(s): ${e.message ?: e.class.simpleName}".toString())
+                if (e instanceof OmsGqlException) break
+            }
+        }
+        return [found: found, unresolved: unresolved, errors: errors.unique()]
     }
 
     /**
@@ -612,63 +622,6 @@ class OmsReturnsSourceSupport {
         return [found: found, unresolved: unresolved, errors: errors]
     }
 
-
-    /**
-     * One filtered page against the returns endpoint, echo-checked on the SAME field it filtered by.
-     * Returns [found: Set, error: String|null] — a transport or contract failure yields an error and
-     * never a partial classification, because "not found" and "could not ask" must not look alike.
-     */
-    private static Map queryReturnsByField(String endpointUrl, Map<String, String> headers, Map config,
-                                           String paramName, List<String> ids, long fromMillis, long thruMillis) {
-        Set<String> found = new LinkedHashSet<String>()
-        String url = new StringBuilder(endpointUrl)
-                .append(endpointUrl.contains("?") ? "&" : "?")
-                .append(RETURNS_WINDOW_FROM_PARAM).append("=").append(fromMillis)
-                .append("&").append(RETURNS_WINDOW_THRU_PARAM).append("=").append(thruMillis)
-                .append("&").append(paramName).append("=").append(ids.join(","))
-                .append("&pageIndex=0&pageSize=").append(Math.max(ids.size() * 2, 50))
-                .toString()
-        Map response
-        int statusCode = 0
-        int attempts = 0
-        while (true) {
-            attempts++
-            try {
-                response = OmsRestSourceSupport.callOmsEndpoint(url, headers, config)
-            } catch (Exception e) {
-                return [found: found, error: "OMS returns lookup failed: ${e.message}".toString()]
-            }
-            statusCode = normalizeInt(response?.statusCode, 0)
-            // Same transient set as the extract's page retry; a 500 is deterministic and fails at once.
-            if (!RETRYABLE_STATUS_CODES.contains(statusCode) || attempts > LOOKUP_MAX_RETRIES) break
-            lookupSleeper.call(LOOKUP_RETRY_DELAY_MILLIS)
-        }
-        if (statusCode < 200 || statusCode >= 300) {
-            String attemptsNote = attempts > 1 ? " after ${attempts} attempts" : ""
-            return [found: found, error: "OMS returns lookup failed with HTTP ${statusCode}${attemptsNote}.".toString()]
-        }
-        Map body
-        try {
-            body = (Map) JSON_SLURPER.parseText(normalize(response?.body) ?: "{}")
-        } catch (Exception e) {
-            return [found: found, error: "OMS returns lookup returned unparseable JSON: ${e.message}".toString()]
-        }
-        List returned = (body.get("returns") instanceof List) ? (List) body.get("returns") : []
-        // ECHO-CHECK against the field actually filtered on: this endpoint answers a filter it does not
-        // implement with HTTP 200 and an unfiltered corpus (orderExternalId, live-proven 2026-08-20).
-        Set<String> requested = new HashSet<String>(ids)
-        boolean echoed = false
-        for (Object raw : returned) {
-            if (!(raw instanceof Map)) continue
-            String value = normalize(((Map) raw).get(paramName))
-            if (value && requested.contains(value)) { found.add(value); echoed = true }
-        }
-        if (!returned.isEmpty() && !echoed) {
-            return [found: new LinkedHashSet<String>(),
-                    error: "OMS returns lookup did not honor the ${paramName} filter (no returned record echoed a requested id).".toString()]
-        }
-        return [found: found, error: null]
-    }
 
     /**
      * Keeps items[] nested (RQ-21). A projection naming only top-level fields must never strip

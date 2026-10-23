@@ -36,20 +36,10 @@ class OmsReturnsExtractTests {
         }
     }
 
-    /** Every wait the by-id lookup asks for, in order. Recorded, never slept: a real retry waits a minute. */
-    List<Long> lookupWaits = []
-
-    @BeforeEach
-    void lookupWaitsAreRecorded() {
-        lookupWaits = []
-        OmsReturnsSourceSupport.setLookupSleeper { long ms -> lookupWaits.add(ms) }
-    }
-
     @AfterEach
     void resetClient() {
         OmsReturnsSourceSupport.resetHttpClient()
         OmsReturnsSourceSupport.resetGqlClientFactory()
-        OmsReturnsSourceSupport.resetLookupSleeper()
     }
 
     @Test
@@ -559,177 +549,9 @@ class OmsReturnsExtractTests {
         assertNull(((Map) ((List) result.records).first()).externalId)
     }
 
-    // --- BY-ID LOOKUP: the missing-in-OMS verification mirror of Shopify's refund/return lookup.
-
-    @Test
-    void theLookupBatchesIdsAndEscapesTheRunWindow() {
-        List<String> urls = []
-        OmsReturnsSourceSupport.setHttpClient { Map request ->
-            urls.add(request.url as String)
-            return [statusCode: 200, body: returnsBody([], false)]
-        }
-
-        List ids = (1..45).collect { "id${it}".toString() }
-        Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(baseConfig(), ids)
-
-        assertTrue(result.ok as Boolean)
-        // 3 chunks, and because NOTHING resolved by externalId every chunk also takes its
-        // shopifyReturnId pass — 6 calls, still batched, never one per id.
-        assertEquals(6, urls.size(), "45 ids at chunk 20 must batch, not go one-per-id: ${urls.size()}")
-        assertEquals(3, urls.count { (it as String).contains("externalId=") && !(it as String).contains("shopifyReturnId=") })
-        assertEquals(3, urls.count { (it as String).contains("shopifyReturnId=") })
-        assertTrue(urls.every { (it as String).contains("externalId=") || (it as String).contains("shopifyReturnId=") },
-                "every call must filter on one of the two id fields")
-        // A 10-year floor: OMS windows on entryDate while Shopify windows on the event createdAt, and
-        // the observed gap ran to 22 days. A by-id lookup narrowed by the run window is useless.
-        long from = ((urls.first() as String) =~ /returnDateFrom=(\d+)/)[0][1] as long
-        long thru = ((urls.first() as String) =~ /returnDateThru=(\d+)/)[0][1] as long
-        assertTrue(thru - from > 3000L * 86400000L, "lookup window must not be the run window")
-    }
-
-    @Test
-    void theLookupSplitsFoundFromMissing() {
-        // Field-aware stub: a shopifyReturnId-filtered query answers with THAT field populated, which
-        // is what the endpoint really does and what the per-field echo-check requires.
-        OmsReturnsSourceSupport.setHttpClient { Map request ->
-            String url = request.url as String
-            if (url.contains("shopifyReturnId=")) return [statusCode: 200, body: returnsBody([], false)]
-            return [statusCode: 200, body: returnsBody([[returnId: "M1", externalId: "aaa"]], false)]
-        }
-
-        Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(baseConfig(), ["aaa", "bbb"])
-
-        assertTrue(result.ok as Boolean)
-        assertEquals(["aaa"], result.foundIds)
-        assertEquals(["bbb"], result.missingIds)
-    }
-
-    @Test
-    void theLookupFindsAPendingReturnThatOnlyShopifyReturnIdCanReach() {
-        // Live 2026-08-21: six RETURN_REQUESTED rows resolved 0/6 by externalId and 6/6 by
-        // shopifyReturnId, because OMS leaves externalId NULL until a refund exists. Querying one
-        // field reported all six as confirmed-missing while OMS held every one.
-        List<String> urls = []
-        OmsReturnsSourceSupport.setHttpClient { Map request ->
-            String url = request.url as String
-            urls.add(url)
-            if (url.contains("shopifyReturnId=")) {
-                return [statusCode: 200, body: returnsBody([[returnId: "M208190", shopifyReturnId: "27151073411",
-                        statusId: "RETURN_REQUESTED"]], false)]
-            }
-            return [statusCode: 200, body: returnsBody([], false)]
-        }
-
-        Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(baseConfig(), ["27151073411"])
-
-        assertTrue(result.ok as Boolean)
-        assertEquals(["27151073411"], result.foundIds)
-        assertEquals([], result.missingIds)
-        assertEquals(2, urls.size(), "one externalId pass then one shopifyReturnId pass")
-    }
-
-    @Test
-    void theSecondPassOnlyAsksForIdsTheFirstDidNotResolve() {
-        List<String> urls = []
-        OmsReturnsSourceSupport.setHttpClient { Map request ->
-            String url = request.url as String
-            urls.add(url)
-            if (url.contains("shopifyReturnId=")) return [statusCode: 200, body: returnsBody([], false)]
-            return [statusCode: 200, body: returnsBody([[returnId: "M1", externalId: "aaa"]], false)]
-        }
-
-        OmsReturnsSourceSupport.lookupReturnsByExternalId(baseConfig(), ["aaa", "bbb"])
-
-        String second = urls.find { (it as String).contains("shopifyReturnId=") }
-        assertNotNull(second)
-        assertTrue(second.contains("shopifyReturnId=bbb"), "second pass must carry only the unresolved id: ${second}")
-        assertFalse(second.contains("aaa"), "an id already resolved must not be asked again: ${second}")
-    }
-
-    @Test
-    void theLookupRefusesAResponseThatIgnoredTheFilter() {
-        // orderExternalId was live-proven to be silently ignored while still answering HTTP 200 with
-        // 306,957 unrelated rows. Counting those as "present" would suppress real differences.
-        OmsReturnsSourceSupport.setHttpClient { Map request ->
-            return [statusCode: 200, body: returnsBody([[returnId: "M9", externalId: "something-else"]], false)]
-        }
-
-        Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(baseConfig(), ["aaa"])
-
-        assertFalse(result.ok as Boolean, "an ignored filter must fail the lookup, not classify ids")
-        assertEquals([], result.foundIds)
-        assertEquals([], result.missingIds)
-    }
-
-    @Test
-    void theLookupFailsClosedOnAnErrorStatus() {
-        OmsReturnsSourceSupport.setHttpClient { Map request -> return [statusCode: 500, body: "{}"] }
-
-        Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(baseConfig(), ["aaa"])
-
-        assertFalse(result.ok as Boolean)
-        assertEquals([], result.foundIds)
-        assertEquals([], result.missingIds, "a failed lookup must never classify an id as missing")
-    }
-
-    // --- by-id lookup retry (DAR-BE-070) --------------------------------------------------------
-    // A returns run reported "Verification lookup for HotWax returns failed; 71 missing differences left
-    // as reported. OMS returns lookup failed with HTTP 504." One gateway blip left every candidate
-    // unverified. The lookup now waits a minute and asks again, up to three times.
-
-    @Test
-    void theLookupWaitsAMinuteAndRetriesA504() {
-        int calls = 0
-        OmsReturnsSourceSupport.setHttpClient { Map request ->
-            calls++
-            if (calls == 1) return [statusCode: 504, body: "<html>gateway timeout</html>"]
-            if ((request.url as String).contains("shopifyReturnId=")) return [statusCode: 200, body: returnsBody([], false)]
-            return [statusCode: 200, body: returnsBody([[returnId: "M1", externalId: "aaa"]], false)]
-        }
-
-        Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(baseConfig(), ["aaa"])
-
-        assertTrue(result.ok as Boolean, "a 504 that clears on retry must not fail the lookup: ${result.errors}")
-        assertEquals(["aaa"], result.foundIds)
-        assertEquals([60000L], lookupWaits, "one retry, after a one-minute wait")
-        assertEquals(2, calls)
-    }
-
-    @Test
-    void theLookupGivesUpAfterThreeRetries() {
-        int calls = 0
-        OmsReturnsSourceSupport.setHttpClient { Map request -> calls++; return [statusCode: 504, body: ""] }
-
-        Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(baseConfig(), ["aaa"])
-
-        assertFalse(result.ok as Boolean)
-        assertEquals([], result.missingIds, "a failed lookup must never classify an id as missing")
-        assertEquals(4, calls, "the first request plus three retries")
-        assertEquals([60000L, 60000L, 60000L], lookupWaits)
-        String error = (result.errors as List).join(" ")
-        assertTrue(error.contains("504") && error.contains("4 attempts"), "the error names the status and the attempts: ${error}")
-    }
-
-    @Test
-    void theLookupRetriesEveryTransientStatusButNot500() {
-        [429, 502, 503].each { int status ->
-            lookupWaits.clear()
-            int calls = 0
-            OmsReturnsSourceSupport.setHttpClient { Map request ->
-                calls++
-                return calls == 1 ? [statusCode: status, body: ""] : [statusCode: 200, body: returnsBody([], false)]
-            }
-            assertTrue(OmsReturnsSourceSupport.lookupReturnsByExternalId(baseConfig(), ["aaa"]).ok as Boolean, "status ${status}")
-            assertEquals([60000L], lookupWaits, "status ${status} is retried")
-        }
-
-        lookupWaits.clear()
-        int calls = 0
-        OmsReturnsSourceSupport.setHttpClient { Map request -> calls++; return [statusCode: 500, body: "{}"] }
-        assertFalse(OmsReturnsSourceSupport.lookupReturnsByExternalId(baseConfig(), ["aaa"]).ok as Boolean)
-        assertEquals(1, calls, "a 500 is deterministic, so it is not retried")
-        assertEquals([], lookupWaits)
-    }
+    // --- BY-ID LOOKUP: GraphQL only since DAR-BE-116 (2026-10-23). The REST passes and their 504 retry
+    // are gone; batching, found-vs-missing, ignored filters and failing closed are pinned in
+    // OmsReturnsGqlLookupTests.
 
     // --- transient gateway failure resilience -------------------------------------------------
     // Prod run 100616 (2026-08-26) died on a single 504 from the OMS gateway. Every page fetched

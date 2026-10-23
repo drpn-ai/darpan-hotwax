@@ -88,11 +88,29 @@ class OmsGqlClientTests {
     @Test
     void aPersistentlyThrottledCallIsAHardErrorNeverAnEmptyResult() {
         List captured = []
+        List<Long> slept = []
+        OmsGqlClient c = client([[body: THROTTLED_BODY]], captured)
+        c.sleeper = { long ms -> slept << ms }
         OmsGqlException thrown = assertThrows(OmsGqlException) {
-            client([[body: THROTTLED_BODY]], captured).execute("query { orders { edges { node { orderId } } } }", null, 400)
+            c.execute("query { orders { edges { node { orderId } } } }", null, 400)
         }
         assertEquals("THROTTLED", thrown.code)
-        assertEquals(1 + OmsGqlClient.MAX_THROTTLE_RETRIES, captured.size())
+        // DAR-BE-116: bounded by time waited, not by a count a busy shared bucket can exhaust in seconds.
+        assertTrue(slept.sum() >= OmsGqlClient.MAX_THROTTLE_WAIT_MILLIS, "gave up after ${slept.sum()} ms")
+        assertTrue(slept.every { it <= OmsGqlClient.MAX_THROTTLE_BACKOFF_MILLIS + 1000L }, "${slept}")
+    }
+
+    /** DAR-BE-116 live: a 975-cost page lost to cheaper calls ten times running and failed its extract. */
+    @Test
+    void aCallThrottledManyTimesOnABusyBucketStillGetsThrough() {
+        List captured = []
+        List<Map> answers = (1..15).collect { [body: THROTTLED_BODY] } + [[body: okBody([ok: true])]]
+        OmsGqlClient c = client(answers, captured)
+        // A small reservation, so the governor's own refill wait (THROTTLED_BODY reports 50/s) stays small and
+        // this pins the retry count, not the time budget.
+        Map result = c.execute("query { orders { edges { node { orderId } } } }", null, 50)
+        assertEquals(true, ((Map) result.data).ok)
+        assertEquals(16, captured.size())
     }
 
     @Test

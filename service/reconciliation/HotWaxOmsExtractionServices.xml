@@ -504,6 +504,42 @@
         </out-parameters>
     </service>
 
+    <service verb="extract" noun="HotWaxOmsGqlOrderItems" type="script" transaction="ignore" allow-remote="false" authenticate="true"
+            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsGqlOrderItems.groovy">
+        <description>DAR-BE-116. extract#HotWaxOmsOrderItems over GraphQL (every OMS read goes through GraphQL): the same
+            ONE RECORD PER UNIT, the same flattener, the same two deliberate differences from the Shopify-side line units
+            (exchange exclusion OFF, items without a Shopify id KEPT). Orders are read with their NetSuite identification
+            and ship groups, the items by orderId in batches, each placed under its ship group; a multi-day window runs as
+            parallel day slices on the endpoint's one cost bucket. A distinct service name because the connector registry
+            resolves a connector row by its extract service name; this one is gated on the OMS_ORDER_ITEMS_GQL endpoint.
+
+            NOT carried: salesChannelEnumId, which gorjana's GraphQL Order type does not have (SDL 2026-10-23). A source
+            filter on it is refused rather than ignored, so a run that concludes on the sales channel stays on
+            extract#HotWaxOmsOrderItems.</description>
+        <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrderLineUnits"/>
+        <in-parameters>
+            <parameter name="omsRestSourceConfigId">
+                <description>Tenant-owned HotWaxOmsRestSourceConfig identifier; the same credential and baseUrl answer
+                    /rest/s1/graphql.</description>
+            </parameter>
+            <parameter name="windowFieldName">
+                <description>Only orderDate (or empty): the GraphQL order extract windows on orderDate and refuses any
+                    other field rather than widening the extract.</description>
+            </parameter>
+            <parameter name="sourceFilters">
+                <description>Optional include/exclude rules evaluated per UNIT, as on extract#HotWaxOmsOrderItems. A rule
+                    on a field the GraphQL unit does not carry (salesChannelEnumId) fails the extract.</description>
+            </parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="requestMetadata">
+                <description>As extract#HotWaxOmsOrderItems: keptNullShopifyIdCount, droppedNullLineIdCount and
+                    nonUnitQuantityCount beside the usual filter counts, plus the GraphQL pagination (sliceCount,
+                    pageCount, lookupCalls).</description>
+            </parameter>
+        </out-parameters>
+    </service>
+
     <service verb="lookup" noun="HotWaxOmsOrdersByExternalId" type="script" transaction="ignore"
             allow-remote="false" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/lookup/lookupOmsOrdersByExternalId.groovy">

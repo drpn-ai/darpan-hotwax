@@ -19,10 +19,13 @@ class OmsGqlQueriesTests {
             ["orderId", "orderName", "externalId", "grandTotal", "orderDate", "statusId", "hasPaymentPreference"] as Set
 
     @Test
-    void theBasePresenceShapeFitsTheBudgetAtFiftyOrders() {
+    void theBasePresenceShapeFillsThePageUnderTheOneQueryCap() {
+        // DAR-BE-116, live gorjana 2026-10-23: the BUCKET is 20000 at 2000/s, but one query is still capped
+        // at 1000 (60 returns -> 1260 COST_EXCEEDED). So the page is sized to the query cap, and the speed
+        // comes from parallel slices spending the bigger bucket.
         Map plan = OmsGqlQueries.orderGrainPagePlan(PRESENCE_KEEP)
-        assertEquals(50, plan.pageSize)
-        assertTrue((plan.reservation as int) <= 1000)
+        assertTrue((plan.pageSize as int) >= 50, "${plan.pageSize}")
+        assertTrue(OmsGqlQueries.estimatedPageCost((int) plan.pageSize, OmsGqlQueries.PAYMENT_PREF_SLOTS, 0, []) <= 1000)
     }
 
     @Test
@@ -70,7 +73,7 @@ class OmsGqlQueriesTests {
     void noProjectionMeansTheDefaultShapeNotEveryNestedList() {
         assertNull(OmsGqlQueries.requiredFields(null, []))
         Map plan = OmsGqlQueries.orderGrainPagePlan(null)
-        assertEquals(50, plan.pageSize)
+        assertEquals(OmsGqlQueries.orderGrainPagePlan(PRESENCE_KEEP).pageSize, plan.pageSize)
         assertFalse((plan.document as String).contains("identifications"))
     }
 
