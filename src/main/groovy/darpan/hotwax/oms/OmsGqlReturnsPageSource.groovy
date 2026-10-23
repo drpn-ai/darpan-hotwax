@@ -216,13 +216,18 @@ class OmsGqlReturnsPageSource {
         }
         List<String> productIds = items.collect { it.productId as String }.findAll { it }.unique()
         Map<String, String> productNames = [:]
+        Map<String, String> productNetsuiteIds = [:]
         if (productIds) {
             fetchByIds(client, OmsGqlQueries.productNamesDocument(), "products", "productId", productIds,
                     OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_RESERVATION, pagination)
                     .each { Map n -> productNames[n.productId as String] = n.internalName as String }
+            fetchByIds(client, OmsGqlQueries.productNetsuiteIdsDocument(), "goodIdentifications", OmsGqlQueries.NETSUITE_PRODUCT_ID_KEY,
+                    productIds, OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_RESERVATION, pagination)
+                    .findAll { !it.thruDate }.each { Map n -> productNetsuiteIds[n.productId as String] = n.idValue as String }
         }
         Map lookups = [orderExternalIds: orderExternalIds, orderProductStoreIds: orderProductStoreIds, orderNetsuiteIds: orderNetsuiteIds,
-                       orderItemExternalIds: orderItemExternalIds, productNames: productNames]
+                       orderItemExternalIds: orderItemExternalIds, productNames: productNames,
+                       productNetsuiteIds: productNetsuiteIds]
         return kept.collect { Map n -> OmsGqlReturnAssembler.build(n, itemsByReturn[n.returnId as String] ?: [], lookups) }
     }
 

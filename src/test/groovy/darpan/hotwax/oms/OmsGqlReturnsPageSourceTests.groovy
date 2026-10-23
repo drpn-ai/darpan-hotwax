@@ -57,7 +57,8 @@ class OmsGqlReturnsPageSourceTests {
                                                identifications: [[orderIdentificationTypeId: "SHOPIFY_ORD_ID", idValue: "7186636636291"],
                                                                  [orderIdentificationTypeId: "NETSUITE_ORDER_ID", idValue: "81049165"]]]]) },
                 orderItems : { Map v -> conn([[orderId: "GR1", orderItemSeqId: "00101", externalId: "16501091238019"]]) },
-                products   : { Map v -> conn([[productId: "P1", internalName: "219-001-G"]]) }]
+                products   : { Map v -> conn([[productId: "P1", internalName: "219-001-G"]]) },
+                goodIdentifications: { Map v -> conn([[productId: "P1", goodIdentificationTypeId: "NETSUITE_PRODUCT_ID", idValue: "30345", thruDate: null]]) }]
     }
 
     @Test
@@ -82,8 +83,22 @@ class OmsGqlReturnsPageSourceTests {
         assertEquals("81049165", r.orderNetsuiteId, "and whether it reached NetSuite (its NETSUITE_ORDER_ID)")
         assertEquals("16501091238019", ((r.items as List)[0] as Map).orderItemExternalId)
         assertEquals("219-001-G", ((r.items as List)[0] as Map).sku)
+        assertEquals("30345", ((r.items as List)[0] as Map).productNetsuiteId, "whether the item's product can reach NetSuite at all")
+        assertEquals("goodIdentificationTypeId:NETSUITE_PRODUCT_ID productId:P1",
+                requests.find { it.root == "goodIdentifications" }.variables.q, "only the NetSuite id type is read")
         assertEquals([returnsCount: 3, excludedNoShopifyRefCount: 1, excludedCancelledCount: 1], result.serverCounts)
         assertEquals("c1", requests.findAll { it.root == "returns" }[1].variables.after, "second page must follow the cursor")
+    }
+
+    /** DAR-BE-116 R8 (F-104602): a product with no NETSUITE_PRODUCT_ID, or only an expired one, leaves the item without the field. */
+    @Test
+    void anItemWhoseProductHasNoLiveNetsuiteIdCarriesNone() {
+        Map<String, Closure> h = lookupsAnswering() + [returns: { Map v -> conn([ret("M0001")]) },
+                goodIdentifications: { Map v -> conn([[productId: "P1", goodIdentificationTypeId: "NETSUITE_PRODUCT_ID", idValue: "1", thruDate: "2025-01-01T00:00:00Z"]]) }]
+        List<List<Map>> pages = []
+        run(client(h), pages)
+        Map item = (((pages.flatten() as List<Map>)[0].items as List)[0] as Map)
+        assertFalse(item.containsKey("productNetsuiteId"), "absent, so the REST-parity item shape is unchanged")
     }
 
     /** DAR-BE-116: lookups run once per buffer of kept returns, not once per returns page. */

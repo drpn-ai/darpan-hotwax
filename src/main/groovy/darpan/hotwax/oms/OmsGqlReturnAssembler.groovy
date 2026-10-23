@@ -69,6 +69,7 @@ class OmsGqlReturnAssembler {
         Map orderNetsuiteIds = (Map) (lookups?.orderNetsuiteIds ?: [:])
         Map orderItemExternalIds = (Map) (lookups?.orderItemExternalIds ?: [:])
         Map productNames = (Map) (lookups?.productNames ?: [:])
+        Map productNetsuiteIds = (Map) (lookups?.productNetsuiteIds ?: [:])
         List<Map> sorted = (items ?: []).findAll { it != null }.sort(false) { normalize(it.returnItemSeqId) ?: "" }
 
         BigDecimal total = BigDecimal.ZERO
@@ -87,6 +88,9 @@ class OmsGqlReturnAssembler {
             out.returnReasonId = i.returnReasonId
             out.returnTypeId = i.returnTypeId
             out.returnItemStatusId = i.statusId
+            // DAR-BE-116 R8 (F-104602): set only when the product has one, so the REST-parity item shape is unchanged.
+            String productNetsuiteId = productNetsuiteIds.get(i.productId as String)
+            if (productNetsuiteId) out.productNetsuiteId = productNetsuiteId
             return out
         }
 

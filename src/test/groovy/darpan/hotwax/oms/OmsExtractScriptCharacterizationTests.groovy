@@ -495,6 +495,7 @@ class OmsExtractScriptCharacterizationTests {
                 orders     : { Map v -> conn([[orderId: "GR1", externalId: "7186636636291", productStoreId: "STORE"]]) },
                 orderItems : { Map v -> conn([[orderId: "GR1", orderItemSeqId: "00101", externalId: "16501091238019"]]) },
                 products   : { Map v -> conn([[productId: "P1", internalName: "219-001-G"]]) },
+                goodIdentifications: { Map v -> conn([]) },
         ])
 
         Map result = extract("HotWaxOmsGqlReturns", baseParams(out))

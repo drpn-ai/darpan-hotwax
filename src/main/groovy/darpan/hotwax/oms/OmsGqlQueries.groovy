@@ -301,6 +301,21 @@ class OmsGqlQueries {
 }'''
     }
 
+    /**
+     * DAR-BE-116 R8: a product's NETSUITE_PRODUCT_ID. The type filter rides in front of the id key, so inVariables builds
+     * `goodIdentificationTypeId:NETSUITE_PRODUCT_ID productId:a,b`; the server applies both (probed 2026-10-23, cost 170).
+     */
+    static final String NETSUITE_PRODUCT_ID_KEY = "goodIdentificationTypeId:NETSUITE_PRODUCT_ID productId"
+
+    static String productNetsuiteIdsDocument() {
+        return '''query OmsProductNetsuiteIds($q: String, $first: Int, $after: String) {
+  goodIdentifications(query: $q, first: $first, after: $after) {
+    edges { node { productId idValue thruDate } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
     /** `key:a,b,c` — the comma `in` every flat lookup above relies on. */
     static Map inVariables(String key, List<String> ids, int first, String after) {
         Map vars = [q: "${key}:${ids.join(',')}".toString(), first: first]
