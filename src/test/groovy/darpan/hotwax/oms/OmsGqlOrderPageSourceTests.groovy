@@ -177,7 +177,7 @@ class OmsGqlOrderPageSourceTests {
             assertTrue(doc.contains("shipGroups(first: 2)"))
             assertFalse(doc.contains("identifications"))
             assertFalse(doc.contains("paymentPreferences"))
-            assertFalse(doc.contains("grandTotal"))
+            assertTrue(doc.contains("grandTotal"), "DAR-BE-118: 0 names a partial payment, which never reaches NetSuite")
             assertEquals("orderId:M1", ((Map) client.calls[1].variables).q)
         } finally { out.delete() }
     }

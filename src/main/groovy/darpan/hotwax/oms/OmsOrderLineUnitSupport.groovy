@@ -44,6 +44,9 @@ class OmsOrderLineUnitSupport {
         String omsOrderId = normalize(order.get("orderId"))
         String omsOrderName = normalize(order.get("orderName"))
         String omsOrderStatusId = normalize(order.get("statusId"))
+        // DAR-BE-118: an order whose payment was taken back never reaches NetSuite; its total is then 0.
+        BigDecimal orderGrandTotal = normalize(order.get("grandTotal")) ?
+                new BigDecimal(new BigDecimal(normalize(order.get("grandTotal"))).stripTrailingZeros().toPlainString()) : null
         // DAR-UI-044: conclusion rules read the unit row alone, and the channel decides "POS order".
         String salesChannelEnumId = normalize(order.get("salesChannelEnumId"))
         String netsuiteOrderId = netsuiteOrderIdOf(order)
@@ -122,6 +125,7 @@ class OmsOrderLineUnitSupport {
                             stateOrdinal    : stateOrdinal,
                             netsuiteOrderId : netsuiteOrderId,
                             omsOrderStatusId: omsOrderStatusId,
+                            orderGrandTotal : orderGrandTotal,
                             facilityId      : facilityByItem.get(item),
                             salesChannelEnumId: salesChannelEnumId,
                     ])

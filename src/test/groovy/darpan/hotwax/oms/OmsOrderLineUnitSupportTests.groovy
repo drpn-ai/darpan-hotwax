@@ -37,6 +37,18 @@ class OmsOrderLineUnitSupportTests {
         assertEquals("ITEM_COMPLETED", unit.statusId)
     }
 
+    /**
+     * DAR-BE-118 (Aditi on R1 F-100767 and R8 F-100864, 2026-10-23: "partial payment"): HotWax does not send an order whose
+     * payment was taken back to NetSuite; on gorjana its total is then 0 (M1167217, M1169066). Each unit carries it.
+     */
+    @Test
+    void aUnitCarriesItsOrdersTotal() {
+        Map unit = (Map) ((List) OmsOrderLineUnitSupport.flattenOrderToUnits(
+                orderWith([item("01", "15210699161731")]) + [grandTotal: "0.00"]).units)[0]
+        assertEquals("0", unit.orderGrandTotal.toString())
+        assertEquals(null, ((Map) ((List) OmsOrderLineUnitSupport.flattenOrderToUnits(orderWith([item("01", "1")])).units)[0]).orderGrandTotal)
+    }
+
     @Test
     void threeItemsSharingOneShopifyLineBecomeOrdinalsOneToThree() {
         // 5.33% of real (order, line) keys carry 2+ units; the longest measured carries 40.

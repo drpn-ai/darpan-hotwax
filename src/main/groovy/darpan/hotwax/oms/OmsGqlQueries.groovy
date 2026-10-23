@@ -235,7 +235,7 @@ class OmsGqlQueries {
     static String orderExternalIdsDocument() {
         return '''query OmsOrderExternalIds($q: String, $first: Int, $after: String) {
   orders(query: $q, first: $first, after: $after) {
-    edges { node { orderId externalId productStoreId identifications(first: 3) { orderIdentificationTypeId idValue } } }
+    edges { node { orderId externalId productStoreId grandTotal identifications(first: 3) { orderIdentificationTypeId idValue } } }
     pageInfo { hasNextPage endCursor }
   }
 }'''
@@ -262,7 +262,7 @@ class OmsGqlQueries {
         return '''query OmsUnitOrders($q: String, $first: Int, $after: String) {
   orders(query: $q, sortKey: ORDER_DATE, reverse: false, first: $first, after: $after) {
     edges { node {
-      orderId orderName externalId statusId orderTypeId orderDate
+      orderId orderName externalId statusId orderTypeId orderDate grandTotal
       shipGroups(first: 2) { edges { node { shipGroupSeqId facilityId } } }
     } }
     pageInfo { hasNextPage endCursor }

@@ -200,6 +200,7 @@ class OmsGqlReturnsPageSource {
         Map<String, String> orderExternalIds = [:]
         Map<String, String> orderProductStoreIds = [:]
         Map<String, String> orderNetsuiteIds = [:]
+        Map<String, Object> orderGrandTotals = [:]
         Map<String, String> orderItemExternalIds = [:]
         if (orderIds) {
             fetchByIds(client, OmsGqlQueries.orderExternalIdsDocument(), "orders", "orderId", orderIds,
@@ -207,6 +208,7 @@ class OmsGqlReturnsPageSource {
                     .each { Map n ->
                         orderExternalIds[n.orderId as String] = n.externalId as String
                         orderProductStoreIds[n.orderId as String] = n.productStoreId as String
+                        orderGrandTotals[n.orderId as String] = n.grandTotal
                         orderNetsuiteIds[n.orderId as String] = ((n.identifications ?: []) as List<Map>)
                                 .find { it?.orderIdentificationTypeId == "NETSUITE_ORDER_ID" }?.idValue as String
                     }
@@ -226,6 +228,7 @@ class OmsGqlReturnsPageSource {
                     .findAll { !it.thruDate }.each { Map n -> productNetsuiteIds[n.productId as String] = n.idValue as String }
         }
         Map lookups = [orderExternalIds: orderExternalIds, orderProductStoreIds: orderProductStoreIds, orderNetsuiteIds: orderNetsuiteIds,
+                       orderGrandTotals: orderGrandTotals,
                        orderItemExternalIds: orderItemExternalIds, productNames: productNames,
                        productNetsuiteIds: productNetsuiteIds]
         return kept.collect { Map n -> OmsGqlReturnAssembler.build(n, itemsByReturn[n.returnId as String] ?: [], lookups) }

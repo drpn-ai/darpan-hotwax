@@ -77,6 +77,7 @@ class OmsGqlReturnAssembler {
         Map orderExternalIds = (Map) (lookups?.orderExternalIds ?: [:])
         Map orderProductStoreIds = (Map) (lookups?.orderProductStoreIds ?: [:])
         Map orderNetsuiteIds = (Map) (lookups?.orderNetsuiteIds ?: [:])
+        Map orderGrandTotals = (Map) (lookups?.orderGrandTotals ?: [:])
         Map orderItemExternalIds = (Map) (lookups?.orderItemExternalIds ?: [:])
         Map productNames = (Map) (lookups?.productNames ?: [:])
         Map productNetsuiteIds = (Map) (lookups?.productNetsuiteIds ?: [:])
@@ -117,6 +118,8 @@ class OmsGqlReturnAssembler {
         // DAR-BE-116 R8: the origin order's NETSUITE_ORDER_ID, i.e. whether that order reached NetSuite at all; a return
         // whose order never did cannot either. Filterable only, like orderProductStoreId.
         if (sorted) record.orderNetsuiteId = orderNetsuiteIds.get(sorted.first().orderId as String)
+        // DAR-BE-118: and its total, 0 when its payment was taken back (gorjana "partial payment"), which is why it never did.
+        if (sorted) record.orderGrandTotal = number(orderGrandTotals.get(sorted.first().orderId as String))
         record.statusId = node.statusId
         String entry = normalize(node.entryDate)
         record.entryDate = entry ? Instant.parse(entry).toEpochMilli() : null
