@@ -65,7 +65,7 @@ class OmsGqlReturnsConnectorWiringTests {
     }
 
     /** Pills only the GraphQL record can carry (DAR-BE-068): REST's record has no orderId to reach the order by. */
-    private static final Set<String> GQL_ONLY_FIELDS = ["\$.records[*].orderProductStoreId", "\$.records[*].fromPartyId"] as Set
+    private static final Set<String> GQL_ONLY_FIELDS = ["\$.records[*].orderProductStoreId", "\$.records[*].orderNetsuiteId", "\$.records[*].fromPartyId"] as Set
 
     @Test
     void itExposesTheSameFieldsAsTheRestRow() {

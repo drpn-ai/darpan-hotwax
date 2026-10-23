@@ -53,6 +53,14 @@ class OmsGqlClient {
     /** True when this client talks to the configured OMS (no injected sender): only then may reads be shared. */
     final boolean realEndpoint
 
+    /**
+     * Whose read this is: the tenant and the OMS source config (its credential). Part of every shared-read key, so two
+     * tenants or two configs on one OMS URL never share a read.
+     */
+    String getReadScope() {
+        return "${config.companyUserGroupId ?: ''}|${config.omsRestSourceConfigId ?: ''}|${getUrl()}".toString()
+    }
+
     /** Calls made so far. Parallel slices share a client, so this is counted atomically. */
     int getCallCount() { return calls.get() }
 

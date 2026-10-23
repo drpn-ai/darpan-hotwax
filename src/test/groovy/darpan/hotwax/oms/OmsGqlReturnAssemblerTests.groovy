@@ -29,7 +29,7 @@ class OmsGqlReturnAssemblerTests {
 
     private static Map lookups() {
         return [orderExternalIds: [GR1: "7186636636291"], orderItemExternalIds: ["GR1|00101": "16501091238019"],
-                productNames: ["10203": "219-001-G"], orderProductStoreIds: [GR1: "STORE"]]
+                productNames: ["10203": "219-001-G"], orderProductStoreIds: [GR1: "STORE"], orderNetsuiteIds: [GR1: "NS9"]]
     }
 
     @Test
@@ -46,8 +46,8 @@ class OmsGqlReturnAssemblerTests {
 
         // orderProductStoreId (DAR-BE-068) is the one GraphQL-only key: filterable, never in keepFieldsBase, so
         // projection strips it and the compared record stays identical to REST's.
-        assertEquals(expected.keySet().toList(), built.keySet().toList() - ["orderProductStoreId", "fromPartyId"], "same keys, same order as REST")
-        assertEquals(expected.toString(), normalized(built.findAll { !(it.key in ["orderProductStoreId", "fromPartyId"]) }).toString())
+        assertEquals(expected.keySet().toList(), built.keySet().toList() - ["orderProductStoreId", "orderNetsuiteId", "fromPartyId"], "same keys, same order as REST")
+        assertEquals(expected.toString(), normalized(built.findAll { !(it.key in ["orderProductStoreId", "orderNetsuiteId", "fromPartyId"]) }).toString())
     }
 
     @Test
@@ -85,6 +85,14 @@ class OmsGqlReturnAssemblerTests {
         // store a return belongs to is its ORIGIN ORDER's — the same order orderExternalId names.
         Map built = OmsGqlReturnAssembler.build(node(), [item()], lookups())
         assertEquals("STORE", built.orderProductStoreId)
+    }
+
+    /** DAR-BE-116 R8, Aditi 2026-10-23: "the source order is not in NS... that is why this also is not in NS". */
+    @Test
+    void aReturnCarriesWhetherItsOriginOrderReachedNetSuite() {
+        assertEquals("NS9", OmsGqlReturnAssembler.build(node(), [item()], lookups()).orderNetsuiteId)
+        assertNull(OmsGqlReturnAssembler.build(node(), [item()], lookups() + [orderNetsuiteIds: [:]]).orderNetsuiteId,
+                "an order HotWax holds no NetSuite id for")
     }
 
     /** DAR-BE-094 R8, Aditi 2026-10-23: "exclude returns with fromPartyId: DISCONTINUED". Filterable like the store. */

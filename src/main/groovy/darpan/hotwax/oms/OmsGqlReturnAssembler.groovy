@@ -66,6 +66,7 @@ class OmsGqlReturnAssembler {
     static Map<String, Object> build(Map node, List<Map> items, Map lookups) {
         Map orderExternalIds = (Map) (lookups?.orderExternalIds ?: [:])
         Map orderProductStoreIds = (Map) (lookups?.orderProductStoreIds ?: [:])
+        Map orderNetsuiteIds = (Map) (lookups?.orderNetsuiteIds ?: [:])
         Map orderItemExternalIds = (Map) (lookups?.orderItemExternalIds ?: [:])
         Map productNames = (Map) (lookups?.productNames ?: [:])
         List<Map> sorted = (items ?: []).findAll { it != null }.sort(false) { normalize(it.returnItemSeqId) ?: "" }
@@ -99,6 +100,9 @@ class OmsGqlReturnAssembler {
         // its origin order's (the order orderExternalId names). Filterable only: not in keepFieldsBase, so
         // projection strips it before the compare and the compared record stays identical to REST's.
         if (sorted) record.orderProductStoreId = orderProductStoreIds.get(sorted.first().orderId as String)
+        // DAR-BE-116 R8: the origin order's NETSUITE_ORDER_ID, i.e. whether that order reached NetSuite at all; a return
+        // whose order never did cannot either. Filterable only, like orderProductStoreId.
+        if (sorted) record.orderNetsuiteId = orderNetsuiteIds.get(sorted.first().orderId as String)
         record.statusId = node.statusId
         String entry = normalize(node.entryDate)
         record.entryDate = entry ? Instant.parse(entry).toEpochMilli() : null

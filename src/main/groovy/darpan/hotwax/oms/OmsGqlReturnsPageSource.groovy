@@ -80,7 +80,7 @@ class OmsGqlReturnsPageSource {
         Map pagination = (Map) shared.pagination
         Map serverCounts = (Map) shared.serverCounts
         boolean keepNoShopifyRef = shared.keepNoShopifyRef == true
-        String key = "returns|${client.url}|${slices.first()[0]}|${slices.last()[1]}".toString()
+        String key = "returns|${client.readScope}|${slices.first()[0]}|${slices.last()[1]}".toString()
         Map read = OmsGqlSharedRead.read(key) { Closure emit ->
             Map readPagination = new LinkedHashMap(pagination)
             Map producerShared = new LinkedHashMap(shared) + [pagination: readPagination, keepNoShopifyRef: true, onlyCancelled: false,
@@ -199,6 +199,7 @@ class OmsGqlReturnsPageSource {
         List<String> orderIds = items.collect { it.orderId as String }.findAll { it }.unique()
         Map<String, String> orderExternalIds = [:]
         Map<String, String> orderProductStoreIds = [:]
+        Map<String, String> orderNetsuiteIds = [:]
         Map<String, String> orderItemExternalIds = [:]
         if (orderIds) {
             fetchByIds(client, OmsGqlQueries.orderExternalIdsDocument(), "orders", "orderId", orderIds,
@@ -206,6 +207,8 @@ class OmsGqlReturnsPageSource {
                     .each { Map n ->
                         orderExternalIds[n.orderId as String] = n.externalId as String
                         orderProductStoreIds[n.orderId as String] = n.productStoreId as String
+                        orderNetsuiteIds[n.orderId as String] = ((n.identifications ?: []) as List<Map>)
+                                .find { it?.orderIdentificationTypeId == "NETSUITE_ORDER_ID" }?.idValue as String
                     }
             fetchByIds(client, OmsGqlQueries.orderItemExternalIdsDocument(), "orderItems", "orderId", orderIds,
                     OmsGqlQueries.ORDER_ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.ORDER_ITEMS_RESERVATION, pagination)
@@ -218,7 +221,7 @@ class OmsGqlReturnsPageSource {
                     OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_RESERVATION, pagination)
                     .each { Map n -> productNames[n.productId as String] = n.internalName as String }
         }
-        Map lookups = [orderExternalIds: orderExternalIds, orderProductStoreIds: orderProductStoreIds,
+        Map lookups = [orderExternalIds: orderExternalIds, orderProductStoreIds: orderProductStoreIds, orderNetsuiteIds: orderNetsuiteIds,
                        orderItemExternalIds: orderItemExternalIds, productNames: productNames]
         return kept.collect { Map n -> OmsGqlReturnAssembler.build(n, itemsByReturn[n.returnId as String] ?: [], lookups) }
     }

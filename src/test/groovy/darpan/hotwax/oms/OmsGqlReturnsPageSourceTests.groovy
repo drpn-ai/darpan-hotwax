@@ -53,7 +53,9 @@ class OmsGqlReturnsPageSourceTests {
         return [returnItems: { Map v -> conn([[returnId: "M0001", returnItemSeqId: "01", orderId: "GR1", orderItemSeqId: "00101",
                                                productId: "P1", returnQuantity: 1, receivedQuantity: 0, returnPrice: 65,
                                                returnReasonId: "UNKNOWN", statusId: "RETURN_REQUESTED", returnTypeId: "RTN_REFUND"]]) },
-                orders     : { Map v -> conn([[orderId: "GR1", externalId: "7186636636291", productStoreId: "STORE"]]) },
+                orders     : { Map v -> conn([[orderId: "GR1", externalId: "7186636636291", productStoreId: "STORE",
+                                               identifications: [[orderIdentificationTypeId: "SHOPIFY_ORD_ID", idValue: "7186636636291"],
+                                                                 [orderIdentificationTypeId: "NETSUITE_ORDER_ID", idValue: "81049165"]]]]) },
                 orderItems : { Map v -> conn([[orderId: "GR1", orderItemSeqId: "00101", externalId: "16501091238019"]]) },
                 products   : { Map v -> conn([[productId: "P1", internalName: "219-001-G"]]) }]
     }
@@ -77,6 +79,7 @@ class OmsGqlReturnsPageSourceTests {
         assertEquals("37447000001", r.shopifyReturnId)
         assertEquals("7186636636291", r.orderExternalId)
         assertEquals("STORE", r.orderProductStoreId, "the origin order's store rides on the orders lookup already made")
+        assertEquals("81049165", r.orderNetsuiteId, "and whether it reached NetSuite (its NETSUITE_ORDER_ID)")
         assertEquals("16501091238019", ((r.items as List)[0] as Map).orderItemExternalId)
         assertEquals("219-001-G", ((r.items as List)[0] as Map).sku)
         assertEquals([returnsCount: 3, excludedNoShopifyRefCount: 1, excludedCancelledCount: 1], result.serverCounts)

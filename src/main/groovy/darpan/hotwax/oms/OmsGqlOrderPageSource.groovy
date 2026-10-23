@@ -120,7 +120,7 @@ class OmsGqlOrderPageSource {
     private static void readUnitsShared(OmsGqlClient client, Map shared, List<List<Long>> slices, Map config) {
         Map pagination = (Map) shared.pagination
         Map ctx = (Map) shared.ctx
-        String key = "units|${client.url}|${slices.first()[0]}|${slices.last()[1]}|exchange=${shared.exchangePass}".toString()
+        String key = "units|${client.readScope}|${slices.first()[0]}|${slices.last()[1]}|exchange=${shared.exchangePass}".toString()
         Map read = OmsGqlSharedRead.read(key) { Closure emit ->
             Map readPagination = new LinkedHashMap(pagination)
             Map producerShared = new LinkedHashMap(shared) + [pagination: readPagination,
