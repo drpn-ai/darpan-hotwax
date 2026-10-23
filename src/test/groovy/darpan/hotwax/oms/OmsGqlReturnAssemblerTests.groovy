@@ -3,6 +3,7 @@ package darpan.hotwax.oms
 import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
+import static org.junit.jupiter.api.Assertions.assertNotNull
 import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertNull
 import static org.junit.jupiter.api.Assertions.assertTrue
@@ -45,8 +46,8 @@ class OmsGqlReturnAssemblerTests {
 
         // orderProductStoreId (DAR-BE-068) is the one GraphQL-only key: filterable, never in keepFieldsBase, so
         // projection strips it and the compared record stays identical to REST's.
-        assertEquals(expected.keySet().toList(), built.keySet().toList() - "orderProductStoreId", "same keys, same order as REST")
-        assertEquals(expected.toString(), normalized(built.findAll { it.key != "orderProductStoreId" }).toString())
+        assertEquals(expected.keySet().toList(), built.keySet().toList() - ["orderProductStoreId", "fromPartyId"], "same keys, same order as REST")
+        assertEquals(expected.toString(), normalized(built.findAll { !(it.key in ["orderProductStoreId", "fromPartyId"]) }).toString())
     }
 
     @Test
@@ -84,6 +85,21 @@ class OmsGqlReturnAssemblerTests {
         // store a return belongs to is its ORIGIN ORDER's — the same order orderExternalId names.
         Map built = OmsGqlReturnAssembler.build(node(), [item()], lookups())
         assertEquals("STORE", built.orderProductStoreId)
+    }
+
+    /** DAR-BE-094 R8, Aditi 2026-10-23: "exclude returns with fromPartyId: DISCONTINUED". Filterable like the store. */
+    @Test
+    void aReturnCarriesWhoItIsFromSoAnExclusionCanDropIt() {
+        assertTrue(OmsGqlQueries.returnsDocument().contains("fromPartyId"), "the returns query asks for it")
+        Map discontinued = OmsGqlReturnAssembler.build(node(fromPartyId: "DISCONTINUED"), [item()], lookups())
+        Map customer = OmsGqlReturnAssembler.build(node(fromPartyId: "10456"), [item()], lookups())
+        assertEquals("DISCONTINUED", discontinued.fromPartyId)
+        List rules = darpan.reconciliation.source.SourceFilterSupport.parseRules([[sequenceNum: 1, fieldExpression: "fromPartyId",
+                operator: "EXCLUDE_IN", filterValues: "DISCONTINUED"]])
+        assertNotNull(darpan.reconciliation.source.SourceFilterSupport.evaluate(discontinued, rules), "DISCONTINUED is excluded")
+        assertNull(darpan.reconciliation.source.SourceFilterSupport.evaluate(customer, rules), "a customer's return is kept")
+        assertNull(darpan.reconciliation.source.SourceFilterSupport.evaluate(OmsGqlReturnAssembler.build(node(), [item()], lookups()), rules),
+                "no party: kept")
     }
 
     @Test

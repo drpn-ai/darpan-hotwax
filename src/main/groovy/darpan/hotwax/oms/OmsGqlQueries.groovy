@@ -185,7 +185,7 @@ class OmsGqlQueries {
     static String returnsDocument() {
         return '''query OmsReturns($q: String, $first: Int, $after: String) {
   returns(query: $q, sortKey: RETURN_ID, first: $first, after: $after) {
-    edges { node { returnId statusId entryDate externalId currencyUomId returnChannelEnumId
+    edges { node { returnId statusId entryDate externalId currencyUomId returnChannelEnumId fromPartyId
       identifications(first: 4) { returnIdentificationTypeId idValue thruDate } } }
     pageInfo { hasNextPage endCursor }
   }

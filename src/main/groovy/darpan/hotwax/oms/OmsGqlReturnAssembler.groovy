@@ -105,6 +105,9 @@ class OmsGqlReturnAssembler {
         record.returnTotal = number(total)
         record.currencyUomId = node.currencyUomId
         record.returnChannelEnumId = node.returnChannelEnumId
+        // DAR-BE-094 R8: who the return is from (DISCONTINUED on gorjana's discontinued-stock returns). Filterable only,
+        // like orderProductStoreId: not in keepFieldsBase, so the compared record stays REST's.
+        record.fromPartyId = normalize(node.fromPartyId)
         record.items = builtItems
         return record
     }
