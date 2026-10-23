@@ -20,6 +20,8 @@ OmsScriptServiceSupport.runExtract(ec, context, [
                     a.workFile, a.keepRecordFields, a.pageProgressListener, a.sourceFilters,
                     [pageFetcher: OmsGqlReturnsPageSource.fetcher(new OmsGqlClient(OmsRestSourceSupport.toPlainMap(a.sourceConfig)),
                             [includeReturnsWithoutShopifyRef: includeReturnsWithoutShopifyRef == true,
-                             onlyCancelledReturns: onlyCancelledReturns == true])])
+                             onlyCancelledReturns: onlyCancelledReturns == true,
+                             // DAR-BE-119: an audit re-checking older open findings reads their returns by id.
+                             lookupKeys: (lookupKeys instanceof List) ? (List) lookupKeys : null, lookupKeyField: lookupKeyField])])
         },
 ])

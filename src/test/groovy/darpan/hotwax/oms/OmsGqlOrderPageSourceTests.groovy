@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
 import static org.junit.jupiter.api.Assertions.assertFalse
+import static org.junit.jupiter.api.Assertions.assertThrows
 import static org.junit.jupiter.api.Assertions.assertTrue
 
 /** DAR-BE-064 Task 6. Driven end to end through OmsRestSourceSupport.extractOrdersToFile with a scripted client. */
@@ -139,6 +140,26 @@ class OmsGqlOrderPageSourceTests {
     // ---- DAR-BE-116: ORDER_LINE_UNIT grain over GraphQL (the OMS order-items extract, off REST) ----
 
     private static final Map UNIT_OPTIONS = [emitGrain: "ORDER_LINE_UNIT", applyExchangeExclusion: false, requireShopifyLineId: false]
+
+    /**
+     * DAR-BE-119: an older open finding's order is read by key, whatever its date (the audit reads OMS for its recent days
+     * only), through the same cursor loop and flattener; a key that could change the search string is refused.
+     */
+    @Test
+    void unitsAreReadByOrderIdWhenAskedByKey() {
+        ScriptedClient client = new ScriptedClient([
+                ordersPage([unitOrder("M1")], false),
+                itemsPage([item("M1", "00101", "00001", "ITEM_COMPLETED")])])
+        File out = File.createTempFile("gql-", ".json")
+        try {
+            Map result = OmsRestSourceSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, null, null, null, UNIT_OPTIONS,
+                    OmsGqlOrderPageSource.fetcher(client, [lookupKeys: ["M1"]]))
+            assertEquals([], result.errors)
+            assertEquals(["M1"], ((List<Map>) (new JsonSlurper().parse(out) as Map).records)*.omsOrderId)
+            assertEquals("orderId:M1 orderTypeId:SALES_ORDER", ((Map) client.calls[0].variables).q, "by key, not by window")
+        } finally { out.delete() }
+        assertThrows(IllegalArgumentException) { OmsGqlQueries.keysFilter("orderId", ["M1 orderDate:>2020"]) }
+    }
 
     private static Map unitOrder(String id) {
         return order(id) + [identifications: [[orderIdentificationTypeId: "NETSUITE_ORDER_ID", idValue: "NS" + id]],

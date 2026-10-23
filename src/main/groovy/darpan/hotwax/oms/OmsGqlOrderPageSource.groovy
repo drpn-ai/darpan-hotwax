@@ -29,8 +29,9 @@ class OmsGqlOrderPageSource {
     /** Parallel day slices per extract; config gqlConcurrency overrides. */
     static final int DEFAULT_CONCURRENCY = 4
 
-    static Closure fetcher(OmsGqlClient client) {
-        return { Map ctx -> fetchAll(client, ctx) }
+    /** options.lookupKeys (DAR-BE-119): read these orders by orderId instead of the window. */
+    static Closure fetcher(OmsGqlClient client, Map options = [:]) {
+        return { Map ctx -> fetchAll(client, ctx + (options ?: [:])) }
     }
 
     static Map fetchAll(OmsGqlClient client, Map ctx) {
@@ -42,8 +43,12 @@ class OmsGqlOrderPageSource {
         }
 
         // Refuse what this transport cannot honour; silently ignoring any of these widens the extract.
-        if (ctx.fromMillis == null || ctx.thruMillis == null) {
+        List<String> keys = (List<String>) ctx.lookupKeys
+        if (!keys && (ctx.fromMillis == null || ctx.thruMillis == null)) {
             return failed("The OMS GraphQL order extract requires a date window; status-only extracts stay on REST.")
+        }
+        if (keys && !(ctx.lookupKeyField in [null, "orderId", "omsOrderId"])) {
+            return failed("The OMS GraphQL order extract reads by orderId only, not '${ctx.lookupKeyField}'.")
         }
         if (extractOptions.orderStatusIds) {
             return failed("orderStatusIds is not supported by the OMS GraphQL order extract; keep this rule set on REST.")
@@ -83,14 +88,22 @@ class OmsGqlOrderPageSource {
         Map shared = [plan: plan, pageSize: new AtomicInteger((int) plan.pageSize), pages: new AtomicInteger(0),
                       maxPages: maxPageCount((Map) ctx.config), pagination: pagination, pageConsumer: pageConsumer,
                       ctx: ctx, extractOptions: extractOptions, unitGrain: unitGrain, exchangePass: exchangePass]
-        List<List<Long>> slices = daySlices((Long) ctx.fromMillis, (Long) ctx.thruMillis)
-        pagination.sliceCount = slices.size()
         try {
-            if (unitGrain && sharesReads(client, (Map) ctx.config)) {
-                readUnitsShared(client, shared, slices, (Map) ctx.config)
+            if (keys) {
+                keys.collate(OmsGqlQueries.LOOKUP_KEYS_CHUNK).each { List<String> chunk ->
+                    fetchSlice(client, shared, OmsGqlQueries.keysFilter("orderId", chunk))
+                }
             } else {
-                runSlices(slices, concurrencyOf((Map) ctx.config)) { long from, long thru -> fetchSlice(client, shared, from, thru) }
+                List<List<Long>> slices = daySlices((Long) ctx.fromMillis, (Long) ctx.thruMillis)
+                pagination.sliceCount = slices.size()
+                if (unitGrain && sharesReads(client, (Map) ctx.config)) {
+                    readUnitsShared(client, shared, slices, (Map) ctx.config)
+                } else {
+                    runSlices(slices, concurrencyOf((Map) ctx.config)) { long from, long thru -> fetchSlice(client, shared, window(from, thru)) }
+                }
             }
+        } catch (IllegalArgumentException e) {
+            return failed(e.message)
         } catch (OmsGqlException e) {
             // Never an empty extract: THROTTLED in particular arrives as HTTP 200 with no data.
             return failed("OMS GraphQL extract failed [${e.code}]: ${e.message}".toString())
@@ -125,7 +138,7 @@ class OmsGqlOrderPageSource {
             Map readPagination = new LinkedHashMap(pagination)
             Map producerShared = new LinkedHashMap(shared) + [pagination: readPagination,
                     sink: { List<Map> assembled -> assembled.each { emit.call(it) } }]
-            runSlices(slices, concurrencyOf(config)) { long from, long thru -> fetchSlice(client, producerShared, from, thru) }
+            runSlices(slices, concurrencyOf(config)) { long from, long thru -> fetchSlice(client, producerShared, window(from, thru)) }
             readPagination.pageCount = ((AtomicInteger) producerShared.pages).get()
             readPagination.pageSize = ((AtomicInteger) producerShared.pageSize).get()
             return [pagination: readPagination]
@@ -199,13 +212,16 @@ class OmsGqlOrderPageSource {
     }
 
     /** One slice's cursor loop. Pages are buffered until ASSOC_BATCH_ORDER_IDS orders, then one exchange pass. */
-    private static void fetchSlice(OmsGqlClient client, Map shared, long fromMillis, long thruMillis) {
+    private static String window(long fromMillis, long thruMillis) {
+        return OmsGqlQueries.windowFilter(iso(fromMillis), iso(thruMillis))
+    }
+
+    private static void fetchSlice(OmsGqlClient client, Map shared, String filter) {
         Map plan = (Map) shared.plan
         Map pagination = (Map) shared.pagination
         AtomicInteger pageSize = (AtomicInteger) shared.pageSize
         AtomicInteger pages = (AtomicInteger) shared.pages
         int maxPages = (int) shared.maxPages
-        String filter = OmsGqlQueries.windowFilter(iso(fromMillis), iso(thruMillis))
         List<Map> buffered = []
         String cursor = null
         Set<String> seenCursors = [] as Set

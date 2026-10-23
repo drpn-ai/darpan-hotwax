@@ -44,17 +44,30 @@ class OmsGqlReturnsPageSource {
         Closure failed = { String message ->
             [errors: [message], warnings: [], serverCounts: serverCounts, pagination: pagination, transport: "GRAPHQL"]
         }
-        if (ctx.fromMillis == null || ctx.thruMillis == null) {
+        List<String> keys = (List<String>) ctx.lookupKeys
+        if (!keys && (ctx.fromMillis == null || ctx.thruMillis == null)) {
             return failed("The OMS GraphQL returns extract requires a date window.")
+        }
+        if (keys && !(ctx.lookupKeyField in [null, "returnId"])) {
+            return failed("The OMS GraphQL returns extract reads by returnId only, not '${ctx.lookupKeyField}'.")
         }
         Closure consumer = (Closure) ctx.pageConsumer
         Map shared = [pageSize: new AtomicInteger(OmsGqlQueries.RETURNS_PAGE_SIZE), pages: new AtomicInteger(0),
                       maxPages: maxPageCount((Map) ctx.config), pagination: pagination, serverCounts: serverCounts,
                       onlyCancelled: onlyCancelled, keepNoShopifyRef: keepNoShopifyRef,
                       pageConsumer: { List<Map> records -> synchronized (pagination) { consumer.call(records) } }]
-        List<List<Long>> slices = OmsGqlOrderPageSource.daySlices((Long) ctx.fromMillis, (Long) ctx.thruMillis)
-        pagination.sliceCount = slices.size()
         try {
+            if (keys) {
+                // DAR-BE-119: an older open finding's returns, by id, whatever their date.
+                keys.collate(OmsGqlQueries.LOOKUP_KEYS_CHUNK).each { List<String> chunk ->
+                    String filter = OmsGqlQueries.keysFilter("returnId", chunk)
+                    fetchSlice(client, shared, onlyCancelled ? "statusId:RETURN_CANCELLED ${filter}".toString() : filter)
+                }
+                return [errors: [], warnings: [], serverCounts: serverCounts, pagination: pagination + [pageCount: ((AtomicInteger) shared.pages).get()],
+                        transport: "GRAPHQL"]
+            }
+            List<List<Long>> slices = OmsGqlOrderPageSource.daySlices((Long) ctx.fromMillis, (Long) ctx.thruMillis)
+            pagination.sliceCount = slices.size()
             if (!onlyCancelled && OmsGqlOrderPageSource.sharesReads(client, (Map) ctx.config)) {
                 readReturnsShared(client, shared, slices, (Map) ctx.config)
             } else {
@@ -64,6 +77,8 @@ class OmsGqlReturnsPageSource {
                     fetchSlice(client, shared, filter)
                 }
             }
+        } catch (IllegalArgumentException e) {
+            return failed(e.message)
         } catch (OmsGqlException e) {
             return failed("OMS GraphQL returns extract failed [${e.code}]: ${e.message}".toString())
         }

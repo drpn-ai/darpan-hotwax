@@ -252,6 +252,13 @@
         <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsReturns"/>
         <!-- Same parameters as extract#HotWaxOmsReturns; only the descriptions restated below differ. -->
         <in-parameters>
+            <parameter name="lookupKeys" type="List">
+                <description>DAR-BE-119. Read only these records by key (returnId), whatever their date, instead of the
+                    window: an audit re-checking its older open findings. A caller checks this parameter is declared
+                    before sending keys, so a connector without it is never asked for a whole window instead.</description>
+                <parameter name="lookupKey"/>
+            </parameter>
+            <parameter name="lookupKeyField"><description>The record field lookupKeys are values of: returnId.</description></parameter>
             <parameter name="windowStart">
                 <description>Start of the automation window; accepts Timestamp, Date, ISO-8601 text, SQL timestamp text, or epoch milliseconds. Sent as the half-open lower bound on entryDate.</description>
             </parameter>
@@ -518,6 +525,13 @@
             extract#HotWaxOmsOrderItems.</description>
         <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrderLineUnits"/>
         <in-parameters>
+            <parameter name="lookupKeys" type="List">
+                <description>DAR-BE-119. Read only these records by key (omsOrderId (the OMS orderId)), whatever their date, instead of the
+                    window: an audit re-checking its older open findings. A caller checks this parameter is declared
+                    before sending keys, so a connector without it is never asked for a whole window instead.</description>
+                <parameter name="lookupKey"/>
+            </parameter>
+            <parameter name="lookupKeyField"><description>The record field lookupKeys are values of: omsOrderId (the OMS orderId).</description></parameter>
             <parameter name="omsRestSourceConfigId">
                 <description>Tenant-owned HotWaxOmsRestSourceConfig identifier; the same credential and baseUrl answer
                     /rest/s1/graphql.</description>

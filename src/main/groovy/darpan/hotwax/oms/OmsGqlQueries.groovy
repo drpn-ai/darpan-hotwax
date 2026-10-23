@@ -119,6 +119,19 @@ class OmsGqlQueries {
         return "orderDate:>=${fromIso} orderDate:<${thruIso} orderTypeId:SALES_ORDER".toString()
     }
 
+    /** DAR-BE-119: keys per search when records are read by key (an older open finding's order or return). */
+    static final int LOOKUP_KEYS_CHUNK = 100
+
+    /**
+     * DAR-BE-119. The search for records named by key, e.g. `returnId:M1,M2`; orders keep their type. A key travels inside
+     * the search string, so it may hold only id characters: a space or a colon would add a condition of its own.
+     */
+    static String keysFilter(String field, List<String> keys) {
+        keys.each { if (!(it ==~ /[A-Za-z0-9_\-]{1,40}/)) throw new IllegalArgumentException("An OMS key holds letters, digits, _ and - only, got: ${it}") }
+        String filter = "${field}:${keys.join(',')}".toString()
+        return field == "orderId" ? "${filter} orderTypeId:SALES_ORDER".toString() : filter
+    }
+
     static Map pageVariables(String filter, int pageSize, String after) {
         Map vars = [q: filter, first: pageSize]
         if (after) vars.put("after", after)

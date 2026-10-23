@@ -102,6 +102,18 @@ class OmsGqlReturnsPageSourceTests {
         assertFalse(item.containsKey("productNetsuiteId"), "absent, so the REST-parity item shape is unchanged")
     }
 
+    /** DAR-BE-119: an older open finding's return is read by its id, with no window. */
+    @Test
+    void returnsAreReadByIdWhenAskedByKey() {
+        Map<String, Closure> h = lookupsAnswering() + [returns: { Map v -> conn([ret("M0001")]) }]
+        List<List<Map>> pages = []
+        Map result = OmsGqlReturnsPageSource.fetchAll(client(h), [config: CONFIG, lookupKeys: ["M0001"],
+                pageConsumer: { List<Map> records -> pages.add(records) }])
+        assertEquals([], result.errors)
+        assertEquals(["M0001"], (pages.flatten() as List<Map>)*.returnId)
+        assertEquals("returnId:M0001", requests.find { it.root == "returns" }.variables.q)
+    }
+
     /** DAR-BE-116: lookups run once per buffer of kept returns, not once per returns page. */
     @Test
     void oneLookupPassCoversTheBufferedReturnsPages() {

@@ -138,7 +138,8 @@ class OmsExtractScriptCharacterizationTests {
                 "extract#HotWaxOmsReconciliationOrders": [windowedIn, ordersOut],
                 "extract#HotWaxOmsReturns"             : [windowedIn, plainOut],
                 // DAR-BE-094 R8 / R16 added the two returns-scope switches.
-                "extract#HotWaxOmsGqlReturns"          : [windowedIn + ["includeReturnsWithoutShopifyRef", "onlyCancelledReturns"], plainOut],
+                // DAR-BE-119: lookupKeys / lookupKeyField, an audit's re-check of its older open findings by key.
+                "extract#HotWaxOmsGqlReturns"          : [windowedIn + ["lookupKeys", "lookupKeyField", "includeReturnsWithoutShopifyRef", "onlyCancelledReturns"], plainOut],
                 "extract#HotWaxOmsTransferOrders"      : [windowedIn[0..4] + ["windowFieldName", "orderStatusIds"] + windowedIn[5..-1], plainOut],
                 "extract#HotWaxOmsOrderLineUnits"      : [unitIn, plainOut],
                 "extract#HotWaxOmsOrderItems"          : [unitIn, plainOut],
