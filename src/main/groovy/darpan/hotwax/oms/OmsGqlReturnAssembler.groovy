@@ -34,6 +34,16 @@ class OmsGqlReturnAssembler {
         return KEEP
     }
 
+    /** The value of `node`'s identification of `type` that has not ended, else null. */
+    static String activeIdentification(Map node, String type) {
+        long now = System.currentTimeMillis()
+        Map ident = ((node?.identifications instanceof List) ? (List<Map>) node.identifications : []).find { Object raw ->
+            raw instanceof Map && normalize(raw.returnIdentificationTypeId) == type && normalize(raw.idValue) &&
+                    !(normalize(raw.thruDate) && Instant.parse(normalize(raw.thruDate)).toEpochMilli() <= now)
+        } as Map
+        return ident ? normalize(ident.idValue) : null
+    }
+
     /**
      * The Shopify return reference REST exposes: an active identification of a Shopify type, the older
      * type first. A Shopify id is numeric — SHOPIFY_RETURN_ID also holds "WARRANTY-<hex>" values on gorjana,
@@ -116,6 +126,10 @@ class OmsGqlReturnAssembler {
         record.returnDate = made ? Instant.parse(made).toEpochMilli() : null
         record.daysBeforeEntry = record.entryDate != null && record.returnDate != null ?
                 Math.floorDiv(((long) record.entryDate) - ((long) record.returnDate), 86_400_000L) : null
+        // DAR-BE-116 R8: the credit memo HotWax wrote to NetSuite. A lost-warranty return reaches NetSuite as only that,
+        // never an RMA. Set only when present, so the REST-parity record shape is unchanged.
+        String creditMemoId = activeIdentification(node, "NETSUITE_CM_ID")
+        if (creditMemoId) record.netsuiteCreditMemoId = creditMemoId
         record.returnTotal = number(total)
         record.currencyUomId = node.currencyUomId
         record.returnChannelEnumId = node.returnChannelEnumId

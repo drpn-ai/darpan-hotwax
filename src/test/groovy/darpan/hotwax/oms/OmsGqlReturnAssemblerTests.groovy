@@ -92,6 +92,20 @@ class OmsGqlReturnAssemblerTests {
      * gorjana's M263611 on 2026-10-21 for a return dated 2022-06-06; how long before its entry a return was made is what
      * tells an old return recorded late from a new one.
      */
+    /**
+     * DAR-BE-116 R8 (F-104607, gorjana M262072 on 2026-10-23): a lost-warranty return reaches NetSuite as a credit memo
+     * only, never an RMA, so the record carries the NETSUITE_CM_ID HotWax wrote; absent when it has none, keeping REST's shape.
+     */
+    @Test
+    void aReturnCarriesTheCreditMemoItReachedNetsuiteAs() {
+        List idents = [[returnIdentificationTypeId: "AFTSHIP_WTY_RMA_ID", idValue: "4JF7BF7F", thruDate: null],
+                       [returnIdentificationTypeId: "NETSUITE_CM_ID", idValue: "80963979", thruDate: null]]
+        assertEquals("80963979", OmsGqlReturnAssembler.build(node(identifications: idents), [item()], lookups()).netsuiteCreditMemoId)
+        List ended = [[returnIdentificationTypeId: "NETSUITE_CM_ID", idValue: "80963979", thruDate: "2026-10-19T17:05:10.315Z"]]
+        assertFalse(OmsGqlReturnAssembler.build(node(identifications: ended), [item()], lookups()).containsKey("netsuiteCreditMemoId"))
+        assertFalse(OmsGqlReturnAssembler.build(node(), [item()], lookups()).containsKey("netsuiteCreditMemoId"))
+    }
+
     @Test
     void aReturnCarriesItsOwnDateAndHowLongBeforeItsEntryItWasMade() {
         Map old = OmsGqlReturnAssembler.build(node(entryDate: "2026-10-21T21:31:59.301Z", returnDate: "2022-06-06T20:37:51Z"), [item()], lookups())
