@@ -431,11 +431,4 @@ class OmsGqlOrderPageSourceTests {
         // A missing exchange pass would let exchange orders re-enter as "in OMS, missing from Shopify".
         assertFailsClosed([ordersPage([order("M1")], false), [data: [:]]], "MALFORMED")
     }
-
-    @Test
-    void thePageCeilingFromConfigStopsARunawayCursor() {
-        assertFailsClosed([ordersPage([order("M1")], true, "C1"),
-                           ordersPage([order("M2")], true, "C2")],
-                "page ceiling", CONFIG + [maxOrdersPageCount: 1])
-    }
 }

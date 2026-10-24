@@ -86,7 +86,7 @@ class OmsGqlOrderPageSource {
         Closure consumer = (Closure) ctx.pageConsumer
         Closure pageConsumer = { Map bundle -> synchronized (pagination) { consumer.call(bundle) } }
         Map shared = [plan: plan, pageSize: new AtomicInteger((int) plan.pageSize), pages: new AtomicInteger(0),
-                      maxPages: maxPageCount((Map) ctx.config), pagination: pagination, pageConsumer: pageConsumer,
+                      maxPages: OmsRestSourceSupport.MAX_ORDERS_PAGE_COUNT, pagination: pagination, pageConsumer: pageConsumer,
                       ctx: ctx, extractOptions: extractOptions, unitGrain: unitGrain, exchangePass: exchangePass]
         try {
             if (keys) {
@@ -347,15 +347,6 @@ class OmsGqlOrderPageSource {
         return cursor
     }
 
-    private static int maxPageCount(Map config) {
-        Object raw = config?.maxOrdersPageCount
-        try {
-            int value = raw == null ? OmsRestSourceSupport.MAX_ORDERS_PAGE_COUNT : (raw.toString().trim() as int)
-            return Math.max(1, value)
-        } catch (Exception ignored) {
-            return OmsRestSourceSupport.MAX_ORDERS_PAGE_COUNT
-        }
-    }
 
     private static String iso(Long millis) {
         return Instant.ofEpochMilli(millis).toString()

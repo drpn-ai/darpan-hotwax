@@ -53,7 +53,7 @@ class OmsGqlReturnsPageSource {
         }
         Closure consumer = (Closure) ctx.pageConsumer
         Map shared = [pageSize: new AtomicInteger(OmsGqlQueries.RETURNS_PAGE_SIZE), pages: new AtomicInteger(0),
-                      maxPages: maxPageCount((Map) ctx.config), pagination: pagination, serverCounts: serverCounts,
+                      maxPages: OmsReturnsSourceSupport.MAX_RETURNS_PAGE_COUNT, pagination: pagination, serverCounts: serverCounts,
                       onlyCancelled: onlyCancelled, keepNoShopifyRef: keepNoShopifyRef,
                       pageConsumer: { List<Map> records -> synchronized (pagination) { consumer.call(records) } }]
         Closure<String> scoped = { String filter -> onlyCancelled ? "statusId:RETURN_CANCELLED ${filter}".toString() : filter }
@@ -288,15 +288,6 @@ class OmsGqlReturnsPageSource {
         return all
     }
 
-    private static int maxPageCount(Map config) {
-        Object raw = config?.maxReturnsPageCount
-        try {
-            int value = raw == null ? OmsReturnsSourceSupport.MAX_RETURNS_PAGE_COUNT : (raw.toString().trim() as int)
-            return value > 0 ? value : OmsReturnsSourceSupport.MAX_RETURNS_PAGE_COUNT
-        } catch (Exception ignored) {
-            return OmsReturnsSourceSupport.MAX_RETURNS_PAGE_COUNT
-        }
-    }
 
     private static String netsuiteOrderId(Map order) {
         return ((order?.identifications ?: []) as List<Map>).find { it?.orderIdentificationTypeId == "NETSUITE_ORDER_ID" }?.idValue as String

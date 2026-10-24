@@ -49,7 +49,6 @@ class OmsGqlThrottleGovernor {
     }
 
     synchronized int getAvailable() { if (!observed) return -1; refill(); return (int) Math.floor(available) }
-    int getRestoreRate() { return restoreRate }
 
     /** The bucket refills at the server's rate between calls (DAR-BE-116: 2000/s on gorjana). */
     private void refill() {
