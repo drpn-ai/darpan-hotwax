@@ -102,6 +102,35 @@ class OmsGqlReturnsPageSourceTests {
         assertFalse(item.containsKey("productNetsuiteId"), "absent, so the REST-parity item shape is unchanged")
     }
 
+    /**
+     * Aditi 2026-10-24 on R8 F-100860 (gorjana M263376): "the same item has a return and a warranty... the warranty is still
+     * open... because of this the exchange order is unable to sync to NS". An exchange return syncs after its exchange order,
+     * and that order waits while another return of the same Shopify order is open: the record names both, only for an
+     * exchange whose order has not reached NetSuite.
+     */
+    @Test
+    void anExchangeReturnNamesItsExchangeOrderAndTheOpenReturnHoldingIt() {
+        Map<String, Closure> h = lookupsAnswering() + [
+                returns    : { Map v ->
+                    if ((v.q as String).startsWith("returnId:")) return conn([[returnId: "M0001", responses: [[replacementOrderId: "GR9"]]]])
+                    return conn([ret("M0001")]) },
+                returnItems: { Map v ->
+                    if ((v.q as String).startsWith("orderId:")) return conn([
+                            [returnId: "M0001", returnItemSeqId: "01", orderId: "GR1", orderItemSeqId: "00101", statusId: "RETURN_COMPLETED"],
+                            [returnId: "M2006", returnItemSeqId: "01", orderId: "GR1", orderItemSeqId: "00101", statusId: "RETURN_REQUESTED"]])
+                    return conn([[returnId: "M0001", returnItemSeqId: "01", orderId: null, orderItemSeqId: null, productId: "P1",
+                                  returnQuantity: 1, receivedQuantity: 0, returnPrice: 65, statusId: "RETURN_COMPLETED", returnTypeId: "RTN_EXCHANGE"]]) },
+                orders     : { Map v ->
+                    if ((v.q as String).startsWith("externalId:")) return conn([[orderId: "GR1", externalId: "634"], [orderId: "GR9", externalId: "634"]])
+                    return conn([[orderId: "GR9", orderName: "EXC-#GOR1-1", externalId: "634", identifications: []]]) }]
+        List<List<Map>> pages = []
+        Map result = run(client(h), pages)
+        assertEquals([], result.errors)
+        Map r = (pages.flatten() as List<Map>)[0]
+        assertEquals(["GR9", "EXC-#GOR1-1", null, "M2006", "RETURN_REQUESTED"],
+                [r.exchangeOrderId, r.exchangeOrderName, r.exchangeOrderNetsuiteId, r.openReturnOnOrderId, r.openReturnOnOrderStatus])
+    }
+
     /** DAR-BE-119: an older open finding's return is read by its id, with no window. */
     @Test
     void returnsAreReadByIdWhenAskedByKey() {

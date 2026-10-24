@@ -235,6 +235,19 @@ class OmsGqlQueries {
 }'''
     }
 
+    /** Aditi 2026-10-24 (R8 F-100860): an exchange return's replacement order, from its responses; exchange returns only. */
+    static String returnResponsesDocument() {
+        return '''query OmsReturnResponses($q: String, $first: Int, $after: String) {
+  returns(query: $q, first: $first, after: $after) {
+    edges { node { returnId responses(first: 3) { replacementOrderId } } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
+    static final int RETURN_RESPONSES_CHUNK = 50
+    static final int RETURN_RESPONSES_RESERVATION = 400
+
     static String returnItemsDocument() {
         return '''query OmsReturnItems($q: String, $first: Int, $after: String) {
   returnItems(query: $q, first: $first, after: $after) {
@@ -248,7 +261,7 @@ class OmsGqlQueries {
     static String orderExternalIdsDocument() {
         return '''query OmsOrderExternalIds($q: String, $first: Int, $after: String) {
   orders(query: $q, first: $first, after: $after) {
-    edges { node { orderId externalId productStoreId grandTotal identifications(first: 3) { orderIdentificationTypeId idValue } } }
+    edges { node { orderId orderName externalId productStoreId grandTotal identifications(first: 3) { orderIdentificationTypeId idValue } } }
     pageInfo { hasNextPage endCursor }
   }
 }'''

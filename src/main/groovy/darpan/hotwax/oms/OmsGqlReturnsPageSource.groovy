@@ -243,10 +243,54 @@ class OmsGqlReturnsPageSource {
                     .findAll { !it.thruDate }.each { Map n -> productNetsuiteIds[n.productId as String] = n.idValue as String }
         }
         Map lookups = [orderExternalIds: orderExternalIds, orderProductStoreIds: orderProductStoreIds, orderNetsuiteIds: orderNetsuiteIds,
-                       orderGrandTotals: orderGrandTotals,
+                       orderGrandTotals: orderGrandTotals, exchangeChains: exchangeChains(client, items, pagination),
                        orderItemExternalIds: orderItemExternalIds, productNames: productNames,
                        productNetsuiteIds: productNetsuiteIds]
         return kept.collect { Map n -> OmsGqlReturnAssembler.build(n, itemsByReturn[n.returnId as String] ?: [], lookups) }
+    }
+
+    /**
+     * Aditi 2026-10-24 (R8 F-100860, M263376): an exchange return reaches NetSuite after its exchange order, and that order
+     * waits while another return of the same Shopify order is still open (there, an AfterShip warranty requested since
+     * August). returnId -> [exchangeOrderId, exchangeOrderName, exchangeOrderNetsuiteId, openReturnOnOrderId, openReturnOnOrderStatus].
+     * Asked only for returns with an exchange item; the open return only for an exchange order not in NetSuite.
+     */
+    private static Map<String, Map> exchangeChains(OmsGqlClient client, List<Map> items, Map pagination) {
+        List<String> exchangeReturnIds = items.findAll { it.returnTypeId == "RTN_EXCHANGE" }*.returnId.collect { it as String }.unique()
+        if (!exchangeReturnIds) return [:]
+        Map<String, String> exchangeOrderOf = [:]
+        fetchByIds(client, OmsGqlQueries.returnResponsesDocument(), "returns", "returnId", exchangeReturnIds,
+                OmsGqlQueries.RETURN_RESPONSES_CHUNK, OmsGqlQueries.RETURN_RESPONSES_CHUNK, OmsGqlQueries.RETURN_RESPONSES_RESERVATION, pagination)
+                .each { Map n ->
+                    String order = ((n.responses ?: []) as List<Map>).findResult { it?.replacementOrderId as String }
+                    if (order) exchangeOrderOf[n.returnId as String] = order
+                }
+        if (!exchangeOrderOf) return [:]
+        Map<String, Map> orders = [:]
+        fetchByIds(client, OmsGqlQueries.orderExternalIdsDocument(), "orders", "orderId", exchangeOrderOf.values().toList().unique(),
+                OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_RESERVATION, pagination)
+                .each { Map n -> orders[n.orderId as String] = n }
+        Closure<String> netsuiteIdOf = { Map o -> ((o?.identifications ?: []) as List<Map>).find { it?.orderIdentificationTypeId == "NETSUITE_ORDER_ID" }?.idValue as String }
+        // Only an exchange order NetSuite does not have: the open return holding it, on the order(s) sharing its Shopify id.
+        List<String> blockedShopifyIds = exchangeOrderOf.values().collect { orders[it] }.findAll { it && !netsuiteIdOf(it) && it.externalId }
+                *.externalId.collect { it as String }.unique()
+        Map<String, List<Map>> openByShopifyId = [:]
+        if (blockedShopifyIds) {
+            Map<String, String> shopifyIdOf = [:]
+            fetchByIds(client, OmsGqlQueries.orderExternalIdsDocument(), "orders", "externalId", blockedShopifyIds,
+                    OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_RESERVATION, pagination)
+                    .each { Map n -> shopifyIdOf[n.orderId as String] = n.externalId as String }
+            fetchByIds(client, OmsGqlQueries.returnItemsDocument(), "returnItems", "orderId", shopifyIdOf.keySet().toList(),
+                    OmsGqlQueries.RETURN_ITEMS_ID_CHUNK, OmsGqlQueries.RETURN_ITEMS_PAGE_SIZE, OmsGqlQueries.RETURN_ITEMS_RESERVATION, pagination)
+                    .findAll { !(it.statusId in ["RETURN_COMPLETED", "RETURN_CANCELLED", "RETURN_REJECTED"]) }
+                    .each { Map n -> openByShopifyId.computeIfAbsent(shopifyIdOf[n.orderId as String]) { [] }.add(n) }
+        }
+        return exchangeOrderOf.collectEntries { String returnId, String orderId ->
+            Map o = orders[orderId]
+            Map open = (openByShopifyId[o?.externalId as String] ?: []).find { it.returnId != returnId }
+            [(returnId): [exchangeOrderId: orderId, exchangeOrderName: o?.orderName, exchangeOrderNetsuiteId: netsuiteIdOf(o),
+                          openReturnOnOrderId: open?.returnId, openReturnOnOrderStatus: open?.statusId]]
+        }
     }
 
     /** Every node for `ids`, chunked and paged to exhaustion. Shared with OmsReturnLinesLookupSupport. */

@@ -129,6 +129,8 @@ class OmsGqlReturnAssembler {
         record.returnDate = made ? Instant.parse(made).toEpochMilli() : null
         record.daysBeforeEntry = record.entryDate != null && record.returnDate != null ?
                 Math.floorDiv(((long) record.entryDate) - ((long) record.returnDate), 86_400_000L) : null
+        // Aditi 2026-10-24 (R8 F-100860): an exchange's order, and an open return holding it; set only when present.
+        ((Map) ((Map) (lookups?.exchangeChains ?: [:])).get(node.returnId as String) ?: [:]).each { k, v -> if (v != null) record.put(k as String, v) }
         // DAR-BE-116 R8: the credit memo HotWax wrote to NetSuite. A lost-warranty return reaches NetSuite as only that,
         // never an RMA. Set only when present, so the REST-parity record shape is unchanged.
         String creditMemoId = activeIdentification(node, "NETSUITE_CM_ID")
