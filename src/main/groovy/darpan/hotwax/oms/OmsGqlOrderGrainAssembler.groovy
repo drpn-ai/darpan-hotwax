@@ -51,6 +51,8 @@ class OmsGqlOrderGrainAssembler {
             order.put("paymentMethodTypeIds", opps.collect { it?.get("paymentMethodTypeId") as String }
                     .findAll { it }.unique().sort().join(","))
             order.put("paymentPreferenceSlotsFull", opps.size() >= OmsGqlQueries.PAYMENT_PREF_SLOTS)
+            // DAR-BE-125 (R20): compared against Shopify isFulfilled.
+            order.put("isCompleted", order.get("statusId") == "ORDER_COMPLETED" ? "Y" : "N")
 
             if (order.containsKey("shipGroups")) order.put("shipGroups", edgeNodes(order.get("shipGroups")))
 

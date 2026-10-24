@@ -40,6 +40,15 @@ class OmsGqlOrderGrainAssemblerTests {
     }
 
     @Test
+    void onlyACompletedOrderReadsCompleted() {
+        // DAR-BE-125 (R20): compared against Shopify isFulfilled, so both sides emit "Y"/"N".
+        Map completed = OmsGqlOrderGrainAssembler.assemble([order("M1")], [])[0]
+        Map approved = OmsGqlOrderGrainAssembler.assemble([order("M2") + [statusId: "ORDER_APPROVED"]], [])[0]
+        assertEquals("Y", completed.isCompleted)
+        assertEquals("N", approved.isCompleted)
+    }
+
+    @Test
     void aCancelledOppStillCountsAsPresentInV1() {
         // Spec D4: "missing" means zero rows; a cancelled OPP is a different finding, sized by P0.
         Map o = OmsGqlOrderGrainAssembler.assemble([order("M1", [opp("CREDIT_CARD", "PAYMENT_CANCELLED")])], [])[0]

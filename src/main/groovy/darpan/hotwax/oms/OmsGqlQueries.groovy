@@ -37,8 +37,9 @@ class OmsGqlQueries {
     /** Always selected: the compare key, the built-in non-sales filter, and the REST keepFieldsBase. */
     static final List<String> ALWAYS_FIELDS = ["orderId", "orderName", "externalId", "statusId", "orderTypeId",
             "orderDate", "grandTotal"]
-    /** Computed by OmsGqlOrderGrainAssembler from paymentPreferences, which is always selected. */
-    static final Set<String> DERIVED_FIELDS = ["hasPaymentPreference", "paymentMethodTypeIds", "paymentPreferenceSlotsFull"] as Set
+    /** Computed by OmsGqlOrderGrainAssembler from paymentPreferences and statusId, which are always selected. */
+    static final Set<String> DERIVED_FIELDS = ["hasPaymentPreference", "paymentMethodTypeIds", "paymentPreferenceSlotsFull",
+            "isCompleted"] as Set
     /** Nested lists, selected only when something reads them, with their measured per-order cost. */
     static final Map<String, Map> NESTED_FIELDS = [
             identifications: [selection: "identifications(first: 5) { orderIdentificationTypeId idValue }", cost: 18.0d],
