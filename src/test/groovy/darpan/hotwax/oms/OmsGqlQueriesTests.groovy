@@ -117,4 +117,11 @@ class OmsGqlQueriesTests {
         assertTrue(100 + OmsGqlQueries.ORDERS_ID_CHUNK * 3 <= OmsGqlQueries.ORDERS_RESERVATION,
                 "100 per page + 3 scalars x ${OmsGqlQueries.ORDERS_ID_CHUNK} rows must fit the reservation")
     }
+
+    /** Aditi 2026-10-24 (R1 F-100794): "this is a duplicate order": HotWax marks it with an order note, read only when asked. */
+    @Test
+    void anOrdersNotesAreReadOnlyWhenAsked() {
+        assertTrue(OmsGqlQueries.orderGrainPagePlan(["orderId", "notes"] as Set).document.contains("notes(first: 5) { note { noteInfo } }"))
+        assertFalse(OmsGqlQueries.orderGrainPagePlan(["orderId"] as Set).document.contains("notes("))
+    }
 }

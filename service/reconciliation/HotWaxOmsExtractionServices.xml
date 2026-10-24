@@ -86,6 +86,15 @@
             (OmsGqlOrderPageSource). Adds hasPaymentPreference / paymentMethodTypeIds for the presence OPP rule
             (DAR-BE-064). A DISTINCT service name is required: the connector registry resolves rows by it.</description>
         <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrders"/>
+        <in-parameters>
+            <parameter name="lookupKeys" type="List">
+                <description>DAR-BE-120. Read only these orders by orderId, whatever their date, instead of the window: a
+                    conclusion lookup. A caller checks this parameter is declared before sending keys, so a connector
+                    without it is never asked for a whole window instead.</description>
+                <parameter name="lookupKey"/>
+            </parameter>
+            <parameter name="lookupKeyField"><description>The record field lookupKeys are values of: orderId.</description></parameter>
+        </in-parameters>
     </service>
 
     <service verb="extract" noun="HotWaxOmsReconciliationOrders" type="script" transaction="ignore" allow-remote="false" authenticate="true"

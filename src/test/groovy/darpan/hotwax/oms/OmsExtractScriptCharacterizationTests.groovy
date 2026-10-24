@@ -134,7 +134,8 @@ class OmsExtractScriptCharacterizationTests {
         List<String> plainOut = ["dataAvailable", "fileLocation", "fileName", "recordCount", "requestMetadata", "warnings", "errors"]
         Map<String, List<List<String>>> expected = [
                 "extract#HotWaxOmsOrders"              : [windowedIn, ordersOut],
-                "extract#HotWaxOmsGqlOrders"           : [windowedIn, ordersOut],
+                // DAR-BE-120: read by key, for a conclusion lookup (an order's notes behind R1's "never reached NetSuite").
+                "extract#HotWaxOmsGqlOrders"           : [windowedIn + ["lookupKeys", "lookupKeyField"], ordersOut],
                 "extract#HotWaxOmsReconciliationOrders": [windowedIn, ordersOut],
                 "extract#HotWaxOmsReturns"             : [windowedIn, plainOut],
                 // DAR-BE-094 R8 / R16 added the two returns-scope switches.

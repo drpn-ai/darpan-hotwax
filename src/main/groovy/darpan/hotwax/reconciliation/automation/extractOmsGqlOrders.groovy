@@ -14,6 +14,8 @@ OmsScriptServiceSupport.runExtract(ec, context, [
             // DAR-BE-064: same REST pipeline (exclusions, filters, projection, sink, manifest), GraphQL pages.
             OmsRestSourceSupport.extractOrdersToFile(a.sourceConfig, windowStart, windowEnd, a.workFile,
                     a.keepRecordFields, a.pageProgressListener, a.sourceFilters, null,
-                    OmsGqlOrderPageSource.fetcher(new OmsGqlClient(OmsRestSourceSupport.toPlainMap(a.sourceConfig))))
+                    OmsGqlOrderPageSource.fetcher(new OmsGqlClient(OmsRestSourceSupport.toPlainMap(a.sourceConfig)),
+                            // DAR-BE-120: read by key for a conclusion lookup.
+                            [lookupKeys: (lookupKeys instanceof List) ? (List) lookupKeys : null, lookupKeyField: lookupKeyField]))
         },
 ])

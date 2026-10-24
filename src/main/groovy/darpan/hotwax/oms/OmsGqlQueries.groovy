@@ -52,6 +52,8 @@ class OmsGqlQueries {
     static final Map<String, Map> NESTED_FIELDS = [
             identifications: [selection: "identifications(first: 5) { orderIdentificationTypeId idValue }", cost: 18.0d],
             shipGroups     : [selection: "shipGroups(first: 3) { edges { node { shipGroupSeqId facilityId shipmentMethodTypeId carrierPartyId } } }", cost: 12.5d],
+            // Aditi 2026-10-24 (R1 F-100794): HotWax marks a duplicate order with a note ("duplicate order"). Estimated.
+            notes          : [selection: "notes(first: 5) { note { noteInfo } }", cost: 25.0d],
     ]
 
     /**
