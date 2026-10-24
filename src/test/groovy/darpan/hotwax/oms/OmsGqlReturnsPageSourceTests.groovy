@@ -190,7 +190,8 @@ class OmsGqlReturnsPageSourceTests {
             return conn([ret("M0001"), ret("M0002", [identifications: []]), ret("M0003", [statusId: "RETURN_CANCELLED"])])
         }]
         OmsGqlClient c = client(h)
-        Map config = CONFIG + [gqlSharedReads: true]
+        c.realEndpoint = true
+        Map config = CONFIG
         def pool = java.util.concurrent.Executors.newFixedThreadPool(2)
         try {
             List<List<List<Map>>> pages = [Collections.synchronizedList([]), Collections.synchronizedList([])]

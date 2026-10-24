@@ -26,8 +26,8 @@ class OmsGqlOrderPageSource {
     /** DAR-BE-116: order ids per exchange pass. The pass is charged on its `first` slots, not on the ids. */
     static final int ASSOC_BATCH_ORDER_IDS = 1000
     static final long SLICE_MILLIS = 86400000L
-    /** Parallel day slices per extract; config gqlConcurrency overrides. */
-    static final int DEFAULT_CONCURRENCY = 4
+    /** Parallel day slices per extract. */
+    static final int CONCURRENCY = 4
 
     /** options.lookupKeys (DAR-BE-119): read these orders by orderId instead of the window. */
     static Closure fetcher(OmsGqlClient client, Map options = [:]) {
@@ -58,8 +58,8 @@ class OmsGqlOrderPageSource {
             return failed("The OMS GraphQL order extract windows on orderDate only, not '${windowField}'.")
         }
 
-        // DAR-BE-116: ORDER_LINE_UNIT grain (the order-items extract) reads the order header with its NetSuite
-        // identification and ship groups, then the items in batches, and hands REST's flattener the same
+        // DAR-BE-116: ORDER_LINE_UNIT grain (the order-items extract) reads the order header and its ship groups,
+        // then the items in batches, and hands REST's flattener the same
         // order shape REST does. Filters there are on UNIT fields, checked against what a unit carries.
         boolean unitGrain = "ORDER_LINE_UNIT".equalsIgnoreCase((extractOptions.emitGrain as String)?.trim() ?: "")
         Object exclusionFlag = extractOptions.applyExchangeExclusion
@@ -96,10 +96,10 @@ class OmsGqlOrderPageSource {
             } else {
                 List<List<Long>> slices = daySlices((Long) ctx.fromMillis, (Long) ctx.thruMillis)
                 pagination.sliceCount = slices.size()
-                if (unitGrain && sharesReads(client, (Map) ctx.config)) {
+                if (unitGrain && client.realEndpoint) {
                     readUnitsShared(client, shared, slices, (Map) ctx.config)
                 } else {
-                    runSlices(slices, concurrencyOf((Map) ctx.config)) { long from, long thru -> fetchSlice(client, shared, window(from, thru)) }
+                    runSlices(slices, CONCURRENCY) { long from, long thru -> fetchSlice(client, shared, window(from, thru)) }
                 }
             }
         } catch (IllegalArgumentException e) {
@@ -118,13 +118,6 @@ class OmsGqlOrderPageSource {
     /** Batch of raw records a shared read hands each caller's own shaper at a time. */
     static final int SHARED_SHAPE_BATCH = 500
 
-    /** Real-endpoint reads are shared unless the config turns it off; injected (test) clients only when asked. */
-    static boolean sharesReads(OmsGqlClient client, Map config) {
-        Object flag = config?.gqlSharedReads
-        if (flag != null) return flag == true || (flag as String)?.trim()?.toLowerCase() in ["true", "y"]
-        return client.realEndpoint
-    }
-
     /**
      * DAR-BE-116: the unit read through OmsGqlSharedRead. The raw record is the assembled order (header, ship groups,
      * items), so it depends only on the endpoint, the window and whether the exchange pass ran; each caller then shapes
@@ -138,7 +131,7 @@ class OmsGqlOrderPageSource {
             Map readPagination = new LinkedHashMap(pagination)
             Map producerShared = new LinkedHashMap(shared) + [pagination: readPagination,
                     sink: { List<Map> assembled -> assembled.each { emit.call(it) } }]
-            runSlices(slices, concurrencyOf(config)) { long from, long thru -> fetchSlice(client, producerShared, window(from, thru)) }
+            runSlices(slices, CONCURRENCY) { long from, long thru -> fetchSlice(client, producerShared, window(from, thru)) }
             readPagination.pageCount = ((AtomicInteger) producerShared.pages).get()
             readPagination.pageSize = ((AtomicInteger) producerShared.pageSize).get()
             return [pagination: readPagination]
@@ -179,11 +172,6 @@ class OmsGqlOrderPageSource {
         return slices ?: [[fromMillis, thruMillis]]
     }
 
-    static int concurrencyOf(Map config) {
-        Object raw = config?.gqlConcurrency
-        try { return raw == null ? DEFAULT_CONCURRENCY : Math.max(1, raw.toString().trim() as int) } catch (ignored) { return DEFAULT_CONCURRENCY }
-    }
-
     /**
      * Runs `work(from, thru)` for every slice, `concurrency` at a time; the first failure cancels the rest
      * and is rethrown as itself, so an OmsGqlException still fails the extract closed. Shared by the
@@ -211,14 +199,24 @@ class OmsGqlOrderPageSource {
         }
     }
 
-    /** One slice's cursor loop. Pages are buffered until ASSOC_BATCH_ORDER_IDS orders, then one exchange pass. */
     private static String window(long fromMillis, long thruMillis) {
         return OmsGqlQueries.windowFilter(iso(fromMillis), iso(thruMillis))
     }
 
+    /** One slice's orders, flushed every ASSOC_BATCH_ORDER_IDS orders through one exchange pass. */
     private static void fetchSlice(OmsGqlClient client, Map shared, String filter) {
         Map plan = (Map) shared.plan
-        Map pagination = (Map) shared.pagination
+        pageSlice(client, shared, (String) plan.document, (int) plan.reservation, "orders", filter, ASSOC_BATCH_ORDER_IDS,
+                { List<Map> nodes -> nodes }, { List<Map> batch -> flush(client, shared, batch) })
+    }
+
+    /**
+     * One slice's cursor loop, for the orders and returns sources: `keep(nodes)` answers a page's nodes to buffer, and
+     * `flush(buffered)` takes them every `batch` and at the end. A server capping one query below the page's sizing has the
+     * page halved and asked again; the shared page ceiling refuses a truncated extract.
+     */
+    static void pageSlice(OmsGqlClient client, Map shared, String document, int reservation, String root, String filter,
+                          int batch, Closure<List<Map>> keep, Closure flush) {
         AtomicInteger pageSize = (AtomicInteger) shared.pageSize
         AtomicInteger pages = (AtomicInteger) shared.pages
         int maxPages = (int) shared.maxPages
@@ -228,26 +226,24 @@ class OmsGqlOrderPageSource {
         while (true) {
             if (Thread.currentThread().isInterrupted()) throw new OmsGqlException("CANCELLED", "another slice failed")
             if (pages.get() >= maxPages) {
-                throw new OmsGqlException("MALFORMED", "hit the page ceiling of ${maxPages} with more pages still " +
-                        "reported (maxOrdersPageCount); refusing to return a truncated extract")
+                throw new OmsGqlException("MALFORMED", "hit the page ceiling of ${maxPages} with more pages still reported; " +
+                        "refusing to return a truncated extract")
             }
             int size = pageSize.get()
             Map page
             try {
-                page = client.execute((String) plan.document, OmsGqlQueries.pageVariables(filter, size, cursor), (int) plan.reservation)
+                page = client.execute(document, OmsGqlQueries.pageVariables(filter, size, cursor), reservation)
             } catch (OmsGqlException e) {
-                // A server that caps one query below what the page was sized for: halve it and ask again.
                 if (e.code != "COST_EXCEEDED" || size <= 1) throw e
                 pageSize.compareAndSet(size, Math.max(1, size.intdiv(2)))
                 continue
             }
-            Map connection = requireConnection(page, "orders")
-            List<Map> nodes = OmsGqlOrderGrainAssembler.edgeNodes(connection)
+            Map connection = requireConnection(page, root)
             pages.incrementAndGet()
-            buffered.addAll(nodes)
-            cursor = nextCursor(connection, seenCursors, "orders")
-            if (buffered && (cursor == null || buffered.size() >= ASSOC_BATCH_ORDER_IDS)) {
-                flush(client, shared, buffered)
+            buffered.addAll(keep.call(OmsGqlOrderGrainAssembler.edgeNodes(connection)))
+            cursor = nextCursor(connection, seenCursors, root)
+            if (buffered && (cursor == null || buffered.size() >= batch)) {
+                flush.call(buffered)
                 buffered = []
             }
             if (cursor == null) break

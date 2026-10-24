@@ -10,8 +10,6 @@ package darpan.hotwax.oms
  * Nested lists (2026-09-30 probe, conservative): identifications(5) ~18, shipGroups(3) ~12.5 per order.
  * So the page size is DERIVED from what the run reads; the DAR-BE-052 pass-1 shape (identifications +
  * shipGroups at 50) is always rejected.
- *
- * Order-grain only. DAR-BE-052's line-unit documents are added here later, beside these.
  */
 class OmsGqlQueries {
 
@@ -20,16 +18,9 @@ class OmsGqlQueries {
     /**
      * DAR-BE-116: the per-query cost a page is sized to. Live gorjana 2026-10-23: the BUCKET was raised to
      * 20000 at 2000/s, but one query is still capped at 1000 (60 returns -> 1260 COST_EXCEEDED, 100
-     * returnItems -> 1110). The page sources halve the page on COST_EXCEEDED, so a server with a higher cap
-     * can be given a bigger budget with -Ddarpan.oms.gql.queryCostBudget=N and a lower one costs one call.
+     * returnItems -> 1110). The page sources halve the page on COST_EXCEEDED, so a lower cap costs one call.
      */
-    static final String QUERY_COST_BUDGET_PROPERTY = "darpan.oms.gql.queryCostBudget"
-    static final int DEFAULT_QUERY_COST_BUDGET = 950
-
-    static int queryCostBudget() {
-        String raw = System.getProperty(QUERY_COST_BUDGET_PROPERTY)
-        try { return raw ? Math.max(200, raw.trim() as int) : DEFAULT_QUERY_COST_BUDGET } catch (ignored) { return DEFAULT_QUERY_COST_BUDGET }
-    }
+    static final int QUERY_COST_BUDGET = 950
     /** Two slots: 1-2 OPPs cover 97% of gorjana orders, and k=3 would force the page down to 40. */
     static final int PAYMENT_PREF_SLOTS = 2
     static final double PAGE_OVERHEAD = 100d
@@ -90,7 +81,7 @@ class OmsGqlQueries {
 
         int extraScalars = scalars.size() - ALWAYS_FIELDS.size()
         double perOrder = perOrderCost(PAYMENT_PREF_SLOTS, extraScalars, nested)
-        int budget = queryCostBudget()
+        int budget = QUERY_COST_BUDGET
         int pageSize = Math.max(1, Math.min(MAX_PAGE_SIZE, (int) Math.floor((budget - PAGE_OVERHEAD) / perOrder)))
         int reservation = Math.min(budget + 50, estimatedPageCost(pageSize, PAYMENT_PREF_SLOTS, extraScalars, nested) + 50)
 
@@ -152,9 +143,7 @@ class OmsGqlQueries {
     }
 
     static Map exchangeAssocsVariables(List<String> orderIds, String after) {
-        Map vars = [q: "orderId:${orderIds.join(',')} orderItemAssocTypeId:EXCHANGE".toString(), first: ASSOC_PAGE_SIZE]
-        if (after) vars.put("after", after)
-        return vars
+        return pageVariables("orderId:${orderIds.join(',')} orderItemAssocTypeId:EXCHANGE".toString(), ASSOC_PAGE_SIZE, after)
     }
 
     // --- DAR-BE-040: returns by-id lookup ------------------------------------------------------
@@ -168,11 +157,6 @@ class OmsGqlQueries {
     /** Two slots per id: a return can carry the same id under both types. */
     static final int RETURN_LOOKUP_PAGE_SIZE = 100
     static final int RETURN_LOOKUP_RESERVATION = 450  // ~100 per page + 3 scalars x 100 slots, flat
-
-    // DAR-BE-116: returns by returnId / externalId, the GraphQL replacement for the REST by-id passes.
-    static final int RETURN_ID_LOOKUP_CHUNK = 50
-    static final int RETURN_ID_LOOKUP_PAGE_SIZE = 100
-    static final int RETURN_ID_LOOKUP_RESERVATION = 350  // 100 + 100 x 2 scalars
 
     static String returnIdsDocument() {
         return '''query OmsReturnIds($q: String, $first: Int, $after: String) {
@@ -202,10 +186,8 @@ class OmsGqlQueries {
     // (first: 50 -> 1450, COST_EXCEEDED); returnItems at 14 fields x 100 -> 1500 (COST_EXCEEDED).
     // Flat passes keyed by id, never nested lists, so cost stays linear and a full page pages again.
 
-    // Cost is charged on the REQUESTED page size and the bucket refills at 50/s, so a call costs time
-    // whether or not it fills. Each lookup therefore covers a whole returns page in ONE call where it
-    // fits under the 1000 cap (a return averages ~1 item, an order ~3), paging only on overflow:
-    // ~2,200 per page of 25 returns, against ~4,400 with per-10-id chunks. Throttle-bound either way.
+    // Cost is charged on the REQUESTED page size, so each lookup covers a whole returns page in ONE call
+    // where it fits under the 1000 cap (a return averages ~1 item, an order ~3), paging only on overflow.
     // DAR-BE-116 (2026-10-23): sized to the 1000 one-query cap from costs logged live on gorjana (returns
     // 30 -> 690, 60 -> 1260; returnItems 50 -> 560, 100 -> 1110; the by-id lookups 100 -> 210-310). The
     // bigger bucket is spent by parallel slices, not by bigger pages.
@@ -348,8 +330,6 @@ class OmsGqlQueries {
 
     /** `key:a,b,c` — the comma `in` every flat lookup above relies on. */
     static Map inVariables(String key, List<String> ids, int first, String after) {
-        Map vars = [q: "${key}:${ids.join(',')}".toString(), first: first]
-        if (after) vars.put("after", after)
-        return vars
+        return pageVariables("${key}:${ids.join(',')}".toString(), first, after)
     }
 }

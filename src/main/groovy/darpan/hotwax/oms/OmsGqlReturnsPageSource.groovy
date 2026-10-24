@@ -56,25 +56,22 @@ class OmsGqlReturnsPageSource {
                       maxPages: maxPageCount((Map) ctx.config), pagination: pagination, serverCounts: serverCounts,
                       onlyCancelled: onlyCancelled, keepNoShopifyRef: keepNoShopifyRef,
                       pageConsumer: { List<Map> records -> synchronized (pagination) { consumer.call(records) } }]
+        Closure<String> scoped = { String filter -> onlyCancelled ? "statusId:RETURN_CANCELLED ${filter}".toString() : filter }
         try {
             if (keys) {
                 // DAR-BE-119: an older open finding's returns, by id, whatever their date.
                 keys.collate(OmsGqlQueries.LOOKUP_KEYS_CHUNK).each { List<String> chunk ->
-                    String filter = OmsGqlQueries.keysFilter("returnId", chunk)
-                    fetchSlice(client, shared, onlyCancelled ? "statusId:RETURN_CANCELLED ${filter}".toString() : filter)
+                    fetchSlice(client, shared, scoped(OmsGqlQueries.keysFilter("returnId", chunk)))
                 }
-                return [errors: [], warnings: [], serverCounts: serverCounts, pagination: pagination + [pageCount: ((AtomicInteger) shared.pages).get()],
-                        transport: "GRAPHQL"]
-            }
-            List<List<Long>> slices = OmsGqlOrderPageSource.daySlices((Long) ctx.fromMillis, (Long) ctx.thruMillis)
-            pagination.sliceCount = slices.size()
-            if (!onlyCancelled && OmsGqlOrderPageSource.sharesReads(client, (Map) ctx.config)) {
-                readReturnsShared(client, shared, slices, (Map) ctx.config)
             } else {
-                OmsGqlOrderPageSource.runSlices(slices, OmsGqlOrderPageSource.concurrencyOf((Map) ctx.config)) { long from, long thru ->
-                    String filter = OmsGqlQueries.returnsWindowFilter(iso(from), iso(thru))
-                    if (onlyCancelled) filter = "statusId:RETURN_CANCELLED ${filter}".toString()
-                    fetchSlice(client, shared, filter)
+                List<List<Long>> slices = OmsGqlOrderPageSource.daySlices((Long) ctx.fromMillis, (Long) ctx.thruMillis)
+                pagination.sliceCount = slices.size()
+                if (!onlyCancelled && client.realEndpoint) {
+                    readReturnsShared(client, shared, slices, (Map) ctx.config)
+                } else {
+                    OmsGqlOrderPageSource.runSlices(slices, OmsGqlOrderPageSource.CONCURRENCY) { long from, long thru ->
+                        fetchSlice(client, shared, scoped(OmsGqlQueries.returnsWindowFilter(iso(from), iso(thru))))
+                    }
                 }
             }
         } catch (IllegalArgumentException e) {
@@ -101,7 +98,7 @@ class OmsGqlReturnsPageSource {
             Map producerShared = new LinkedHashMap(shared) + [pagination: readPagination, keepNoShopifyRef: true, onlyCancelled: false,
                     serverCounts: [returnsCount: 0, excludedNoShopifyRefCount: 0, excludedCancelledCount: 0, keptNoShopifyRefCount: 0],
                     sink: emit]
-            OmsGqlOrderPageSource.runSlices(slices, OmsGqlOrderPageSource.concurrencyOf(config)) { long from, long thru ->
+            OmsGqlOrderPageSource.runSlices(slices, OmsGqlOrderPageSource.CONCURRENCY) { long from, long thru ->
                 fetchSlice(client, producerShared, OmsGqlQueries.returnsWindowFilter(iso(from), iso(thru)))
             }
             readPagination.pageCount = ((AtomicInteger) producerShared.pages).get()
@@ -136,39 +133,15 @@ class OmsGqlReturnsPageSource {
     /** The classification a shared read's raw return carries, removed before the record reaches a caller. */
     static final String SHARED_VERDICT = "_sharedVerdict"
 
-    /** One slice's cursor loop. Kept returns are buffered until RETURNS_BATCH, then one lookup pass builds them. */
+    /** One slice's returns: the ones this read keeps are built every RETURNS_BATCH by one lookup pass. */
     private static void fetchSlice(OmsGqlClient client, Map shared, String filter) {
         Map pagination = (Map) shared.pagination
         Map serverCounts = (Map) shared.serverCounts
-        AtomicInteger pageSize = (AtomicInteger) shared.pageSize
-        AtomicInteger pages = (AtomicInteger) shared.pages
-        int maxPages = (int) shared.maxPages
         boolean onlyCancelled = shared.onlyCancelled == true
         boolean keepNoShopifyRef = shared.keepNoShopifyRef == true
-        List<Map> buffered = []
-        String cursor = null
-        Set<String> seenCursors = [] as Set
-        while (true) {
-            if (Thread.currentThread().isInterrupted()) throw new OmsGqlException("CANCELLED", "another slice failed")
-            if (pages.get() >= maxPages) {
-                throw new OmsGqlException("MALFORMED", "hit the page ceiling of ${maxPages} with more pages still reported; " +
-                        "refusing to return a truncated extract")
-            }
-            int size = pageSize.get()
-            Map vars = [q: filter, first: size]
-            if (cursor) vars.after = cursor
-            Map page
-            try {
-                page = client.execute(OmsGqlQueries.returnsDocument(), vars, OmsGqlQueries.RETURNS_RESERVATION)
-            } catch (OmsGqlException e) {
-                if (e.code != "COST_EXCEEDED" || size <= 1) throw e
-                pageSize.compareAndSet(size, Math.max(1, size.intdiv(2)))
-                continue
-            }
-            Map connection = OmsGqlOrderPageSource.requireConnection(page, "returns")
-            pages.incrementAndGet()
-            List<Map> nodes = OmsGqlOrderGrainAssembler.edgeNodes(connection)
-            Closure sink = (Closure) shared.sink
+        Closure sink = (Closure) shared.sink
+        Closure<List<Map>> keep = { List<Map> nodes ->
+            List<Map> kept = []
             synchronized (pagination) {
                 serverCounts.returnsCount = (serverCounts.returnsCount as int) + nodes.size()
                 nodes.each { Map n ->
@@ -176,31 +149,27 @@ class OmsGqlReturnsPageSource {
                     if (sink != null) {
                         // A shared read: cancelled returns are only counted by the callers; the rest are built and tagged.
                         if (verdict == OmsGqlReturnAssembler.CANCELLED) sink.call([(SHARED_VERDICT): verdict])
-                        else { n.put(SHARED_VERDICT, verdict); buffered.add(n) }
+                        else { n.put(SHARED_VERDICT, verdict); kept.add(n) }
                         return
                     }
-                    if (verdict == OmsGqlReturnAssembler.CANCELLED && onlyCancelled) buffered.add(n)
+                    if (verdict == OmsGqlReturnAssembler.CANCELLED && onlyCancelled) kept.add(n)
                     else if (onlyCancelled) { /* the OMS answered a status it was not asked for: not R16's */ }
                     else if (verdict == OmsGqlReturnAssembler.CANCELLED) serverCounts.excludedCancelledCount = (serverCounts.excludedCancelledCount as int) + 1
                     else if (verdict == OmsGqlReturnAssembler.NO_SHOPIFY_REF && keepNoShopifyRef) {
                         serverCounts.keptNoShopifyRefCount = (serverCounts.keptNoShopifyRefCount as int) + 1
-                        buffered.add(n)
+                        kept.add(n)
                     }
                     else if (verdict == OmsGqlReturnAssembler.NO_SHOPIFY_REF) serverCounts.excludedNoShopifyRefCount = (serverCounts.excludedNoShopifyRefCount as int) + 1
-                    else buffered.add(n)
+                    else kept.add(n)
                 }
             }
-            cursor = OmsGqlOrderPageSource.nextCursor(connection, seenCursors, "returns")
-            if (buffered && (cursor == null || buffered.size() >= RETURNS_BATCH)) {
-                List<Map> built = buildPage(client, buffered, pagination)
-                if (sink != null) {
-                    built.eachWithIndex { Map r, int i -> sink.call(r + [(SHARED_VERDICT): buffered[i].get(SHARED_VERDICT)]) }
-                } else {
-                    ((Closure) shared.pageConsumer).call(built)
-                }
-                buffered = []
-            }
-            if (cursor == null) break
+            return kept
+        }
+        OmsGqlOrderPageSource.pageSlice(client, shared, OmsGqlQueries.returnsDocument(), OmsGqlQueries.RETURNS_RESERVATION, "returns",
+                filter, RETURNS_BATCH, keep) { List<Map> batch ->
+            List<Map> built = buildPage(client, batch, pagination)
+            if (sink != null) built.eachWithIndex { Map r, int i -> sink.call(r + [(SHARED_VERDICT): batch[i].get(SHARED_VERDICT)]) }
+            else ((Closure) shared.pageConsumer).call(built)
         }
     }
 
@@ -224,8 +193,7 @@ class OmsGqlReturnsPageSource {
                         orderExternalIds[n.orderId as String] = n.externalId as String
                         orderProductStoreIds[n.orderId as String] = n.productStoreId as String
                         orderGrandTotals[n.orderId as String] = n.grandTotal
-                        orderNetsuiteIds[n.orderId as String] = ((n.identifications ?: []) as List<Map>)
-                                .find { it?.orderIdentificationTypeId == "NETSUITE_ORDER_ID" }?.idValue as String
+                        orderNetsuiteIds[n.orderId as String] = netsuiteOrderId(n)
                     }
             fetchByIds(client, OmsGqlQueries.orderItemExternalIdsDocument(), "orderItems", "orderId", orderIds,
                     OmsGqlQueries.ORDER_ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.ORDER_ITEMS_RESERVATION, pagination)
@@ -270,9 +238,8 @@ class OmsGqlReturnsPageSource {
         fetchByIds(client, OmsGqlQueries.orderExternalIdsDocument(), "orders", "orderId", exchangeOrderOf.values().toList().unique(),
                 OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_RESERVATION, pagination)
                 .each { Map n -> orders[n.orderId as String] = n }
-        Closure<String> netsuiteIdOf = { Map o -> ((o?.identifications ?: []) as List<Map>).find { it?.orderIdentificationTypeId == "NETSUITE_ORDER_ID" }?.idValue as String }
         // Only an exchange order NetSuite does not have: the open return holding it, on the order(s) sharing its Shopify id.
-        List<String> blockedShopifyIds = exchangeOrderOf.values().collect { orders[it] }.findAll { it && !netsuiteIdOf(it) && it.externalId }
+        List<String> blockedShopifyIds = exchangeOrderOf.values().collect { orders[it] }.findAll { it && !netsuiteOrderId(it) && it.externalId }
                 *.externalId.collect { it as String }.unique()
         Map<String, List<Map>> openByShopifyId = [:]
         if (blockedShopifyIds) {
@@ -288,7 +255,7 @@ class OmsGqlReturnsPageSource {
         return exchangeOrderOf.collectEntries { String returnId, String orderId ->
             Map o = orders[orderId]
             Map open = (openByShopifyId[o?.externalId as String] ?: []).find { it.returnId != returnId }
-            [(returnId): [exchangeOrderId: orderId, exchangeOrderName: o?.orderName, exchangeOrderNetsuiteId: netsuiteIdOf(o),
+            [(returnId): [exchangeOrderId: orderId, exchangeOrderName: o?.orderName, exchangeOrderNetsuiteId: netsuiteOrderId(o),
                           openReturnOnOrderId: open?.returnId, openReturnOnOrderStatus: open?.statusId]]
         }
     }
@@ -329,6 +296,10 @@ class OmsGqlReturnsPageSource {
         } catch (Exception ignored) {
             return OmsReturnsSourceSupport.MAX_RETURNS_PAGE_COUNT
         }
+    }
+
+    private static String netsuiteOrderId(Map order) {
+        return ((order?.identifications ?: []) as List<Map>).find { it?.orderIdentificationTypeId == "NETSUITE_ORDER_ID" }?.idValue as String
     }
 
     private static String iso(Long millis) {

@@ -34,11 +34,11 @@ class OmsGqlReturnAssembler {
         return KEEP
     }
 
-    /** The value of `node`'s identification of `type` that has not ended, else null. */
-    static String activeIdentification(Map node, String type) {
+    /** The value of `node`'s identification of `type` that has not ended (and matches `pattern`), else null. */
+    static String activeIdentification(Map node, String type, String pattern = /.+/) {
         long now = System.currentTimeMillis()
         Map ident = ((node?.identifications instanceof List) ? (List<Map>) node.identifications : []).find { Object raw ->
-            raw instanceof Map && normalize(raw.returnIdentificationTypeId) == type && normalize(raw.idValue) &&
+            raw instanceof Map && normalize(raw.returnIdentificationTypeId) == type && normalize(raw.idValue) ==~ pattern &&
                     !(normalize(raw.thruDate) && Instant.parse(normalize(raw.thruDate)).toEpochMilli() <= now)
         } as Map
         return ident ? normalize(ident.idValue) : null
@@ -50,21 +50,7 @@ class OmsGqlReturnAssembler {
      * which name no Shopify object.
      */
     static String shopifyReturnId(Map node) {
-        List idents = (node?.identifications instanceof List) ? (List) node.identifications : []
-        long now = System.currentTimeMillis()
-        for (String type : SHOPIFY_TYPE_PREFERENCE) {
-            for (Object raw : idents) {
-                if (!(raw instanceof Map)) continue
-                Map ident = (Map) raw
-                if (normalize(ident.returnIdentificationTypeId) != type) continue
-                String value = normalize(ident.idValue)
-                if (!value || !(value ==~ /\d+/)) continue
-                String thru = normalize(ident.thruDate)
-                if (thru && Instant.parse(thru).toEpochMilli() <= now) continue
-                return value
-            }
-        }
-        return null
+        return SHOPIFY_TYPE_PREFERENCE.findResult { String type -> activeIdentification(node, type, /\d+/) }
     }
 
     /**

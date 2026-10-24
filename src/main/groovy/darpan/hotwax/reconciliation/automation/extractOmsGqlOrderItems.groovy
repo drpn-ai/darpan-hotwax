@@ -5,7 +5,7 @@ import darpan.hotwax.oms.OmsScriptServiceSupport
 
 // Service edge for OMS order items at UNIT grain over GraphQL (DAR-BE-116): the GraphQL twin of
 // extractOmsOrderItems.groovy. Same extract options, same REST flattener and unit record; the pages come from
-// OmsGqlOrderPageSource (orders with their NetSuite identification and ship groups, items by orderId in
+// OmsGqlOrderPageSource (orders with their ship groups, items by orderId in
 // batches). The shared gate, work file, progress heartbeat, final move and excluded-records sidecar live in
 // OmsScriptServiceSupport.runExtract.
 OmsScriptServiceSupport.runExtract(ec, context, [

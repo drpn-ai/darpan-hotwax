@@ -524,8 +524,8 @@
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsGqlOrderItems.groovy">
         <description>DAR-BE-116. extract#HotWaxOmsOrderItems over GraphQL (every OMS read goes through GraphQL): the same
             ONE RECORD PER UNIT, the same flattener, the same two deliberate differences from the Shopify-side line units
-            (exchange exclusion OFF, items without a Shopify id KEPT). Orders are read with their NetSuite identification
-            and ship groups, the items by orderId in batches, each placed under its ship group; a multi-day window runs as
+            (exchange exclusion OFF, items without a Shopify id KEPT). Orders are read with their ship groups,
+            the items by orderId in batches, each placed under its ship group; a multi-day window runs as
             parallel day slices on the endpoint's one cost bucket. A distinct service name because the connector registry
             resolves a connector row by its extract service name; this one is gated on the OMS_ORDER_ITEMS_GQL endpoint.
 

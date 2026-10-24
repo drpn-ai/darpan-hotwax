@@ -245,7 +245,8 @@ class OmsGqlOrderPageSourceTests {
                 return [data: ordersPage([unitOrder("M1")], false).data]
             }
         }
-        Map config = CONFIG + [gqlSharedReads: true]
+        client.realEndpoint = true
+        Map config = CONFIG
         def pool = java.util.concurrent.Executors.newFixedThreadPool(2)
         try {
             List<List> filters = [[[fieldExpression: "unitState", operator: "INCLUDE_IN", filterValues: "COMPLETED", sequenceNum: 1]],

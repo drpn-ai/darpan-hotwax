@@ -443,18 +443,9 @@ class OmsReturnsSourceSupport {
      * lookup#ShopifyRefundOrReturnIds. Returns [ok, foundIds, missingIds, errors] — the contract
      * MissingDiffVerificationSupport consumes.
      *
-     * Escapes the run window BY CONSTRUCTION. The endpoint requires window params, but a by-id lookup
-     * must not be narrowed by them: OMS windows on entryDate (when the return was CREATED) while the
-     * Shopify side windows on the refund/return event createdAt (when it was REFUNDED), and a return
-     * opened weeks before its refund is in-window for one and far outside for the other. In the
-     * 2026-08-20 run that clock mismatch accounted for 45 of 59 remaining differences, with a median
-     * age of 11 days and a tail to 22 — so a 10-year window, same as lookupOrdersByExternalId.
-     *
-     * Fails CLOSED: any transport error, non-2xx, unparseable body or ignored filter returns ok=false
-     * with both lists empty, so a degraded OMS over-reports rather than silently suppressing rows.
+     * Never narrowed by the run window: OMS dates a return when it was created, Shopify when it was refunded.
      */
-    static Map<String, Object> lookupReturnsByExternalId(Object rawConfig, Collection externalIds,
-                                                         Map options = [:]) {
+    static Map<String, Object> lookupReturnsByExternalId(Object rawConfig, Collection externalIds) {
         List<String> ids = (externalIds ?: []).collect { normalize(it) }.findAll { it }.unique()
         if (!ids) return [ok: false, foundIds: [], missingIds: [], errors: ["No externalIds provided for OMS returns lookup."]]
 
@@ -491,7 +482,7 @@ class OmsReturnsSourceSupport {
         }
         List<String> remaining = askable.findAll { !found.contains(it) }
         if (remaining) {
-            Map gql = lookupShopifyReturnIdentifications(config, remaining)
+            Map gql = lookupShopifyReturnIdentifications(client, remaining)
             found.addAll((Collection<String>) gql.found)
             unresolved.addAll((Collection<String>) gql.unresolved)
             errors.addAll((Collection<String>) gql.errors)
@@ -512,32 +503,14 @@ class OmsReturnsSourceSupport {
         Set<String> found = new LinkedHashSet<String>()
         Set<String> unresolved = new LinkedHashSet<String>()
         List<String> errors = []
-        List<List<String>> chunks = ids.collate(OmsGqlQueries.RETURN_ID_LOOKUP_CHUNK)
+        List<List<String>> chunks = ids.collate(OmsGqlQueries.RETURN_LOOKUP_CHUNK_SIZE)
         for (int i = 0; i < chunks.size(); i++) {
             List<String> chunk = chunks[i]
-            Set<String> requested = new HashSet<String>(chunk)
-            Set<String> echoed = new HashSet<String>()
             try {
-                String cursor = null
-                Set<String> seenCursors = [] as Set
-                boolean anyRows = false
-                while (true) {
-                    Map page = client.execute(OmsGqlQueries.returnIdsDocument(),
-                            OmsGqlQueries.inVariables(field, chunk, OmsGqlQueries.RETURN_ID_LOOKUP_PAGE_SIZE, cursor),
-                            OmsGqlQueries.RETURN_ID_LOOKUP_RESERVATION)
-                    Map connection = OmsGqlOrderPageSource.requireConnection(page, "returns")
-                    List<Map> nodes = OmsGqlOrderGrainAssembler.edgeNodes(connection)
-                    anyRows = anyRows || !nodes.isEmpty()
-                    nodes.each { Map n ->
-                        String value = normalize(n.get(field))
-                        if (value && requested.contains(value)) echoed.add(value)
-                    }
-                    if (anyRows && echoed.isEmpty()) {
-                        throw new OmsGqlException("FILTER_IGNORED", "returns ${field} filter answered rows for none of the ids asked")
-                    }
-                    cursor = OmsGqlOrderPageSource.nextCursor(connection, seenCursors, "returns")
-                    if (cursor == null) break
-                }
+                List<Map> nodes = OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.returnIdsDocument(), "returns", field, chunk,
+                        chunk.size(), OmsGqlQueries.RETURN_LOOKUP_PAGE_SIZE, OmsGqlQueries.RETURN_LOOKUP_RESERVATION, [lookupCalls: 0])
+                Set<String> echoed = nodes.collect { normalize(it.get(field)) }.findAll { it && chunk.contains(it) } as Set<String>
+                if (nodes && !echoed) throw new OmsGqlException("FILTER_IGNORED", "returns ${field} filter answered rows for none of the ids asked")
                 found.addAll(echoed)
             } catch (Exception e) {
                 // An error the OMS ANSWERED is the answer to the document every chunk sends, so the rest of
@@ -557,22 +530,10 @@ class OmsReturnsSourceSupport {
      * Returns [found: Set, unresolved: Set, errors: List]. A failed call, an ignored filter (no node
      * echoes a requested id) or a truncated page leaves the affected ids unresolved.
      */
-    private static Map lookupShopifyReturnIdentifications(Map config, List<String> ids) {
+    private static Map lookupShopifyReturnIdentifications(OmsGqlClient client, List<String> askable) {
         Set<String> found = new LinkedHashSet<String>()
         Set<String> unresolved = new LinkedHashSet<String>()
         List<String> errors = []
-        // The search string is `key:value,value`; an id carrying a separator would corrupt it.
-        List<String> askable = ids.findAll { it ==~ /[A-Za-z0-9_\-]+/ }
-        unresolved.addAll(ids.findAll { !askable.contains(it) })
-
-        OmsGqlClient client
-        try {
-            client = (OmsGqlClient) gqlClientFactory.call(config)
-        } catch (Exception e) {
-            unresolved.addAll(askable)
-            errors.add("OMS GraphQL returns lookup unavailable: ${e.message}".toString())
-            return [found: found, unresolved: unresolved, errors: errors]
-        }
         // Failures are counted per message and reported once each: gorjana result 101474 (DAR-BE-067)
         // carried the same OMS 400 six times, once per chunk.
         Map<String, Integer> failedCounts = new LinkedHashMap<String, Integer>()
