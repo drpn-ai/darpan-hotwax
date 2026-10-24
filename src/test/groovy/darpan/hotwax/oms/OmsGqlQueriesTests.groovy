@@ -123,5 +123,6 @@ class OmsGqlQueriesTests {
     void anOrdersNotesAreReadOnlyWhenAsked() {
         assertTrue(OmsGqlQueries.orderGrainPagePlan(["orderId", "notes"] as Set).document.contains("notes(first: 5) { note { noteInfo } }"))
         assertFalse(OmsGqlQueries.orderGrainPagePlan(["orderId"] as Set).document.contains("notes("))
+        assertTrue(OmsGqlQueries.orderGrainPagePlan(["orderId", "statuses"] as Set).document.contains("statuses(first: 12) { statusId statusDatetime orderItemSeqId }"))
     }
 }
