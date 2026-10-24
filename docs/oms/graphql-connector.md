@@ -221,4 +221,5 @@ All in component `darpan`, `data/`:
 `src/test/groovy/darpan/hotwax/oms/`: `OmsGqlClientTests`, `OmsGqlThrottleGovernorTests`,
 `OmsGqlQueriesTests`, `OmsGqlOrderPageSourceTests`, `OmsGqlOrderGrainAssemblerTests`,
 `OmsGqlConnectorWiringTests`, `OmsGqlReturnsPageSourceTests`, `OmsGqlReturnAssemblerTests`,
-`OmsGqlReturnsConnectorWiringTests`, `OmsReturnsGqlLookupTests`, `OmsOppRuleExpressionTests`.
+`OmsGqlReturnsConnectorWiringTests`, `OmsReturnsGqlLookupTests`. The paid-has-OPP rule is pinned in darpan
+(`RuleDiffSupportTests`, `GorjanaMonthCloseChecksDataTests`).
