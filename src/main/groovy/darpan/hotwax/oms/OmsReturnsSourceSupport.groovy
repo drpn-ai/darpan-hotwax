@@ -113,11 +113,8 @@ class OmsReturnsSourceSupport {
         // toPlainMap, NOT safeConfigMap: safeConfigMap redacts auth secrets into hasUsername/
         // hasPassword/hasApiToken booleans for UI-safe listing responses (see
         // listOmsRestSourceConfigs.groovy / saveOmsRestSourceConfig.groovy, its only other callers).
-        // buildHeaders below needs the real username/password/apiToken — the same reason
-        // OmsRestSourceSupport.lookupOrdersByExternalId documents at its own toPlainMap call ("NOT
-        // safeConfigMapFromPlain, which redacts secrets ... and would strip the auth token
-        // buildHeaders needs"). toPlainMap(null) is an empty (falsy) Map, so the null-config guard
-        // below still works.
+        // buildHeaders below needs the real username/password/apiToken. toPlainMap(null) is an empty
+        // (falsy) Map, so the null-config guard below still works.
         Map<String, Object> config = OmsRestSourceSupport.toPlainMap(rawConfig)
         if (!config) {
             return failure(["OMS REST source config could not be read."], [], retainRecords)

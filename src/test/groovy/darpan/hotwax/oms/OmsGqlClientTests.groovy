@@ -97,7 +97,8 @@ class OmsGqlClientTests {
         assertEquals("THROTTLED", thrown.code)
         // DAR-BE-116: bounded by time waited, not by a count a busy shared bucket can exhaust in seconds.
         assertTrue(slept.sum() >= OmsGqlClient.MAX_THROTTLE_WAIT_MILLIS, "gave up after ${slept.sum()} ms")
-        assertTrue(slept.every { it <= OmsGqlClient.MAX_THROTTLE_BACKOFF_MILLIS + 1000L }, "${slept}")
+        // DAR-BE-129: each wait is the reported deficit (400 at 50/s, plus the margin) or the short retry floor, never 1-2-4-8 s.
+        assertTrue(slept.every { it <= 8_500L }, "${slept}")
     }
 
     /** DAR-BE-116 live: a 975-cost page lost to cheaper calls ten times running and failed its extract. */

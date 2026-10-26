@@ -195,8 +195,9 @@ class OmsGqlQueries {
     // DAR-BE-116 (2026-10-23): sized to the 1000 one-query cap from costs logged live on gorjana (returns
     // 30 -> 690, 60 -> 1260; returnItems 50 -> 560, 100 -> 1110; the by-id lookups 100 -> 210-310). The
     // bigger bucket is spent by parallel slices, not by bigger pages.
-    static final int RETURNS_PAGE_SIZE = 45
-    static final int RETURNS_RESERVATION = 1000      // ~60 + 45 x 21
+    // DAR-BE-129: 45 asked 1020 on gorjana 2026-10-26 (over the 1000 cap: each such page was refused, halved and asked again).
+    static final int RETURNS_PAGE_SIZE = 43
+    static final int RETURNS_RESERVATION = 1000      // ~60 + 43 x 21.3
     static final int RETURN_ITEMS_ID_CHUNK = 85
     static final int RETURN_ITEMS_PAGE_SIZE = 85
     static final int RETURN_ITEMS_RESERVATION = 1000 // ~10 + 85 x 11
@@ -257,6 +258,18 @@ class OmsGqlQueries {
 }'''
     }
 
+    /** DAR-BE-129. The exchange pair verify's orders by Shopify externalId: every type, every date. */
+    static final int PAIR_ORDERS_RESERVATION = 550   // 100 + 60 x 7 scalars
+
+    static String pairOrdersDocument() {
+        return '''query OmsPairOrders($q: String, $first: Int, $after: String) {
+  orders(query: $q, first: $first, after: $after) {
+    edges { node { orderId externalId orderName orderTypeId statusId grandTotal orderDate } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
     /** DAR-BE-111. An order's status by OMS order id: NetSuite's never-shipped, never-billed orders asked of HotWax. */
     static String orderStatusesDocument() {
         return '''query OmsOrderStatuses($q: String, $first: Int, $after: String) {
@@ -267,26 +280,15 @@ class OmsGqlQueries {
 }'''
     }
 
-    // DAR-BE-116: the ORDER_LINE_UNIT order page. Only what a unit reads from its order: the header scalars and the
-    // ship groups (facilityId). No identifications or paymentPreferences: nested lists are charged per requested slot
-    // per order, and they made a page 18 orders at 770 (live 2026-10-23). Header scalars cost ~1 each per order
-    // (probe 2026-10-23: 100 orders x 4 scalars requested 510); two ship-group slots of two fields ~7. DAR-UI-081: the
-    // bill-to customer's name, for the audit finding (gorjana 2026-10-26, 60 orders: 780 requested without it, 910 with),
-    // and each ship group's shipping method (60 orders: 1030, over the 1000 cap, so 55: ~950).
-    static final int UNIT_ORDERS_PAGE_SIZE = 55
-    static final int UNIT_ORDERS_RESERVATION = 1000
+    /**
+     * DAR-BE-129: the orders read one audit run shares between its order checks and its order-line checks: the OMS_GQL
+     * connector's keepFieldsBase, which already carries everything a unit reads from its order (header, bill-to customer,
+     * ship groups with facility and method). An order read whose own plan is this one joins the shared read.
+     */
+    static final Set<String> SHARED_ORDER_FIELDS = ["orderId", "orderName", "externalId", "grandTotal", "orderDate", "statusId",
+            "currencyUomId", "billToCustomer", "shipGroups"] as Set
 
-    static String unitOrdersDocument() {
-        return '''query OmsUnitOrders($q: String, $first: Int, $after: String) {
-  orders(query: $q, sortKey: ORDER_DATE, reverse: false, first: $first, after: $after) {
-    edges { node {
-      orderId orderName externalId statusId orderTypeId orderDate grandTotal billToCustomer { firstName lastName }
-      shipGroups(first: 2) { edges { node { shipGroupSeqId facilityId shipmentMethodTypeId } } }
-    } }
-    pageInfo { hasNextPage endCursor }
-  }
-}'''
-    }
+    static Map sharedOrdersPlan() { return orderGrainPagePlan(SHARED_ORDER_FIELDS) }
 
     // DAR-BE-116: the items an ORDER_LINE_UNIT extract flattens, asked by orderId in batches (nesting
     // shipGroups.orderItems costs ~6400 a page, live 2026-09-30). Seven scalars x 100 + 100.

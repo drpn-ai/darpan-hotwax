@@ -28,8 +28,11 @@ class OmsGqlClient {
      * (live: 10 in 15 s with the bucket hovering near 500); only a bucket that stays shut fails the call.
      */
     static final long MAX_THROTTLE_WAIT_MILLIS = 300_000L
-    /** Each throttled retry backs off 1s, 2s, 4s ... capped here, plus up to a second of jitter. */
-    static final long MAX_THROTTLE_BACKOFF_MILLIS = 15_000L
+    /**
+     * DAR-BE-129: a throttled retry waits what the governor says the reported deficit needs, and at least this plus up
+     * to a second of jitter, so a bucket that other spenders keep empty is not asked again at once.
+     */
+    static final long MIN_THROTTLE_BACKOFF_MILLIS = 1_000L
 
     private static final Logger logger = LoggerFactory.getLogger(OmsGqlClient.class)
 
@@ -97,11 +100,10 @@ class OmsGqlClient {
             } catch (OmsGqlException e) {
                 outcome = e.code
                 if (e.code != "THROTTLED" || throttledWait >= MAX_THROTTLE_WAIT_MILLIS) throw e
-                // observe() already recorded the drained bucket; back off on top of it so a starved call
-                // stops competing every second with the calls that keep winning.
-                backoff = Math.min(MAX_THROTTLE_BACKOFF_MILLIS, 1000L << Math.min(attempt, 4)) +
-                        (long) (Math.random() * 1000L)
+                // The answer's reported balance is now the governor's, so the next sleepMillisFor waits the deficit.
+                backoff = MIN_THROTTLE_BACKOFF_MILLIS + (long) (Math.random() * 1000L)
             } finally {
+                governor.settle(reservation, extensions)
                 governor.releaseCall()
                 // One line per call: where an extract's time goes (our wait vs OMS's answer) and the
                 // bucket exactly as OMS reports it, so a raised limit is visible without a probe.
@@ -126,10 +128,8 @@ class OmsGqlClient {
             throw new OmsGqlException("UNPARSEABLE", "HTTP ${status}: body was not JSON: ${raw?.take(200)}")
         }
         Map body = (Map) parsed
-        if (body.extensions instanceof Map) {
-            governor.observe((Map) body.extensions)
-            extensionsOut.putAll((Map) body.extensions)
-        }
+        // The caller settles the governor with these (DAR-BE-129), whatever the answer was.
+        if (body.extensions instanceof Map) extensionsOut.putAll((Map) body.extensions)
 
         // Two error shapes, NOT interchangeable. GraphQL answers `errors` as a List of objects; Moqui's
         // REST layer answers it as a plain String beside `errorCode`. Never coerce with `as List` —

@@ -44,9 +44,10 @@ class OmsGqlConnectorWiringTests {
     @Test
     void itKeepsTheRestProjectionBaseSoBothExtractsEmitTheSameShape() {
         String seed = read(SEED)
-        String base = 'keepFieldsBase="orderId,orderName,externalId,grandTotal,orderDate,statusId"'
-        assertTrue(row(seed, 'systemEnumId="OMS"').contains(base))
-        assertTrue(row(seed, 'systemEnumId="OMS_GQL"').contains(base))
+        String base = 'keepFieldsBase="orderId,orderName,externalId,grandTotal,orderDate,statusId'
+        assertTrue(row(seed, 'systemEnumId="OMS"').contains(base + '"'))
+        // DAR-UI-081: GraphQL keeps REST's base and adds the order basics a finding shows.
+        assertTrue(row(seed, 'systemEnumId="OMS_GQL"').contains(base + ',currencyUomId,billToCustomer,shipGroups"'))
     }
 
     @Test

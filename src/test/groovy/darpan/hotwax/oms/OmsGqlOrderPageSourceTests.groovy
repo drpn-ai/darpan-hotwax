@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
 import static org.junit.jupiter.api.Assertions.assertFalse
+import static org.junit.jupiter.api.Assertions.assertNull
 import static org.junit.jupiter.api.Assertions.assertThrows
 import static org.junit.jupiter.api.Assertions.assertTrue
 
@@ -210,13 +211,34 @@ class OmsGqlOrderPageSourceTests {
             assertEquals("productId:P00101,P00102", ((Map) client.calls[2].variables).q)
             assertEquals("facilityId:STORE_1,WH", ((Map) client.calls[3].variables).q)
             assertEquals(["Store STORE_1", "Store STORE_1", "Store WH"], recs.sort { it.orderItemSeqId }*.facilityName)
-            // DAR-BE-116 lean unit read: the ship groups (facility) and the header, nothing a unit never reads.
+            // DAR-BE-129: a unit reads its orders in the shared orders document, so an order read of the window can share it.
             String doc = client.calls[0].document as String
-            assertTrue(doc.contains("shipGroups(first: 2)"))
+            assertEquals(OmsGqlQueries.sharedOrdersPlan().document, doc)
+            assertTrue(doc.contains("shipGroups(first: 3)"))
             assertFalse(doc.contains("identifications"))
-            assertFalse(doc.contains("paymentPreferences"))
             assertTrue(doc.contains("grandTotal"), "DAR-BE-118: 0 names a partial payment, which never reaches NetSuite")
             assertEquals("orderId:M1", ((Map) client.calls[1].variables).q)
+        } finally { out.delete() }
+    }
+
+    @Test
+    void anItemOutsideTheReadShipGroupsOrWithNoProductStillWritesItsUnit() {
+        // DAR-BE-129: the order read takes two ship groups, so a third group's item arrives with no facility; on
+        // 2026-10-26 that null key failed a 20-minute Oct 1-25 extract.
+        Map noProduct = item("M1", "00102", "00001") + [productId: null]
+        ScriptedClient client = new ScriptedClient([
+                ordersPage([unitOrder("M1")], false),
+                itemsPage([item("M1", "00101", "00003"), noProduct]),
+                productsPage(["P00101"]),
+                facilitiesPage(["STORE_1", "WH"])])
+        File out = File.createTempFile("gql-", ".json")
+        try {
+            Map result = run(client, out, null, null, UNIT_OPTIONS)
+            assertEquals([], result.errors)
+            List<Map> recs = (List<Map>) (new JsonSlurper().parse(out) as Map).records
+            assertEquals(["00101", "00102"], recs*.orderItemSeqId.sort())
+            assertNull(recs.find { it.orderItemSeqId == "00101" }.facilityName)
+            assertNull(recs.find { it.orderItemSeqId == "00102" }.sku)
         } finally { out.delete() }
     }
 
@@ -251,14 +273,16 @@ class OmsGqlOrderPageSourceTests {
     @Test
     void twoUnitExtractsOfOneWindowShareOneReadAndKeepTheirOwnFilters() {
         OmsGqlSharedRead.reset()
+        OmsGqlLookupCache.reset()
         List<String> asked = Collections.synchronizedList([])
         java.util.concurrent.CountDownLatch both = new java.util.concurrent.CountDownLatch(2)
         OmsGqlClient client = new OmsGqlClient(CONFIG, { String u, Map h, String b -> [statusCode: 200, body: "{}"] }) {
             @Override
             Map execute(String document, Map variables, int reservation) {
                 asked.add(document.contains("orderItems(") ? "items" : document.contains("products(") ? "products" :
-                        document.contains("facilities(") ? "facilities" : "orders")
+                        document.contains("facilities(") ? "facilities" : document.contains("orderItemAssocs(") ? "exchange" : "orders")
                 both.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                if (document.contains("orderItemAssocs(")) return [data: [orderItemAssocs: [edges: [], pageInfo: [hasNextPage: false]]]]
                 if (document.contains("products(")) return [data: productsPage(["P00101", "P00102"]).data]
                 if (document.contains("facilities(")) return [data: facilitiesPage(["STORE_1", "WH"]).data]
                 if (document.contains("orderItems(")) {
@@ -282,13 +306,59 @@ class OmsGqlOrderPageSourceTests {
                 } as java.util.concurrent.Callable)
             }
             futures.each { assertEquals([], ((Map) it.get(10, java.util.concurrent.TimeUnit.SECONDS)).errors) }
-            assertEquals(["facilities", "items", "orders", "products"], asked.sort(), "one orders page and one items, products and facilities pass, for both extracts")
+            assertEquals(["exchange", "facilities", "items", "orders", "products"], asked.sort(),
+                    "one orders page, its exchange pass and one items, products and facilities pass, for both extracts")
             assertEquals(["00101"], ((List<Map>) (new JsonSlurper().parse(outs[0]) as Map).records)*.orderItemSeqId)
             assertEquals(["00102"], ((List<Map>) (new JsonSlurper().parse(outs[1]) as Map).records)*.orderItemSeqId)
             outs*.delete()
         } finally {
             pool.shutdownNow()
             OmsGqlSharedRead.reset()
+            OmsGqlLookupCache.reset()
+        }
+    }
+
+    /** DAR-BE-129: the Oct 1-25 audit read the month's orders twice, once per shape; now one read serves both. */
+    @Test
+    void anOrderExtractAndAUnitExtractOfOneWindowShareOneOrdersRead() {
+        OmsGqlSharedRead.reset()
+        OmsGqlLookupCache.reset()
+        List<String> asked = Collections.synchronizedList([])
+        java.util.concurrent.CountDownLatch both = new java.util.concurrent.CountDownLatch(2)
+        OmsGqlClient client = new OmsGqlClient(CONFIG, { String u, Map h, String b -> [statusCode: 200, body: "{}"] }) {
+            @Override
+            Map execute(String document, Map variables, int reservation) {
+                asked.add(document.contains("orderItems(") ? "items" : document.contains("products(") ? "products" :
+                        document.contains("facilities(") ? "facilities" : document.contains("orderItemAssocs(") ? "exchange" : "orders")
+                both.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                if (document.contains("orderItemAssocs(")) return [data: [orderItemAssocs: [edges: [], pageInfo: [hasNextPage: false]]]]
+                if (document.contains("products(")) return [data: productsPage(["P00101"]).data]
+                if (document.contains("facilities(")) return [data: facilitiesPage(["STORE_1", "WH"]).data]
+                if (document.contains("orderItems(")) return [data: itemsPage([item("M1", "00101", "00001")]).data]
+                return [data: ordersPage([unitOrder("M1")], false).data]
+            }
+        }
+        client.realEndpoint = true
+        def pool = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            List<File> outs = [File.createTempFile("gql-", ".json"), File.createTempFile("gql-", ".json")]
+            List<String> keep = OmsGqlQueries.SHARED_ORDER_FIELDS as List<String>
+            List futures = [
+                    pool.submit({ -> both.countDown()
+                        OmsRestSourceSupport.extractOrdersToFile(CONFIG, FROM, THRU, outs[0], keep, null, null, null, OmsGqlOrderPageSource.fetcher(client))
+                    } as java.util.concurrent.Callable),
+                    pool.submit({ -> both.countDown()
+                        OmsRestSourceSupport.extractOrdersToFile(CONFIG, FROM, THRU, outs[1], null, null, null, UNIT_OPTIONS, OmsGqlOrderPageSource.fetcher(client))
+                    } as java.util.concurrent.Callable)]
+            futures.each { assertEquals([], ((Map) it.get(10, java.util.concurrent.TimeUnit.SECONDS)).errors) }
+            assertEquals(["exchange", "facilities", "items", "orders", "products"], asked.sort(), "the orders page is asked once for both")
+            assertEquals(["M1"], ((List<Map>) (new JsonSlurper().parse(outs[0]) as Map).records)*.orderId)
+            assertEquals(["00101"], ((List<Map>) (new JsonSlurper().parse(outs[1]) as Map).records)*.orderItemSeqId)
+            outs*.delete()
+        } finally {
+            pool.shutdownNow()
+            OmsGqlSharedRead.reset()
+            OmsGqlLookupCache.reset()
         }
     }
 

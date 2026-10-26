@@ -184,6 +184,7 @@ class OmsGqlReturnsPageSourceTests {
     @Test
     void twoReturnsExtractsOfOneWindowShareOneReadAndKeepTheirOwnScope() {
         OmsGqlSharedRead.reset()
+        OmsGqlLookupCache.reset()
         java.util.concurrent.CountDownLatch both = new java.util.concurrent.CountDownLatch(2)
         Map<String, Closure> h = lookupsAnswering() + [returns: { Map v ->
             both.await(5, java.util.concurrent.TimeUnit.SECONDS)
@@ -214,6 +215,7 @@ class OmsGqlReturnsPageSourceTests {
         } finally {
             pool.shutdownNow()
             OmsGqlSharedRead.reset()
+            OmsGqlLookupCache.reset()
         }
     }
 

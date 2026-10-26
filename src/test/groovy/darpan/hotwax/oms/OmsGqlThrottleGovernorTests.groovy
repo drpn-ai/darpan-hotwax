@@ -50,12 +50,36 @@ class OmsGqlThrottleGovernorTests {
         assertEquals(400, g.getAvailable())
     }
 
+    /** DAR-BE-129: the reservation is taken when the caller is let go; the debt it leaves is what the wait pays off. */
     @Test
-    void reservingAfterSleepingSpendsTheRefilledReservation() {
-        OmsGqlThrottleGovernor g = new OmsGqlThrottleGovernor()
+    void reservingAfterSleepingLeavesTheDebtTheWaitPaysOff() {
+        long now = 1_000_000L
+        OmsGqlThrottleGovernor g = new OmsGqlThrottleGovernor({ -> now })
         g.observe(extensionsWith(100))
         g.sleepMillisFor(750)
-        assertEquals(0, g.getAvailable())
+        assertEquals(-650, g.getAvailable())
+    }
+
+    /** DAR-BE-129: refill() used to move the clock past the first caller's wait, so both woke together and overdrew. */
+    @Test
+    void queuedCallersWaitOneBehindAnother() {
+        long now = 1_000_000L
+        OmsGqlThrottleGovernor g = new OmsGqlThrottleGovernor({ -> now })
+        g.observe(extensionsWith(0, 2000))
+        assertEquals(1000L, g.sleepMillisFor(1000))    // 1000 at 2000/s, plus the margin
+        assertEquals(1500L, g.sleepMillisFor(1000))    // behind the first: 2000 owed
+    }
+
+    /** DAR-BE-129: the server charges the ACTUAL cost; its report gives back the part of the reservation not spent. */
+    @Test
+    void anAnswerCreditsTheUnspentPartOfItsReservation() {
+        long now = 1_000_000L
+        OmsGqlThrottleGovernor g = new OmsGqlThrottleGovernor({ -> now })
+        g.observe(extensionsWith(1000, 2000))
+        g.sleepMillisFor(800)
+        assertEquals(200, g.getAvailable())
+        g.settle(800, extensionsWith(400, 2000))       // it cost 600, not 800
+        assertEquals(400, g.getAvailable())
     }
 
     /** DAR-BE-116: parallel slices share one bucket, so a call that goes without waiting spends its reservation. */
@@ -70,13 +94,16 @@ class OmsGqlThrottleGovernorTests {
 
     /** DAR-BE-116 live: a response reports the bucket as it was before our other in-flight calls landed. */
     @Test
-    void anObservationNeverRaisesTheEstimateAboveWhatInFlightCallsLeft() {
+    void anAnswerIsReadLessTheReservationsStillOut() {
         long now = 1_000_000L
         OmsGqlThrottleGovernor g = new OmsGqlThrottleGovernor({ -> now })
         g.observe(extensionsWith(1000, 2000))
-        assertEquals(0L, g.sleepMillisFor(800))     // 200 left
-        g.observe(extensionsWith(900, 2000))        // an older response landing late
-        assertEquals(200, g.getAvailable())
+        assertEquals(0L, g.sleepMillisFor(400))     // A
+        assertEquals(0L, g.sleepMillisFor(400))     // B, 200 left
+        g.settle(400, extensionsWith(700, 2000))    // A cost 300; B is still out
+        assertEquals(300, g.getAvailable())
+        g.observe(extensionsWith(900, 2000))        // an answer no reservation paid for: B is still out
+        assertEquals(500, g.getAvailable())
     }
 
     @Test

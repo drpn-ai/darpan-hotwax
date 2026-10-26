@@ -60,7 +60,7 @@ class OmsGqlReturnsPageSource {
         try {
             if (keys) {
                 // DAR-BE-119: an older open finding's returns, by id, whatever their date.
-                keys.collate(OmsGqlQueries.LOOKUP_KEYS_CHUNK).each { List<String> chunk ->
+                OmsGqlOrderPageSource.runEach(keys.collate(OmsGqlQueries.LOOKUP_KEYS_CHUNK), OmsGqlOrderPageSource.CONCURRENCY) { List<String> chunk ->
                     fetchSlice(client, shared, scoped(OmsGqlQueries.keysFilter("returnId", chunk)))
                 }
             } else {
@@ -190,31 +190,30 @@ class OmsGqlReturnsPageSource {
         Map<String, Object> orderGrandTotals = [:]
         Map<String, String> orderItemExternalIds = [:]
         if (orderIds) {
-            fetchByIds(client, OmsGqlQueries.orderExternalIdsDocument(), "orders", "orderId", orderIds,
-                    OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_RESERVATION, pagination)
-                    .each { Map n ->
-                        orderExternalIds[n.orderId as String] = n.externalId as String
-                        orderNames[n.orderId as String] = n.orderName as String
-                        orderDates[n.orderId as String] = n.orderDate as String
-                        orderCustomers[n.orderId as String] = OmsOrderLineUnitSupport.customerNameOf(n)
-                        orderProductStoreIds[n.orderId as String] = n.productStoreId as String
-                        orderGrandTotals[n.orderId as String] = n.grandTotal
-                        orderNetsuiteIds[n.orderId as String] = netsuiteOrderId(n)
-                    }
-            fetchByIds(client, OmsGqlQueries.orderItemExternalIdsDocument(), "orderItems", "orderId", orderIds,
-                    OmsGqlQueries.ORDER_ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.ORDER_ITEMS_RESERVATION, pagination)
-                    .each { Map n -> orderItemExternalIds["${n.orderId}|${n.orderItemSeqId}".toString()] = n.externalId as String }
+            ordersById(client, orderIds, pagination).each { String orderId, Object o ->
+                Map n = (Map) o
+                orderExternalIds[orderId] = n.externalId as String
+                orderNames[orderId] = n.orderName as String
+                orderDates[orderId] = n.orderDate as String
+                orderCustomers[orderId] = OmsOrderLineUnitSupport.customerNameOf(n)
+                orderProductStoreIds[orderId] = n.productStoreId as String
+                orderGrandTotals[orderId] = n.grandTotal
+                orderNetsuiteIds[orderId] = netsuiteOrderId(n)
+            }
+            OmsGqlLookupCache.lookup(client, OmsGqlLookupCache.ORDER_ITEMS, orderIds) { List<String> ids ->
+                fetchByIds(client, OmsGqlQueries.orderItemExternalIdsDocument(), "orderItems", "orderId", ids,
+                        OmsGqlQueries.ORDER_ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.ORDER_ITEMS_RESERVATION, pagination)
+                        .groupBy { it.orderId as String }
+            }.each { String orderId, Object lines ->
+                ((List<Map>) lines).each { Map n -> orderItemExternalIds["${orderId}|${n.orderItemSeqId}".toString()] = n.externalId as String }
+            }
         }
-        List<String> productIds = items.collect { it.productId as String }.findAll { it }.unique()
-        Map<String, String> productNames = [:]
-        Map<String, String> productNetsuiteIds = [:]
-        if (productIds) {
-            fetchByIds(client, OmsGqlQueries.productNamesDocument(), "products", "productId", productIds,
-                    OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_RESERVATION, pagination)
-                    .each { Map n -> productNames[n.productId as String] = n.internalName as String }
+        List<String> productIds = items.collect { it.productId as String }
+        Map<String, Object> productNames = productNames(client, productIds, pagination)
+        Map<String, Object> productNetsuiteIds = OmsGqlLookupCache.lookup(client, OmsGqlLookupCache.PRODUCT_NETSUITE_ID, productIds) { List<String> ids ->
             fetchByIds(client, OmsGqlQueries.productNetsuiteIdsDocument(), "goodIdentifications", OmsGqlQueries.NETSUITE_PRODUCT_ID_KEY,
-                    productIds, OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_RESERVATION, pagination)
-                    .findAll { !it.thruDate }.each { Map n -> productNetsuiteIds[n.productId as String] = n.idValue as String }
+                    ids, OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_RESERVATION, pagination)
+                    .findAll { !it.thruDate }.collectEntries { Map n -> [(n.productId as String): n.idValue as String] }
         }
         Map lookups = [orderExternalIds: orderExternalIds, orderNames: orderNames, orderDates: orderDates, orderCustomers: orderCustomers, orderProductStoreIds: orderProductStoreIds, orderNetsuiteIds: orderNetsuiteIds,
                        orderGrandTotals: orderGrandTotals, exchangeChains: exchangeChains(client, items, pagination),
@@ -240,10 +239,7 @@ class OmsGqlReturnsPageSource {
                     if (order) exchangeOrderOf[n.returnId as String] = order
                 }
         if (!exchangeOrderOf) return [:]
-        Map<String, Map> orders = [:]
-        fetchByIds(client, OmsGqlQueries.orderExternalIdsDocument(), "orders", "orderId", exchangeOrderOf.values().toList().unique(),
-                OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_RESERVATION, pagination)
-                .each { Map n -> orders[n.orderId as String] = n }
+        Map<String, Object> orders = ordersById(client, exchangeOrderOf.values().toList(), pagination)
         // Only an exchange order NetSuite does not have: the open return holding it, on the order(s) sharing its Shopify id.
         List<String> blockedShopifyIds = exchangeOrderOf.values().collect { orders[it] }.findAll { it && !netsuiteOrderId(it) && it.externalId }
                 *.externalId.collect { it as String }.unique()
@@ -263,6 +259,24 @@ class OmsGqlReturnsPageSource {
             Map open = (openByShopifyId[o?.externalId as String] ?: []).find { it.returnId != returnId }
             [(returnId): [exchangeOrderId: orderId, exchangeOrderName: o?.orderName, exchangeOrderNetsuiteId: netsuiteOrderId(o),
                           openReturnOnOrderId: open?.returnId, openReturnOnOrderStatus: open?.statusId]]
+        }
+    }
+
+    /** DAR-BE-129: product id -> internalName (the SKU), cached per read scope. Shared with the order-items read. */
+    static Map<String, Object> productNames(OmsGqlClient client, List<String> productIds, Map pagination) {
+        return OmsGqlLookupCache.lookup(client, OmsGqlLookupCache.PRODUCT_NAME, productIds) { List<String> ids ->
+            fetchByIds(client, OmsGqlQueries.productNamesDocument(), "products", "productId", ids,
+                    OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_RESERVATION, pagination)
+                    .findAll { it.internalName }.collectEntries { Map n -> [(n.productId as String): n.internalName as String] }
+        }
+    }
+
+    /** DAR-BE-129: order id -> its orderExternalIdsDocument node, cached per read scope for a run's pages. */
+    private static Map<String, Object> ordersById(OmsGqlClient client, List<String> orderIds, Map pagination) {
+        return OmsGqlLookupCache.lookup(client, OmsGqlLookupCache.ORDER, orderIds) { List<String> ids ->
+            fetchByIds(client, OmsGqlQueries.orderExternalIdsDocument(), "orders", "orderId", ids,
+                    OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_RESERVATION, pagination)
+                    .collectEntries { Map n -> [(n.orderId as String): n] }
         }
     }
 

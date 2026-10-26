@@ -7,6 +7,14 @@ package darpan.hotwax.oms
  * THROTTLED error code. Downstream that is indistinguishable from "this window held no orders", so
  * an unpaced client writes an empty extract and reports a clean reconciliation.
  *
+ * DAR-BE-129: a token bucket that may go into debt. Each call takes its reservation when it is let go, so callers
+ * queue behind one another (the balance goes negative and the next caller waits it off). Each answer then
+ * resets the balance to what the server reports, less the reservations still out (let go, not yet answered):
+ * the server charges a call's ACTUAL cost (~70% of what is reserved on gorjana), and only its report gives
+ * the difference back. Before this, refill() moved the clock past the wait promised to the caller ahead, so
+ * queued callers fired together and drew THROTTLED (23% of the 2026-10-26 Oct 1-25 calls), and an answer
+ * could only ever lower the estimate, so the unspent reservations were never credited.
+ *
  * Pure: it returns a duration and the caller sleeps, so the policy is testable without a clock.
  */
 class OmsGqlThrottleGovernor {
@@ -42,7 +50,10 @@ class OmsGqlThrottleGovernor {
     /** False until a response has reported the bucket. NOT a sentinel balance: an overdrawn bucket is negative. */
     private boolean observed = false
     private int restoreRate = 50
+    private double maximum = Double.MAX_VALUE
     private long updatedAt = 0L
+    /** Reservations let go and not yet answered: the server has not reported them yet. */
+    private long outstanding = 0L
 
     OmsGqlThrottleGovernor(Closure<Long> clock = { -> System.currentTimeMillis() }) {
         this.clock = clock
@@ -50,55 +61,45 @@ class OmsGqlThrottleGovernor {
 
     synchronized int getAvailable() { if (!observed) return -1; refill(); return (int) Math.floor(available) }
 
-    /** The bucket refills at the server's rate between calls (DAR-BE-116: 2000/s on gorjana). */
+    /** The bucket refills at the server's rate between calls (DAR-BE-116: 2000/s on gorjana), up to its maximum. */
     private void refill() {
         long now = (long) clock.call()
-        if (observed && updatedAt > 0L && now > updatedAt) {
-            available += (now - updatedAt) * restoreRate / 1000d
-        }
+        if (observed && now > updatedAt) available = Math.min(maximum, available + (now - updatedAt) * restoreRate / 1000d)
         updatedAt = now
     }
 
     /**
-     * Read the bucket back out of a response's `extensions` block. Missing status = no update. An
-     * observation only ever LOWERS the estimate: the server reported the bucket before our other in-flight
-     * calls landed (live DAR-BE-116: 12 parallel slices took 20000 to 3 and drew 56 THROTTLED), and it is
-     * the only source that sees spending by other extracts, so the smaller of the two is the truth.
+     * Milliseconds to wait before issuing a call reserving `reservation`, and the reservation is taken: zero when the
+     * balance covers it (or nothing is known yet), else the time the refill needs to pay off the balance and the
+     * reservation. A later caller sees the debt this one left and queues behind it.
      */
-    synchronized void observe(Map extensions) {
+    synchronized long sleepMillisFor(int reservation) {
+        outstanding += reservation
+        if (!observed) return 0L
+        refill()
+        long wait = available >= reservation ? 0L :
+                (long) Math.ceil((reservation - available) / (double) Math.max(1, restoreRate) * 1000) + SAFETY_MARGIN_MS
+        available -= reservation
+        return wait
+    }
+
+    /**
+     * A call let go with `reservation` has its answer: the balance becomes what the server reports less the
+     * reservations still out. An answer with no bucket status (an error) only gives the reservation up.
+     */
+    synchronized void settle(int reservation, Map extensions) {
+        outstanding = Math.max(0L, outstanding - reservation)
         Map cost = (extensions?.get("cost") ?: [:]) as Map
         Map status = (cost.get("throttleStatus") ?: [:]) as Map
-        if (status.get("restoreRate") != null) {
-            restoreRate = ((Number) status.get("restoreRate")).intValue()
-        }
+        if (status.get("restoreRate") != null) restoreRate = ((Number) status.get("restoreRate")).intValue()
+        if (status.get("maximumAvailable") != null) maximum = ((Number) status.get("maximumAvailable")).doubleValue()
         if (status.get("currentlyAvailable") != null) {
-            refill()
-            double reported = ((Number) status.get("currentlyAvailable")).doubleValue()
-            available = observed ? Math.min(available, reported) : reported
+            available = ((Number) status.get("currentlyAvailable")).doubleValue() - outstanding
+            updatedAt = (long) clock.call()
             observed = true
         }
     }
 
-    /**
-     * Milliseconds to wait before issuing a call reserving `reservation`. Zero when the bucket already
-     * covers it, or when nothing has been observed yet. Either way the reservation is spent: after a wait
-     * the bucket refills to exactly the reservation and the caller's call takes it, so it reads 0.
-     */
-    synchronized long sleepMillisFor(int reservation) {
-        if (!observed) return 0L
-        refill()
-        if (available >= reservation) {
-            // Spent now, so a concurrent caller on the same bucket sees only what is left.
-            available -= reservation
-            return 0L
-        }
-        double deficit = reservation - available
-        int rate = Math.max(1, restoreRate)
-        long wait = (long) Math.ceil(deficit / (double) rate * 1000) + SAFETY_MARGIN_MS
-        // The wait is this caller's; the bucket it refills to is spent by this call. Later callers queue
-        // behind it because refill() starts from now and the bucket reads 0 until the wait has passed.
-        available = 0d
-        updatedAt = (long) clock.call() + wait
-        return wait
-    }
+    /** An answer that no reservation of this governor's paid for (a probe, a test). */
+    void observe(Map extensions) { settle(0, extensions) }
 }

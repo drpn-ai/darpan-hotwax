@@ -7,6 +7,8 @@ import darpan.facade.common.SharedConfigAccessSupport
 import darpan.reconciliation.automation.SourceEndpointAccessSupport
 import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
 import darpan.reconciliation.source.SourceFilterSupport
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 
 import static darpan.common.ValueSupport.boundedInt
 import static darpan.common.ValueSupport.normalize
@@ -29,6 +31,7 @@ import java.util.concurrent.Future
 import java.util.zip.GZIPInputStream
 
 class OmsRestSourceSupport {
+    private static final Logger logger = LoggerFactory.getLogger(OmsRestSourceSupport.class)
     static final String DEFAULT_ORDERS_PATH = "/rest/s1/oms/orders"
     static final String DEFAULT_FILE_NAME_PREFIX = "oms-orders"
     static final String DEFAULT_API_KEY_HEADER_NAME = "api_key"
@@ -576,90 +579,6 @@ class OmsRestSourceSupport {
                 SharedConfigAccessSupport.CONFIG_TYPE_HOTWAX_OMS, configId, requiredEndpoint)) {
             ec.message.addError("OMS REST source config ${configId} is not enabled for ${requiredEndpoint}.".toString())
         }
-    }
-
-    static final int PAIR_LOOKUP_MAX_IDS = 100
-
-    /**
-     * Point lookup of full order groups by Shopify externalId — escapes run windows by construction
-     * (callers pass a wide orderDate window). Conservative: any per-id failure fails the whole call.
-     */
-    static Map<String, Object> lookupOrdersByExternalId(Map rawConfig, Collection externalIds,
-                                                        Long fromMillis, Long thruMillis) {
-        // Plain mapping like the extraction path (extractOrdersInternal) — NOT safeConfigMapFromPlain,
-        // which redacts secrets for response metadata and would strip the auth token buildHeaders needs.
-        Map config = toPlainMap(rawConfig)
-        List<String> errors = []
-        Map<String, Object> ordersByExternalId = [:]
-        List<String> ids = (externalIds ?: []).collect { normalize(it) }.findAll { it }.unique()
-        if (!ids) return [ok: false, ordersByExternalId: [:], errors: ["No externalIds provided for OMS pair lookup."]]
-        if (ids.size() > PAIR_LOOKUP_MAX_IDS) {
-            return [ok: false, ordersByExternalId: [:],
-                    errors: ["OMS pair lookup requested ${ids.size()} ids, above the ${PAIR_LOOKUP_MAX_IDS}-id cap.".toString()]]
-        }
-        Map<String, String> headers
-        String endpointUrl
-        try {
-            headers = buildHeaders(config)
-            endpointUrl = buildOrdersEndpointUrl(config.baseUrl as String, config.ordersPath as String)
-        } catch (Exception e) {
-            return [ok: false, ordersByExternalId: [:], errors: ["OMS pair lookup setup failed: ${e.message}".toString()]]
-        }
-        for (String externalId : ids) {
-            String url = buildOrdersUrl(endpointUrl, fromMillis, thruMillis,
-                    [externalId: externalId, pageSize: 50, pageIndex: 0])
-            Map response
-            try {
-                response = callOmsEndpoint(url, headers, config)
-            } catch (Exception e) {
-                return [ok: false, ordersByExternalId: [:], errors: ["OMS pair lookup for ${externalId} failed: ${e.message}".toString()]]
-            }
-            int statusCode = (response?.statusCode ?: 0) as int
-            if (statusCode < 200 || statusCode >= 300) {
-                return [ok: false, ordersByExternalId: [:], errors: ["OMS pair lookup for ${externalId} failed with HTTP ${statusCode}.".toString()]]
-            }
-            List records = []
-            try {
-                def parsed = JSON_SLURPER.parseText((response.body ?: "null") as String)
-                if (parsed instanceof List) records = (List) parsed
-                else if (parsed instanceof Map) {
-                    Object ordersValue = ((Map) parsed).get('orders')
-                    records = ordersValue instanceof List ? (List) ordersValue
-                            : (((Map) parsed).values().find { it instanceof List } ?: []) as List
-                }
-            } catch (Exception e) {
-                return [ok: false, ordersByExternalId: [:], errors: ["OMS pair lookup for ${externalId} returned unparseable JSON: ${e.message}".toString()]]
-            }
-            // Echo validation: a tenant-configured OMS endpoint that ignores the (possibly unknown)
-            // externalId= query param would otherwise return arbitrary window orders, producing false
-            // "original present" evidence and garbage pair sums. Records whose own externalId field
-            // does not echo the id we asked for are dropped. If the endpoint returned records at all
-            // but NONE echoed the requested id, the filter is evidently unsupported — that is proof
-            // the response is not trustworthy for this id, so the whole lookup fails rather than
-            // risking a confidently-wrong diff row. A genuinely empty response (zero records) is left
-            // alone: that is valid evidence of "no such order," not a sign the filter was ignored.
-            List<Map> rawMapRecords = records.findAll { it instanceof Map } as List<Map>
-            List<Map> echoedRecords = rawMapRecords.findAll { Map record -> normalize(record.get('externalId')) == externalId }
-            if (rawMapRecords && !echoedRecords) {
-                return [ok: false, ordersByExternalId: [:],
-                        errors: ["OMS pair lookup for ${externalId} failed: endpoint did not honor externalId filter (no returned record echoed externalId ${externalId}).".toString()]]
-            }
-            ordersByExternalId.put(externalId, echoedRecords.collect { Map record -> summarizePairOrder(record) })
-        }
-        return [ok: true, ordersByExternalId: ordersByExternalId, errors: errors]
-    }
-
-    protected static Map<String, Object> summarizePairOrder(Map record) {
-        return [
-                omsOrderId      : normalize(record.get('orderId')),
-                externalId      : normalize(record.get('externalId')),
-                orderName       : normalize(record.get('orderName')),
-                orderTypeId     : normalize(record.get('orderTypeId')),
-                statusId        : normalize(record.get('statusId')),
-                grandTotal      : record.get('grandTotal'),
-                orderDate       : record.get('orderDate'),
-                hasExchangeAssoc: containsExchangeOrderAssociation(record),
-        ]
     }
 
     static String safeFileName(Object rawName, String fallback = null) {
@@ -2095,10 +2014,18 @@ class OmsRestSourceSupport {
         // timeout behind a buffering proxy.
         if (request.acceptGzip != false) connection.setRequestProperty("Accept-Encoding", "gzip")
 
-        int statusCode = connection.responseCode
-        InputStream stream = statusCode >= 400 ? connection.errorStream : connection.inputStream
-        String body = readResponseBody(stream, connection.getContentEncoding())
-        return [statusCode: statusCode, body: body, headers: connection.headerFields]
+        long started = System.currentTimeMillis()
+        Integer statusCode = null
+        try {
+            statusCode = connection.responseCode
+            InputStream stream = statusCode >= 400 ? connection.errorStream : connection.inputStream
+            String body = readResponseBody(stream, connection.getContentEncoding())
+            return [statusCode: statusCode, body: body, headers: connection.headerFields]
+        } finally {
+            // DAR-BE-129. One line per OMS REST request, so a run's calls can be counted by system and endpoint.
+            logger.info("oms rest call method={} path={} status={} ms={}", request.method,
+                    new URL(request.url as String).path, statusCode, System.currentTimeMillis() - started)
+        }
     }
 
     protected static String readResponseBody(InputStream stream, String contentEncoding) {

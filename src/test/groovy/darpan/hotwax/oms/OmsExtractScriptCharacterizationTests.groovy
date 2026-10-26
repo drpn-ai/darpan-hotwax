@@ -144,8 +144,9 @@ class OmsExtractScriptCharacterizationTests {
                 "extract#HotWaxOmsTransferOrders"      : [windowedIn[0..4] + ["windowFieldName", "orderStatusIds"] + windowedIn[5..-1], plainOut],
                 "extract#HotWaxOmsOrderLineUnits"      : [unitIn, plainOut],
                 "extract#HotWaxOmsOrderItems"          : [unitIn, plainOut],
-                "lookup#HotWaxOmsOrdersByExternalId"   : [["omsRestSourceConfigId", "externalIds", "companyUserGroupId",
-                                                           "windowStartMillis", "windowEndMillis"], ["ok", "ordersByExternalId", "errors"]],
+                // DAR-BE-129: over GraphQL, any date, so no window.
+                "lookup#HotWaxOmsOrdersByExternalId"   : [["omsRestSourceConfigId", "externalIds", "companyUserGroupId"],
+                                                          ["ok", "ordersByExternalId", "errors"]],
                 "lookup#HotWaxOmsReturnsByExternalId"  : [["omsRestSourceConfigId", "externalIds", "companyUserGroupId"],
                                                           ["ok", "foundIds", "missingIds", "unresolvedIds", "errors"]],
         ]
@@ -608,41 +609,28 @@ class OmsExtractScriptCharacterizationTests {
         }
     }
 
+    /** DAR-BE-129: the pair lookup asks GraphQL by externalId alone, any date: there is no window to send. */
     @Test
-    void lookupOrdersDefaultsToATenYearWindowEndingTomorrow() {
-        List<String> urls = []
-        OmsRestSourceSupport.setHttpClient { Map request ->
-            urls.add(request.url as String)
-            [statusCode: 200, body: JsonOutput.toJson([orders: [salesOrder("O1", [externalId: "E1"])]])]
+    void lookupOrdersAsksGraphqlByExternalIdWithNoWindow() {
+        List<Map> asked = []
+        OmsPairLookupSupport.setClientFactory { Map config ->
+            new OmsGqlClient(config, { String u, Map h, String body ->
+                Map sent = (Map) new groovy.json.JsonSlurper().parseText(body)
+                asked.add((Map) sent.variables)
+                Map data = sent.query.toString().contains("orderItemAssocs") ? [orderItemAssocs: [edges: [], pageInfo: [hasNextPage: false]]] :
+                        [orders: [edges: [[node: [orderId: "O1", externalId: "E1"]]], pageInfo: [hasNextPage: false]]]
+                [statusCode: 200, body: JsonOutput.toJson([data: data, errors: []])]
+            })
         }
-        long before = System.currentTimeMillis()
-
-        Map result = callService("lookup#HotWaxOmsOrdersByExternalId", [omsRestSourceConfigId: CONFIG_ID, externalIds: ["E1"],
-                companyUserGroupId: TENANT])
-
-        assertEquals(true, result.ok, result.toString())
-        assertEquals([], result.errors)
-        assertEquals(["E1"], (result.ordersByExternalId as Map).keySet() as List)
-        long from = (urls.first() =~ /orderDate_from=(\d+)/)[0][1] as long
-        long thru = (urls.first() =~ /orderDate_thru=(\d+)/)[0][1] as long
-        assertEquals(3650L * 86400000L, thru - from)
-        assertTrue(thru >= before + 86400000L && thru <= System.currentTimeMillis() + 86400000L, "thru = now + 1 day")
-    }
-
-    @Test
-    void lookupOrdersHonoursAnExplicitWindow() {
-        List<String> urls = []
-        OmsRestSourceSupport.setHttpClient { Map request ->
-            urls.add(request.url as String)
-            [statusCode: 200, body: JsonOutput.toJson([orders: []])]
+        try {
+            Map result = callService("lookup#HotWaxOmsOrdersByExternalId", [omsRestSourceConfigId: CONFIG_ID, externalIds: ["E1"],
+                    companyUserGroupId: TENANT])
+            assertEquals(true, result.ok, result.toString())
+            assertEquals(["O1"], ((List) ((Map) result.ordersByExternalId).E1)*.omsOrderId)
+            assertEquals("externalId:E1", asked.first().q)
+        } finally {
+            OmsPairLookupSupport.setClientFactory(null)
         }
-
-        Map result = callService("lookup#HotWaxOmsOrdersByExternalId", [omsRestSourceConfigId: CONFIG_ID, externalIds: ["E1"],
-                companyUserGroupId: TENANT, windowStartMillis: 1777593600000L, windowEndMillis: 1777680000000L])
-
-        assertTrue(urls.first().contains("orderDate_from=1777593600000"), urls.first())
-        assertTrue(urls.first().contains("orderDate_thru=1777680000000"), urls.first())
-        assertNotNull(result.ok)
     }
 
     @Test
