@@ -61,6 +61,7 @@ class OmsGqlReturnAssembler {
      */
     static Map<String, Object> build(Map node, List<Map> items, Map lookups) {
         Map orderExternalIds = (Map) (lookups?.orderExternalIds ?: [:])
+        Map orderNames = (Map) (lookups?.orderNames ?: [:])
         Map orderProductStoreIds = (Map) (lookups?.orderProductStoreIds ?: [:])
         Map orderNetsuiteIds = (Map) (lookups?.orderNetsuiteIds ?: [:])
         Map orderGrandTotals = (Map) (lookups?.orderGrandTotals ?: [:])
@@ -97,6 +98,9 @@ class OmsGqlReturnAssembler {
         record.externalId = normalize(node.externalId)
         // REST omits the key for a return with no items rather than sending null.
         if (sorted) record.orderExternalId = orderExternalIds.get(sorted.first().orderId as String)
+        // DAR-UI-080: the origin order's name (#GOR...), for the audit finding. Set only when known, like orderNetsuiteId below.
+        String orderName = sorted ? orderNames.get(sorted.first().orderId as String) : null
+        if (orderName) record.orderName = orderName
         // DAR-BE-068: the ONE key REST lacks. Return.productStoreId is null on gorjana, so a return's store is
         // its origin order's (the order orderExternalId names). Filterable only: not in keepFieldsBase, so
         // projection strips it before the compare and the compared record stays identical to REST's.
@@ -121,6 +125,9 @@ class OmsGqlReturnAssembler {
         // never an RMA. Set only when present, so the REST-parity record shape is unchanged.
         String creditMemoId = activeIdentification(node, "NETSUITE_CM_ID")
         if (creditMemoId) record.netsuiteCreditMemoId = creditMemoId
+        // DAR-UI-080: the AfterShip warranty the return was made under, for the audit finding. Set only when present.
+        String warrantyId = activeIdentification(node, "AFTSHIP_WTY_RMA_ID")
+        if (warrantyId) record.warrantyId = warrantyId
         record.returnTotal = number(total)
         record.currencyUomId = node.currencyUomId
         record.returnChannelEnumId = node.returnChannelEnumId

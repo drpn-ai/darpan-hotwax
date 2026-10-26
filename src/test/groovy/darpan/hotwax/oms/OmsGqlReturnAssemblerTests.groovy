@@ -106,6 +106,22 @@ class OmsGqlReturnAssemblerTests {
         assertFalse(OmsGqlReturnAssembler.build(node(), [item()], lookups()).containsKey("netsuiteCreditMemoId"))
     }
 
+    /** DAR-UI-080 (gorjana M263376 -> 6URJ7WK3): a warranty return carries its AfterShip warranty id; others have no key. */
+    @Test
+    void aWarrantyReturnCarriesItsWarrantyId() {
+        List idents = [[returnIdentificationTypeId: "AFTSHIP_WTY_RMA_ID", idValue: "6URJ7WK3", thruDate: null],
+                       [returnIdentificationTypeId: "SHOPIFY_RETURN_ID", idValue: "38318243971", thruDate: null]]
+        assertEquals("6URJ7WK3", OmsGqlReturnAssembler.build(node(identifications: idents), [item()], lookups()).warrantyId)
+        assertFalse(OmsGqlReturnAssembler.build(node(), [item()], lookups()).containsKey("warrantyId"))
+    }
+
+    /** DAR-UI-080: a return names its origin order by name; no key when the lookup did not answer. */
+    @Test
+    void aReturnCarriesItsOriginOrdersName() {
+        assertEquals("#GOR195470263", OmsGqlReturnAssembler.build(node(), [item()], lookups() + [orderNames: [GR1: "#GOR195470263"]]).orderName)
+        assertFalse(OmsGqlReturnAssembler.build(node(), [item()], lookups()).containsKey("orderName"))
+    }
+
     @Test
     void aReturnCarriesItsOwnDateAndHowLongBeforeItsEntryItWasMade() {
         Map old = OmsGqlReturnAssembler.build(node(entryDate: "2026-10-21T21:31:59.301Z", returnDate: "2022-06-06T20:37:51Z"), [item()], lookups())
