@@ -522,7 +522,7 @@ class OmsRestSourceSupport {
         if (!tenantId) throw new IllegalArgumentException("An active tenant is required for tenant-scoped writes.")
         if (!canWrite) throw new IllegalArgumentException("Your active tenant is read-only for this action.")
         if (existingConfig && normalize(existingConfig.companyUserGroupId) != tenantId && !allowSharedPeer) {
-            throw new IllegalArgumentException("Requested OMS source config is not available in your active tenant.")
+            throw new IllegalArgumentException("Requested OMS source config was not found.")
         }
     }
 

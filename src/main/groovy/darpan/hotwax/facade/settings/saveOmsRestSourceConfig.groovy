@@ -32,7 +32,6 @@ if (!TenantAccessSupport.requireActiveTenantWriteAccess(ec)) {
     return
 }
 
-if (!configIdValue) ec.message.addError("OMS REST Source Config ID is required.")
 if (!baseUrlValue) {
     ec.message.addError("Base URL is required.")
 } else {
@@ -61,22 +60,14 @@ if (headersJsonValue) {
 }
 
 if (!ec.message.hasError()) {
-    def existingConfig = ec.entity.find("darpan.hotwax.HotWaxOmsRestSourceConfig")
+    // DAR-BE-135: a named id only updates a config this tenant owns or was granted; a missing row and
+    // another tenant's row both answer "not found", and that answer comes before any check that reads
+    // the row's secrets. A new config gets a minted id, so no tenant can squat or probe one.
+    def existingConfig = configIdValue ? ec.entity.find("darpan.hotwax.HotWaxOmsRestSourceConfig")
             .condition("omsRestSourceConfigId", configIdValue)
             .disableAuthz()
             .useCache(false)
-            .one()
-
-    if (authTypeValue == "BASIC") {
-        if (!usernameValue) ec.message.addError("Username is required for BASIC auth.")
-        if (!passwordValue && !existingConfig?.password) ec.message.addError("Password is required for BASIC auth.")
-    }
-    if (authTypeValue == "BEARER" && !apiTokenValue && !passwordValue && !existingConfig?.apiToken && !existingConfig?.password) {
-        ec.message.addError("API token is required for BEARER auth.")
-    }
-    if (authTypeValue == "API_KEY" && !apiTokenValue && !passwordValue && !existingConfig?.apiToken && !existingConfig?.password) {
-        ec.message.addError("API key is required for API_KEY auth.")
-    }
+            .one() : null
 
     // DAR-BE-005: a member tenant may edit every field of a config shared with it (decision 3).
     // Computed from the ConfigTenantAccess grant table for the row actually on disk, before the
@@ -84,20 +75,31 @@ if (!ec.message.hasError()) {
     boolean isSharedPeer = existingConfig != null && SharedConfigAccessSupport.isSharedWithTenant(
             ec, SharedConfigAccessSupport.CONFIG_TYPE_HOTWAX_OMS, configIdValue, activeTenantUserGroupId)
 
-    if (!ec.message.hasError()) {
-        try {
-            OmsRestSourceSupport.requireWritableTenantConfig(
-                    existingConfig ? [companyUserGroupId: existingConfig.companyUserGroupId] : null,
-                    activeTenantUserGroupId,
-                    TenantAccessSupport.hasActiveTenantWriteAccess(ec),
-                    isSharedPeer
-            )
-        } catch (IllegalArgumentException e) {
-            ec.message.addError(e.message)
-        }
+    try {
+        OmsRestSourceSupport.requireWritableTenantConfig(
+                existingConfig ? [companyUserGroupId: existingConfig.companyUserGroupId] : null,
+                activeTenantUserGroupId,
+                TenantAccessSupport.hasActiveTenantWriteAccess(ec),
+                isSharedPeer
+        )
+        if (configIdValue && existingConfig == null) ec.message.addError("Requested OMS source config was not found.")
+    } catch (IllegalArgumentException e) {
+        ec.message.addError(e.message)
+    }
+
+    if (!ec.message.hasError() && authTypeValue == "BASIC") {
+        if (!usernameValue) ec.message.addError("Username is required for BASIC auth.")
+        if (!passwordValue && !existingConfig?.password) ec.message.addError("Password is required for BASIC auth.")
+    }
+    if (!ec.message.hasError() && authTypeValue == "BEARER" && !apiTokenValue && !passwordValue && !existingConfig?.apiToken && !existingConfig?.password) {
+        ec.message.addError("API token is required for BEARER auth.")
+    }
+    if (!ec.message.hasError() && authTypeValue == "API_KEY" && !apiTokenValue && !passwordValue && !existingConfig?.apiToken && !existingConfig?.password) {
+        ec.message.addError("API key is required for API_KEY auth.")
     }
 
     if (!ec.message.hasError()) {
+        if (!configIdValue) configIdValue = darpan.facade.common.TenantScopedFinder.mintId(ec, "darpan.hotwax.HotWaxOmsRestSourceConfig", "omsRestSourceConfigId")
         // Ownership never transfers: an existing row keeps its original owner even when a peer
         // saves it — only a brand-new row is assigned to the active tenant. Reassigning here would
         // hand ownership to whichever peer saved last and anchor the peer group on the wrong tenant.

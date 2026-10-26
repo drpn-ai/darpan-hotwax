@@ -31,6 +31,8 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
     private static final Timestamp TEST_FROM_DATE = Timestamp.valueOf("2026-05-01 00:00:00")
 
     private ExecutionContext ec
+    /** DAR-BE-135: the server mints a new config's id, so these tests name configs by alias and map the alias here. */
+    private final Map<String, String> aliasIds = [:]
 
     @BeforeAll
     void setup() {
@@ -88,7 +90,8 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
         Map<String, Object> deleteResult = deleteFacade("GORJANA_DELETE_HOTWAX")
         assertTrue((Boolean) deleteResult.ok, deleteResult.errors?.toString())
         assertEquals(true, deleteResult.deleted)
-        assertEquals("GORJANA_DELETE_HOTWAX", deleteResult.deletedOmsRestSourceConfigId)
+        assertEquals(idOf("GORJANA_DELETE_HOTWAX"), deleteResult.deletedOmsRestSourceConfigId)
+        assertTrue(idOf("GORJANA_DELETE_HOTWAX") ==~ /\d+/, "DAR-BE-135: a new config takes a minted id")
         assertNull(findOne("GORJANA_DELETE_HOTWAX"))
 
         ec.message.clearErrors()
@@ -185,6 +188,26 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
         } finally {
             OmsRestSourceSupport.resetHttpClient()
         }
+    }
+
+    /** DAR-BE-135: a named id only updates. Another tenant's id and a missing one answer alike, before any secret check. */
+    @Test
+    void aForeignIdAndAMissingIdAnswerAlikeAndNeitherCreatesARow() {
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
+        // BEARER with no token: before, the secret check read the foreign row's stored token first.
+        Map<String, Object> params = [description: "Probe", baseUrl: "https://probe.hotwax.io", authType: "BEARER",
+                                      timeZone: "America/Chicago", isActive: true, canReadOrders: true]
+
+        Map<String, Object> foreign = callSave(params + [omsRestSourceConfigId: "KREWE_HOTWAX"])
+        ec.message.clearErrors()
+        Map<String, Object> missing = callSave(params + [omsRestSourceConfigId: "NO_SUCH_HOTWAX"])
+
+        assertFalse((Boolean) foreign.ok)
+        assertFalse((Boolean) missing.ok)
+        assertEquals(["Requested OMS source config was not found."], foreign.errors)
+        assertEquals(foreign.errors, missing.errors)
+        assertNull(findOne("NO_SUCH_HOTWAX"), "a caller-named id must never create a row")
+        assertEquals(KREWE, findOne("KREWE_HOTWAX").companyUserGroupId)
     }
 
     @Test
@@ -452,7 +475,23 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
             .call()
     }
 
+    private String idOf(String alias) {
+        return aliasIds.get(alias) ?: alias
+    }
+
+    /** An alias that names no row yet is a create: the id is left out and the minted one remembered. */
     private Map<String, Object> saveFacade(Map<String, Object> parameters) {
+        Map<String, Object> params = new LinkedHashMap<String, Object>(parameters)
+        String alias = params.omsRestSourceConfigId as String
+        if (alias && findOne(alias) == null) params.remove("omsRestSourceConfigId")
+        else if (alias) params.omsRestSourceConfigId = idOf(alias)
+        Map<String, Object> out = callSave(params)
+        String savedId = ((Map<String, Object>) out.savedOmsRestSourceConfig)?.omsRestSourceConfigId as String
+        if (alias && savedId) aliasIds.put(alias, savedId)
+        return out
+    }
+
+    private Map<String, Object> callSave(Map<String, Object> parameters) {
         return (Map<String, Object>) ec.service.sync()
             .name("facade.HotWaxOmsFacadeServices.save#HotWaxOmsRestSourceConfig")
             .parameters(parameters)
@@ -463,14 +502,14 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
     private Map<String, Object> deleteFacade(String configId) {
         return (Map<String, Object>) ec.service.sync()
             .name("facade.HotWaxOmsFacadeServices.delete#HotWaxOmsRestSourceConfig")
-            .parameters([omsRestSourceConfigId: configId])
+            .parameters([omsRestSourceConfigId: idOf(configId)])
             .disableAuthz()
             .call()
     }
 
     private def findOne(String configId) {
         return ec.entity.find(ENTITY_NAME)
-            .condition("omsRestSourceConfigId", configId)
+            .condition("omsRestSourceConfigId", idOf(configId))
             .disableAuthz()
             .useCache(false)
             .one()
