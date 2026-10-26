@@ -114,6 +114,10 @@ class OmsGqlQueriesTests {
         // DAR-BE-068: one more scalar on a lookup already made, so the store costs no extra call.
         String doc = OmsGqlQueries.orderExternalIdsDocument()
         assertTrue(doc.contains("productStoreId"), doc)
+        // DAR-UI-080: and the order's date, for the return's audit finding (live: 680 of 950 reserved before it).
+        assertTrue(doc.contains("orderDate"), doc)
+        assertTrue(doc.contains("billToCustomer { firstName lastName }"), doc)
+        assertTrue(OmsGqlQueries.unitOrdersDocument().contains("billToCustomer { firstName lastName }"))
         assertTrue(100 + OmsGqlQueries.ORDERS_ID_CHUNK * 3 <= OmsGqlQueries.ORDERS_RESERVATION,
                 "100 per page + 3 scalars x ${OmsGqlQueries.ORDERS_ID_CHUNK} rows must fit the reservation")
     }

@@ -149,7 +149,9 @@ class OmsGqlOrderPageSourceTests {
     void unitsAreReadByOrderIdWhenAskedByKey() {
         ScriptedClient client = new ScriptedClient([
                 ordersPage([unitOrder("M1")], false),
-                itemsPage([item("M1", "00101", "00001", "ITEM_COMPLETED")])])
+                itemsPage([item("M1", "00101", "00001", "ITEM_COMPLETED")]),
+                productsPage(["P00101"]),
+                facilitiesPage(["STORE_1", "WH"])])
         File out = File.createTempFile("gql-", ".json")
         try {
             Map result = OmsRestSourceSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, null, null, null, UNIT_OPTIONS,
@@ -171,6 +173,14 @@ class OmsGqlOrderPageSourceTests {
         return [data: [orderItems: [edges: nodes.collect { [node: it] }, pageInfo: [hasNextPage: hasNext, endCursor: endCursor]]]]
     }
 
+    private static Map facilitiesPage(List<String> facilityIds) {
+        return [data: [facilities: [edges: facilityIds.collect { [node: [facilityId: it, facilityName: "Store " + it]] }, pageInfo: [hasNextPage: false, endCursor: null]]]]
+    }
+
+    private static Map productsPage(List<String> productIds) {
+        return [data: [products: [edges: productIds.collect { [node: [productId: it, internalName: "SKU-" + it]] }, pageInfo: [hasNextPage: false, endCursor: null]]]]
+    }
+
     private static Map item(String orderId, String seq, String group, String status = "ITEM_COMPLETED", int quantity = 1) {
         return [orderId: orderId, orderItemSeqId: seq, externalId: "L" + seq, productId: "P" + seq, quantity: quantity,
                 statusId: status, shipGroupSeqId: group]
@@ -180,7 +190,9 @@ class OmsGqlOrderPageSourceTests {
     void unitGrainWritesTheRestUnitRecordWithEachItemUnderItsShipGroup() {
         ScriptedClient client = new ScriptedClient([
                 ordersPage([unitOrder("M1")], false),
-                itemsPage([item("M1", "00101", "00001", "ITEM_COMPLETED", 2), item("M1", "00102", "00002", "ITEM_CANCELLED")])])
+                itemsPage([item("M1", "00101", "00001", "ITEM_COMPLETED", 2), item("M1", "00102", "00002", "ITEM_CANCELLED")]),
+                productsPage(["P00101", "P00102"]),
+                facilitiesPage(["STORE_1", "WH"])])
         File out = File.createTempFile("gql-", ".json")
         try {
             Map result = run(client, out, null, null, UNIT_OPTIONS)
@@ -192,7 +204,12 @@ class OmsGqlOrderPageSourceTests {
             assertEquals("M1", first.omsOrderId)
             assertEquals("STORE_1", first.facilityId)
             assertEquals("WH", recs.find { it.orderItemSeqId == "00102" }.facilityId)
-            assertEquals(2, client.calls.size(), "orders, then one orderItems pass; no exchange pass when exclusion is off")
+            // DAR-UI-081: each unit names its SKU, read once for the page's products.
+            assertEquals(["SKU-P00101", "SKU-P00101", "SKU-P00102"], recs.sort { it.orderItemSeqId }*.sku)
+            assertEquals(4, client.calls.size(), "orders, one orderItems pass, one products pass, one facilities pass; no exchange pass when exclusion is off")
+            assertEquals("productId:P00101,P00102", ((Map) client.calls[2].variables).q)
+            assertEquals("facilityId:STORE_1,WH", ((Map) client.calls[3].variables).q)
+            assertEquals(["Store STORE_1", "Store STORE_1", "Store WH"], recs.sort { it.orderItemSeqId }*.facilityName)
             // DAR-BE-116 lean unit read: the ship groups (facility) and the header, nothing a unit never reads.
             String doc = client.calls[0].document as String
             assertTrue(doc.contains("shipGroups(first: 2)"))
@@ -207,7 +224,9 @@ class OmsGqlOrderPageSourceTests {
     void aUnitLevelFilterIsAppliedToUnitsNotRefusedAsAnOrderField() {
         ScriptedClient client = new ScriptedClient([
                 ordersPage([unitOrder("M1")], false),
-                itemsPage([item("M1", "00101", "00001"), item("M1", "00102", "00002", "ITEM_CANCELLED")])])
+                itemsPage([item("M1", "00101", "00001"), item("M1", "00102", "00002", "ITEM_CANCELLED")]),
+                productsPage(["P00101", "P00102"]),
+                facilitiesPage(["STORE_1", "WH"])])
         File out = File.createTempFile("gql-", ".json")
         try {
             Map result = run(client, out, null, [[fieldExpression: "unitState", operator: "INCLUDE_IN", filterValues: "COMPLETED", sequenceNum: 1]], UNIT_OPTIONS)
@@ -237,8 +256,11 @@ class OmsGqlOrderPageSourceTests {
         OmsGqlClient client = new OmsGqlClient(CONFIG, { String u, Map h, String b -> [statusCode: 200, body: "{}"] }) {
             @Override
             Map execute(String document, Map variables, int reservation) {
-                asked.add(document.contains("orderItems(") ? "items" : "orders")
+                asked.add(document.contains("orderItems(") ? "items" : document.contains("products(") ? "products" :
+                        document.contains("facilities(") ? "facilities" : "orders")
                 both.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                if (document.contains("products(")) return [data: productsPage(["P00101", "P00102"]).data]
+                if (document.contains("facilities(")) return [data: facilitiesPage(["STORE_1", "WH"]).data]
                 if (document.contains("orderItems(")) {
                     return [data: itemsPage([item("M1", "00101", "00001"), item("M1", "00102", "00002", "ITEM_CANCELLED")]).data]
                 }
@@ -260,7 +282,7 @@ class OmsGqlOrderPageSourceTests {
                 } as java.util.concurrent.Callable)
             }
             futures.each { assertEquals([], ((Map) it.get(10, java.util.concurrent.TimeUnit.SECONDS)).errors) }
-            assertEquals(["items", "orders"], asked.sort(), "one orders page and one items pass, for both extracts")
+            assertEquals(["facilities", "items", "orders", "products"], asked.sort(), "one orders page and one items, products and facilities pass, for both extracts")
             assertEquals(["00101"], ((List<Map>) (new JsonSlurper().parse(outs[0]) as Map).records)*.orderItemSeqId)
             assertEquals(["00102"], ((List<Map>) (new JsonSlurper().parse(outs[1]) as Map).records)*.orderItemSeqId)
             outs*.delete()
@@ -275,7 +297,9 @@ class OmsGqlOrderPageSourceTests {
         ScriptedClient client = new ScriptedClient([
                 ordersPage([unitOrder("M1")], false),
                 itemsPage([item("M1", "00101", "00001")], true, "I1"),
-                itemsPage([item("M1", "00102", "00001")], false)])
+                itemsPage([item("M1", "00102", "00001")], false),
+                productsPage(["P00101", "P00102"]),
+                facilitiesPage(["STORE_1", "WH"])])
         File out = File.createTempFile("gql-", ".json")
         try {
             assertEquals(2, run(client, out, null, null, UNIT_OPTIONS).recordCount)

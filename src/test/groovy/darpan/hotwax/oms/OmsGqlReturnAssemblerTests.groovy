@@ -115,11 +115,13 @@ class OmsGqlReturnAssemblerTests {
         assertFalse(OmsGqlReturnAssembler.build(node(), [item()], lookups()).containsKey("warrantyId"))
     }
 
-    /** DAR-UI-080: a return names its origin order by name; no key when the lookup did not answer. */
+    /** DAR-UI-080: a return names its origin order by name and date; no key when the lookup did not answer. */
     @Test
     void aReturnCarriesItsOriginOrdersName() {
-        assertEquals("#GOR195470263", OmsGqlReturnAssembler.build(node(), [item()], lookups() + [orderNames: [GR1: "#GOR195470263"]]).orderName)
+        Map built = OmsGqlReturnAssembler.build(node(), [item()], lookups() + [orderNames: [GR1: "#GOR195470263"], orderDates: [GR1: "2026-09-02T17:11:40Z"], orderCustomers: [GR1: "Ada Lovelace"]])
+        assertEquals(["#GOR195470263", "2026-09-02T17:11:40Z", "Ada Lovelace"], [built.orderName, built.orderDate, built.customerName])
         assertFalse(OmsGqlReturnAssembler.build(node(), [item()], lookups()).containsKey("orderName"))
+        assertFalse(OmsGqlReturnAssembler.build(node(), [item()], lookups()).containsKey("orderDate"))
     }
 
     @Test

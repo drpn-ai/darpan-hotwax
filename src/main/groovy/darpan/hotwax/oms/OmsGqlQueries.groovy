@@ -44,6 +44,9 @@ class OmsGqlQueries {
     static final Map<String, Map> NESTED_FIELDS = [
             identifications: [selection: "identifications(first: 5) { orderIdentificationTypeId idValue }", cost: 18.0d],
             shipGroups     : [selection: "shipGroups(first: 3) { edges { node { shipGroupSeqId facilityId shipmentMethodTypeId carrierPartyId } } }", cost: 12.5d],
+            // DAR-UI-081 (Aditi: "all findings should have basic order info"): the bill-to customer's name (gorjana
+            // 2026-10-26: 60 orders 780 -> 910 requested, ~2.2 an order).
+            billToCustomer : [selection: "billToCustomer { firstName lastName }", cost: 2.2d],
             // Aditi 2026-10-24 (R1 F-100794): HotWax marks a duplicate order with a note ("duplicate order"). Estimated.
             notes          : [selection: "notes(first: 5) { note { noteInfo } }", cost: 25.0d],
             // Aditi 2026-10-24: NetSuite bills a fulfilled item within 24 hours; the order's statuses say when it was fulfilled.
@@ -248,7 +251,7 @@ class OmsGqlQueries {
     static String orderExternalIdsDocument() {
         return '''query OmsOrderExternalIds($q: String, $first: Int, $after: String) {
   orders(query: $q, first: $first, after: $after) {
-    edges { node { orderId orderName externalId productStoreId grandTotal identifications(first: 3) { orderIdentificationTypeId idValue } } }
+    edges { node { orderId orderName externalId productStoreId grandTotal orderDate billToCustomer { firstName lastName } identifications(first: 3) { orderIdentificationTypeId idValue } } }
     pageInfo { hasNextPage endCursor }
   }
 }'''
@@ -267,16 +270,18 @@ class OmsGqlQueries {
     // DAR-BE-116: the ORDER_LINE_UNIT order page. Only what a unit reads from its order: the header scalars and the
     // ship groups (facilityId). No identifications or paymentPreferences: nested lists are charged per requested slot
     // per order, and they made a page 18 orders at 770 (live 2026-10-23). Header scalars cost ~1 each per order
-    // (probe 2026-10-23: 100 orders x 4 scalars requested 510); two ship-group slots of two fields ~7.
-    static final int UNIT_ORDERS_PAGE_SIZE = 60
+    // (probe 2026-10-23: 100 orders x 4 scalars requested 510); two ship-group slots of two fields ~7. DAR-UI-081: the
+    // bill-to customer's name, for the audit finding (gorjana 2026-10-26, 60 orders: 780 requested without it, 910 with),
+    // and each ship group's shipping method (60 orders: 1030, over the 1000 cap, so 55: ~950).
+    static final int UNIT_ORDERS_PAGE_SIZE = 55
     static final int UNIT_ORDERS_RESERVATION = 1000
 
     static String unitOrdersDocument() {
         return '''query OmsUnitOrders($q: String, $first: Int, $after: String) {
   orders(query: $q, sortKey: ORDER_DATE, reverse: false, first: $first, after: $after) {
     edges { node {
-      orderId orderName externalId statusId orderTypeId orderDate grandTotal
-      shipGroups(first: 2) { edges { node { shipGroupSeqId facilityId } } }
+      orderId orderName externalId statusId orderTypeId orderDate grandTotal billToCustomer { firstName lastName }
+      shipGroups(first: 2) { edges { node { shipGroupSeqId facilityId shipmentMethodTypeId } } }
     } }
     pageInfo { hasNextPage endCursor }
   }
@@ -300,6 +305,19 @@ class OmsGqlQueries {
         return '''query OmsOrderItemExternalIds($q: String, $first: Int, $after: String) {
   orderItems(query: $q, first: $first, after: $after) {
     edges { node { orderId orderItemSeqId externalId } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
+    // DAR-UI-081: the names of the facilities a page's ship groups name, by id (gorjana 2026-10-26: 100 asked, 210 requested).
+    static final int FACILITIES_ID_CHUNK = 100
+    static final int FACILITIES_RESERVATION = 350
+
+    static String facilityNamesDocument() {
+        return '''query OmsFacilityNames($q: String, $first: Int, $after: String) {
+  facilities(query: $q, first: $first, after: $after) {
+    edges { node { facilityId facilityName } }
     pageInfo { hasNextPage endCursor }
   }
 }'''

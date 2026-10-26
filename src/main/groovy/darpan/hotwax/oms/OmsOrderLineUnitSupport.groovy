@@ -44,6 +44,9 @@ class OmsOrderLineUnitSupport {
         String omsOrderId = normalize(order.get("orderId"))
         String omsOrderName = normalize(order.get("orderName"))
         String omsOrderStatusId = normalize(order.get("statusId"))
+        // DAR-UI-080: when the order was placed, for the audit finding; as the read gave it (GraphQL: an ISO instant).
+        String omsOrderDate = normalize(order.get("orderDate"))
+        String customerName = customerNameOf(order)
         // DAR-BE-118: an order whose payment was taken back never reaches NetSuite; its total is then 0.
         BigDecimal orderGrandTotal = normalize(order.get("grandTotal")) ?
                 new BigDecimal(new BigDecimal(normalize(order.get("grandTotal"))).stripTrailingZeros().toPlainString()) : null
@@ -57,13 +60,16 @@ class OmsOrderLineUnitSupport {
         // be equal maps) because the item itself does not carry it.
         List<Map> items = []
         Map<Map, String> facilityByItem = new IdentityHashMap<Map, String>()
+        Map<Map, String> shipMethodByItem = new IdentityHashMap<Map, String>()
         for (Object shipGroup : asList(order.get("shipGroups"))) {
             if (!(shipGroup instanceof Map)) continue
             String facilityId = normalize(((Map) shipGroup).get("facilityId"))
+            String shipMethod = normalize(((Map) shipGroup).get("shipmentMethodTypeId"))
             for (Object item : asList(((Map) shipGroup).get("items"))) {
                 if (!(item instanceof Map)) continue
                 items.add((Map) item)
                 facilityByItem.put((Map) item, facilityId)
+                if (shipMethod) shipMethodByItem.put((Map) item, shipMethod)
             }
         }
 
@@ -112,7 +118,7 @@ class OmsOrderLineUnitSupport {
                     ordinal++
                     int stateOrdinal = (stateOrdinals.get(unitState) ?: 0) + 1
                     stateOrdinals.put(unitState, stateOrdinal)
-                    units.add([
+                    Map unit = [
                             shopifyOrderId  : shopifyOrderId,
                             shopifyLineId   : normalize(item.get("externalId")),
                             unitOrdinal     : ordinal,
@@ -125,10 +131,20 @@ class OmsOrderLineUnitSupport {
                             stateOrdinal    : stateOrdinal,
                             netsuiteOrderId : netsuiteOrderId,
                             omsOrderStatusId: omsOrderStatusId,
+                            omsOrderDate    : omsOrderDate,
                             orderGrandTotal : orderGrandTotal,
                             facilityId      : facilityByItem.get(item),
                             salesChannelEnumId: salesChannelEnumId,
-                    ])
+                    ]
+                    // DAR-UI-081: the item's SKU when the read gave it (GraphQL reads it by product); REST's shape is unchanged.
+                    String sku = normalize(item.get("sku"))
+                    if (sku) unit.sku = sku
+                    String facilityName = normalize(item.get("facilityName"))
+                    if (facilityName) unit.facilityName = facilityName
+                    // DAR-UI-081 (Aditi: "add order ... shipping method"): its ship group's, when the read gave it.
+                    if (shipMethodByItem.get(item)) unit.shipmentMethodTypeId = shipMethodByItem.get(item)
+                    if (customerName) unit.customerName = customerName
+                    units.add(unit)
                 }
             }
         }
@@ -185,5 +201,12 @@ class OmsOrderLineUnitSupport {
         } catch (NumberFormatException ignored) {
             return 0
         }
+    }
+
+    /** DAR-UI-081. The order's bill-to customer as "First Last" (GraphQL billToCustomer), for the audit finding; else null. */
+    static String customerNameOf(Map order) {
+        Map customer = order?.get("billToCustomer") instanceof Map ? (Map) order.get("billToCustomer") : null
+        String name = [normalize(customer?.get("firstName")), normalize(customer?.get("lastName"))].findAll().join(" ")
+        return name ?: null
     }
 }

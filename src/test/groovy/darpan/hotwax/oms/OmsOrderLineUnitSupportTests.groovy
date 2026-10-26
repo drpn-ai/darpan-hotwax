@@ -3,6 +3,7 @@ package darpan.hotwax.oms
 import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
+import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
@@ -163,13 +164,14 @@ class OmsOrderLineUnitSupportTests {
     /** #GOR197205176: two completed lines shipped from WH, one cancelled line on hold. */
     private static Map gor197205176() {
         return [orderId: "M946677", orderName: "#GOR197205176", externalId: "7158980083843",
-                statusId: "ORDER_COMPLETED", salesChannelEnumId: "POS_SALES_CHANNEL",
+                statusId: "ORDER_COMPLETED", salesChannelEnumId: "POS_SALES_CHANNEL", orderDate: "2026-10-12T21:04:19Z",
+                billToCustomer: [firstName: "Ada", lastName: "Lovelace"],
                 identifications: [
                         [orderIdentificationTypeId: "NETSUITE_ORDER_ID", idValue: "79234536"],
                         [orderIdentificationTypeId: "NETSUITE_ORDER_NAME", idValue: "SO7121914"]],
                 shipGroups: [
                         [facilityId: "_NA_", shipGroupSeqId: "00001"],
-                        [facilityId: "WH", shipGroupSeqId: "00003", items: [
+                        [facilityId: "WH", shipGroupSeqId: "00003", shipmentMethodTypeId: "STANDARD", items: [
                                 [orderItemSeqId: "02", externalId: "16448517537923", productId: "12584",
                                  statusId: "ITEM_COMPLETED", quantity: 1],
                                 [orderItemSeqId: "03", externalId: "16448517570691", productId: "12432",
@@ -205,6 +207,11 @@ class OmsOrderLineUnitSupportTests {
         assertEquals("COMPLETED", completed.unitState)
         assertEquals("79234536", completed.netsuiteOrderId)
         assertEquals("ORDER_COMPLETED", completed.omsOrderStatusId)
+        assertEquals("2026-10-12T21:04:19Z", completed.omsOrderDate)
+        assertEquals("Ada Lovelace", completed.customerName)
+        assertEquals("STANDARD", completed.shipmentMethodTypeId)
+        assertFalse(unitFor(result, "01").containsKey("shipmentMethodTypeId"), "no method read, no key")
+        assertEquals(null, OmsOrderLineUnitSupport.customerNameOf([billToCustomer: [firstName: " ", lastName: null]]))
         assertEquals("WH", completed.facilityId)
         Map cancelled = unitFor(result, "01")
         assertEquals("CANCELLED", cancelled.unitState)

@@ -286,10 +286,28 @@ class OmsGqlOrderPageSource {
     /**
      * REST's order shape for the flattener: each item under the ship group it belongs to. An item naming a ship
      * group the order did not return gets one of its own with no facility, so the unit is kept, not dropped.
+     * DAR-UI-081: each item also carries its SKU (its product's internalName, REST's sku) and its ship group's facility
+     * name, each read by id once per page as the returns read does (nesting them is charged per order), for the audit
+     * finding.
      */
     private static void attachItemsToShipGroups(OmsGqlClient client, List<Map> orders, List<String> orderIds, Map pagination) {
         List<Map> items = OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.unitOrderItemsDocument(), "orderItems", "orderId",
                 orderIds, OmsGqlQueries.ORDER_ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.UNIT_ITEMS_RESERVATION, pagination)
+        List<String> productIds = items.collect { it.productId as String }.findAll { it }.unique()
+        Map<String, String> skus = [:]
+        if (productIds) {
+            OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.productNamesDocument(), "products", "productId", productIds,
+                    OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_RESERVATION, pagination)
+                    .each { Map n -> if (n.internalName) skus[n.productId as String] = n.internalName as String }
+        }
+        List<String> facilityIds = orders.collectMany { Map o -> ((o.shipGroups instanceof List) ? (List<Map>) o.shipGroups : [])
+                .collect { it?.facilityId as String } }.findAll { it }.unique()
+        Map<String, String> facilityNames = [:]
+        if (facilityIds) {
+            OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.facilityNamesDocument(), "facilities", "facilityId", facilityIds,
+                    OmsGqlQueries.FACILITIES_ID_CHUNK, OmsGqlQueries.FACILITIES_ID_CHUNK, OmsGqlQueries.FACILITIES_RESERVATION, pagination)
+                    .each { Map n -> if (n.facilityName) facilityNames[n.facilityId as String] = n.facilityName as String }
+        }
         Map<String, List<Map>> byOrder = items.groupBy { it.orderId as String }
         for (Map order : orders) {
             List<Map> groups = ((order.shipGroups instanceof List) ? (List<Map>) order.shipGroups : []).collect { new LinkedHashMap(it) as Map }
@@ -302,7 +320,10 @@ class OmsGqlOrderPageSource {
                     groups.add(group)
                     groupBySeq[seq] = group
                 }
-                ((List) group.computeIfAbsent("items", { [] })).add(new LinkedHashMap(item))
+                Map withSku = new LinkedHashMap(item)
+                if (skus[item.productId as String]) withSku.sku = skus[item.productId as String]
+                if (facilityNames[group.facilityId as String]) withSku.facilityName = facilityNames[group.facilityId as String]
+                ((List) group.computeIfAbsent("items", { [] })).add(withSku)
             }
             order.shipGroups = groups
         }

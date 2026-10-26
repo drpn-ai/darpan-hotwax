@@ -62,6 +62,8 @@ class OmsGqlReturnAssembler {
     static Map<String, Object> build(Map node, List<Map> items, Map lookups) {
         Map orderExternalIds = (Map) (lookups?.orderExternalIds ?: [:])
         Map orderNames = (Map) (lookups?.orderNames ?: [:])
+        Map orderDates = (Map) (lookups?.orderDates ?: [:])
+        Map orderCustomers = (Map) (lookups?.orderCustomers ?: [:])
         Map orderProductStoreIds = (Map) (lookups?.orderProductStoreIds ?: [:])
         Map orderNetsuiteIds = (Map) (lookups?.orderNetsuiteIds ?: [:])
         Map orderGrandTotals = (Map) (lookups?.orderGrandTotals ?: [:])
@@ -98,9 +100,13 @@ class OmsGqlReturnAssembler {
         record.externalId = normalize(node.externalId)
         // REST omits the key for a return with no items rather than sending null.
         if (sorted) record.orderExternalId = orderExternalIds.get(sorted.first().orderId as String)
-        // DAR-UI-080: the origin order's name (#GOR...), for the audit finding. Set only when known, like orderNetsuiteId below.
+        // DAR-UI-080 / DAR-UI-081: the origin order's name (#GOR...), date and customer, for the audit finding. Set only when known.
         String orderName = sorted ? orderNames.get(sorted.first().orderId as String) : null
         if (orderName) record.orderName = orderName
+        String orderDate = sorted ? orderDates.get(sorted.first().orderId as String) : null
+        if (orderDate) record.orderDate = orderDate
+        String customerName = sorted ? orderCustomers.get(sorted.first().orderId as String) : null
+        if (customerName) record.customerName = customerName
         // DAR-BE-068: the ONE key REST lacks. Return.productStoreId is null on gorjana, so a return's store is
         // its origin order's (the order orderExternalId names). Filterable only: not in keepFieldsBase, so
         // projection strips it before the compare and the compared record stays identical to REST's.

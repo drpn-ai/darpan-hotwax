@@ -183,6 +183,8 @@ class OmsGqlReturnsPageSource {
         List<String> orderIds = items.collect { it.orderId as String }.findAll { it }.unique()
         Map<String, String> orderExternalIds = [:]
         Map<String, String> orderNames = [:]
+        Map<String, String> orderDates = [:]
+        Map<String, String> orderCustomers = [:]
         Map<String, String> orderProductStoreIds = [:]
         Map<String, String> orderNetsuiteIds = [:]
         Map<String, Object> orderGrandTotals = [:]
@@ -193,6 +195,8 @@ class OmsGqlReturnsPageSource {
                     .each { Map n ->
                         orderExternalIds[n.orderId as String] = n.externalId as String
                         orderNames[n.orderId as String] = n.orderName as String
+                        orderDates[n.orderId as String] = n.orderDate as String
+                        orderCustomers[n.orderId as String] = OmsOrderLineUnitSupport.customerNameOf(n)
                         orderProductStoreIds[n.orderId as String] = n.productStoreId as String
                         orderGrandTotals[n.orderId as String] = n.grandTotal
                         orderNetsuiteIds[n.orderId as String] = netsuiteOrderId(n)
@@ -212,7 +216,7 @@ class OmsGqlReturnsPageSource {
                     productIds, OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_ID_CHUNK, OmsGqlQueries.PRODUCTS_RESERVATION, pagination)
                     .findAll { !it.thruDate }.each { Map n -> productNetsuiteIds[n.productId as String] = n.idValue as String }
         }
-        Map lookups = [orderExternalIds: orderExternalIds, orderNames: orderNames, orderProductStoreIds: orderProductStoreIds, orderNetsuiteIds: orderNetsuiteIds,
+        Map lookups = [orderExternalIds: orderExternalIds, orderNames: orderNames, orderDates: orderDates, orderCustomers: orderCustomers, orderProductStoreIds: orderProductStoreIds, orderNetsuiteIds: orderNetsuiteIds,
                        orderGrandTotals: orderGrandTotals, exchangeChains: exchangeChains(client, items, pagination),
                        orderItemExternalIds: orderItemExternalIds, productNames: productNames,
                        productNetsuiteIds: productNetsuiteIds]
