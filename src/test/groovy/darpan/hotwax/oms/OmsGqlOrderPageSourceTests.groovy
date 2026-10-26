@@ -342,7 +342,8 @@ class OmsGqlOrderPageSourceTests {
         def pool = java.util.concurrent.Executors.newFixedThreadPool(2)
         try {
             List<File> outs = [File.createTempFile("gql-", ".json"), File.createTempFile("gql-", ".json")]
-            List<String> keep = OmsGqlQueries.SHARED_ORDER_FIELDS as List<String>
+            // KEEP asks only for the always-read fields and a derived one: covered by the shared read, so it joins it.
+            List<String> keep = KEEP
             List futures = [
                     pool.submit({ -> both.countDown()
                         OmsRestSourceSupport.extractOrdersToFile(CONFIG, FROM, THRU, outs[0], keep, null, null, null, OmsGqlOrderPageSource.fetcher(client))

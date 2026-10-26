@@ -43,7 +43,7 @@ class OmsGqlQueries {
     /** Nested lists, selected only when something reads them, with their measured per-order cost. */
     static final Map<String, Map> NESTED_FIELDS = [
             identifications: [selection: "identifications(first: 5) { orderIdentificationTypeId idValue }", cost: 18.0d],
-            shipGroups     : [selection: "shipGroups(first: 3) { edges { node { shipGroupSeqId facilityId shipmentMethodTypeId carrierPartyId } } }", cost: 12.5d],
+            shipGroups     : [selection: "shipGroups(first: 3) { edges { node { shipGroupSeqId facilityId shipmentMethodTypeId } } }", cost: 12.5d],
             // DAR-UI-081 (Aditi: "all findings should have basic order info"): the bill-to customer's name (gorjana
             // 2026-10-26: 60 orders 780 -> 910 requested, ~2.2 an order).
             billToCustomer : [selection: "billToCustomer { firstName lastName }", cost: 2.2d],
@@ -289,6 +289,16 @@ class OmsGqlQueries {
             "currencyUomId", "billToCustomer", "shipGroups"] as Set
 
     static Map sharedOrdersPlan() { return orderGrainPagePlan(SHARED_ORDER_FIELDS) }
+
+    /**
+     * True when the shared orders read carries every field an order read needs (null: no projection and no filter).
+     * Such a read joins the shared one: a page of 26 full orders costs more than its own 53 lean ones, but in an audit
+     * run the order-line check reads the shared one anyway (2026-10-26: gorjana's paid-has-OPP read the month again,
+     * 1,948 calls, because it asked only for the always-read fields).
+     */
+    static boolean sharedOrdersCover(Set<String> requiredFields) {
+        return (requiredFields ?: []).every { ALWAYS_FIELDS.contains(it) || SHARED_ORDER_FIELDS.contains(it) || DERIVED_FIELDS.contains(it) }
+    }
 
     // DAR-BE-116: the items an ORDER_LINE_UNIT extract flattens, asked by orderId in batches (nesting
     // shipGroups.orderItems costs ~6400 a page, live 2026-09-30). Seven scalars x 100 + 100.

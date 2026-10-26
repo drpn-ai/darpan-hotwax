@@ -65,6 +65,7 @@ class OmsGqlOrderPageSource {
         Object exclusionFlag = extractOptions.applyExchangeExclusion
         boolean exchangePass = !(exclusionFlag == false || (exclusionFlag as String)?.trim()?.toLowerCase() in ["false", "n"])
         Map plan
+        Set<String> required = OmsGqlQueries.requiredFields((Set<String>) ctx.keepFieldSet, (List<Map>) ctx.excludeRules)
         try {
             if (unitGrain) {
                 List<String> unknown = unitFilterFieldsNotCarried((List<Map>) ctx.excludeRules)
@@ -76,8 +77,7 @@ class OmsGqlOrderPageSource {
                 // DAR-BE-129: the shared orders read's document, so a unit read and an order read share one read.
                 plan = OmsGqlQueries.sharedOrdersPlan()
             } else {
-                plan = OmsGqlQueries.orderGrainPagePlan(
-                        OmsGqlQueries.requiredFields((Set<String>) ctx.keepFieldSet, (List<Map>) ctx.excludeRules))
+                plan = OmsGqlQueries.orderGrainPagePlan(required)
             }
         } catch (IllegalArgumentException e) {
             return failed(e.message)
@@ -99,7 +99,7 @@ class OmsGqlOrderPageSource {
                 pagination.sliceCount = slices.size()
                 if (unitGrain && client.realEndpoint) {
                     readUnitsShared(client, shared, slices)
-                } else if (client.realEndpoint && plan.document == OmsGqlQueries.sharedOrdersPlan().document) {
+                } else if (client.realEndpoint && OmsGqlQueries.sharedOrdersCover(required)) {
                     shapeShared(ordersShared(client, shared, slices), shared)
                 } else {
                     runSlices(slices, CONCURRENCY) { long from, long thru -> fetchSlice(client, shared, window(from, thru)) }
@@ -127,8 +127,15 @@ class OmsGqlOrderPageSource {
      * Oct 1-25 audit read them twice: OmsOrderGrain 1.20M and OmsUnitOrders 1.29M of 5.4M cost).
      */
     private static Map ordersShared(OmsGqlClient client, Map shared, List<List<Long>> slices) {
-        String key = "orders|${client.readScope}|${slices.first()[0]}|${slices.last()[1]}".toString()
-        return OmsGqlSharedRead.read(key) { Closure emit ->
+        return OmsGqlSharedRead.read(ordersKey(client, slices), ordersProducer(client, shared, slices))
+    }
+
+    private static String ordersKey(OmsGqlClient client, List<List<Long>> slices) {
+        return "orders|${client.readScope}|${slices.first()[0]}|${slices.last()[1]}".toString()
+    }
+
+    private static Closure ordersProducer(OmsGqlClient client, Map shared, List<List<Long>> slices) {
+        return { Closure emit ->
             Map plan = OmsGqlQueries.sharedOrdersPlan()
             Map readPagination = new LinkedHashMap((Map) shared.pagination)
             Map producerShared = new LinkedHashMap(shared) + [plan: plan, pageSize: new AtomicInteger((int) plan.pageSize),
@@ -143,16 +150,15 @@ class OmsGqlOrderPageSource {
 
     /**
      * DAR-BE-116: the unit read through OmsGqlSharedRead. The raw record is the assembled order (header, ship groups,
-     * items); its orders come from the shared orders read and only the items are read here, a batch of orders at a time.
-     * Each caller then shapes the file with its OWN filters: R1/R3 and R15 read the month's order items once between them.
+     * items); its orders come from the shared orders read and only the items are read here. DAR-BE-129: it follows the
+     * orders read, reading each batch's items as its orders arrive (waiting for the whole month first added the items
+     * read's 14 minutes after it on 2026-10-26). Each caller then shapes the file with its OWN filters.
      */
     private static void readUnitsShared(OmsGqlClient client, Map shared, List<List<Long>> slices) {
         String key = "units|${client.readScope}|${slices.first()[0]}|${slices.last()[1]}".toString()
         Map read = OmsGqlSharedRead.read(key) { Closure emit ->
-            Map orders = ordersShared(client, shared, slices)
-            Map readPagination = new LinkedHashMap((Map) ((Map) orders.stats).pagination)
-            groovy.json.JsonSlurper slurper = new groovy.json.JsonSlurper()
-            // Streamed, CONCURRENCY batches at a time: a month is ~92,000 orders, too many to hold at once.
+            Map itemsPagination = [lookupCalls: 0]
+            // CONCURRENCY batches in flight at a time: a month is ~92,000 orders, too many to hold at once.
             java.util.concurrent.Semaphore slots = new java.util.concurrent.Semaphore(CONCURRENCY)
             ExecutorService pool = Executors.newFixedThreadPool(CONCURRENCY)
             List<Future> futures = []
@@ -160,7 +166,7 @@ class OmsGqlOrderPageSource {
                 slots.acquire()
                 futures.add(pool.submit({ ->
                     try {
-                        attachItemsToShipGroups(client, page, page.collect { it.orderId as String }, readPagination)
+                        attachItemsToShipGroups(client, page, page.collect { it.orderId as String }, itemsPagination)
                         page.each { emit.call(it) }
                     } finally {
                         slots.release()
@@ -169,9 +175,8 @@ class OmsGqlOrderPageSource {
             }
             try {
                 List<Map> batch = []
-                ((File) orders.file).eachLine("UTF-8") { String line ->
-                    if (!line) return
-                    batch.add((Map) slurper.parseText(line))
+                Map orders = OmsGqlSharedRead.follow(ordersKey(client, slices), ordersProducer(client, shared, slices)) { Map order ->
+                    batch.add(order)
                     if (batch.size() >= ASSOC_BATCH_ORDER_IDS) { submit.call(batch); batch = [] }
                 }
                 if (batch) submit.call(batch)
@@ -182,10 +187,12 @@ class OmsGqlOrderPageSource {
                         throw (e.cause instanceof RuntimeException) ? (RuntimeException) e.cause : new RuntimeException(e.cause)
                     }
                 }
+                Map pagination = new LinkedHashMap((Map) ((Map) orders.stats).pagination)
+                pagination.lookupCalls = (pagination.lookupCalls ?: 0) + itemsPagination.lookupCalls
+                return [pagination: pagination]
             } finally {
                 pool.shutdownNow()
             }
-            return [pagination: readPagination]
         }
         shapeShared(read, shared)
     }

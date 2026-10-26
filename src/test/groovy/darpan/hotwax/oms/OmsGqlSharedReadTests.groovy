@@ -83,4 +83,47 @@ class OmsGqlSharedReadTests {
         assertEquals(2, produced, "a later run reads fresh data")
         assertEquals([2], lines((File) fresh.file)*.id)
     }
+
+    /** DAR-BE-129: a follower gets each record while the read is still producing, so its own work overlaps the read. */
+    @Test
+    void aFollowerGetsEachRecordBeforeTheReadIsDone() {
+        CountDownLatch firstSeen = new CountDownLatch(1)
+        List<Integer> seen = Collections.synchronizedList([])
+        Map read = OmsGqlSharedRead.follow("k", { Closure emit ->
+            emit.call([id: 1])
+            // The read goes on only once the follower has had the first record.
+            assertTrue(firstSeen.await(5, TimeUnit.SECONDS), "the follower never saw record 1 while the read ran")
+            emit.call([id: 2])
+            [pageCount: 2]
+        }) { Map r -> seen.add(r.id as Integer); if (r.id == 1) firstSeen.countDown() }
+        assertEquals([1, 2], seen)
+        assertEquals(2, ((Map) read.stats).pageCount)
+    }
+
+    @Test
+    void aReaderJoinsAReadAFollowerStartedAndItRunsOnce() {
+        int produced = 0
+        CountDownLatch release = new CountDownLatch(1)
+        Closure producer = { Closure emit -> produced++; release.await(5, TimeUnit.SECONDS); emit.call([id: 7]); [:] }
+        def pool = Executors.newFixedThreadPool(1)
+        try {
+            Future following = pool.submit({ -> OmsGqlSharedRead.follow("k", producer) { Map r -> } } as java.util.concurrent.Callable)
+            Thread.sleep(300L)
+            Thread reader = Thread.start { release.countDown() }
+            Map read = OmsGqlSharedRead.read("k", producer)
+            reader.join()
+            following.get(10, TimeUnit.SECONDS)
+            assertEquals(1, produced)
+            assertEquals([7], lines((File) read.file)*.id)
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    void aFailedReadFailsItsFollower() {
+        assertThrows(OmsGqlException) {
+            OmsGqlSharedRead.follow("k", { Closure emit -> emit.call([id: 1]); throw new OmsGqlException("THROTTLED", "shut") }) { Map r -> }
+        }
+    }
 }

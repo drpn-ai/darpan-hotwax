@@ -32,7 +32,9 @@ class OmsGqlSharedRead {
 
     private static class Entry {
         final CompletableFuture<Map> result = new CompletableFuture<>()
+        final File file = Files.createTempFile("darpan-oms-shared-", ".ndjson").toFile()
         volatile long finishedAt = 0L
+        boolean claimed = false
     }
 
     /**
@@ -40,6 +42,65 @@ class OmsGqlSharedRead {
      * first caller only; it calls emit(Map) once per raw record and returns its stats (pagination and counts).
      */
     static Map read(String key, Closure producer) {
+        Entry entry = entryFor(key)
+        if (entry.result.isDone() || !claim(entry)) logger.info("oms shared read joined key={}", key)
+        else produce(key, entry, producer)
+        return await(entry)
+    }
+
+    /**
+     * DAR-BE-129. As read, but each record is handed to `onRecord` as the read writes it, not after the whole read: a
+     * caller with work of its own per record (the order-items read, per batch of orders) overlaps it with the read.
+     * A read this call starts runs on a thread of its own. Answers the read's [file, stats] once it is complete.
+     */
+    static Map follow(String key, Closure producer, Closure onRecord) {
+        Entry entry = entryFor(key)
+        Thread producing = null
+        if (!entry.result.isDone() && claim(entry)) {
+            producing = Thread.start("oms-shared-read") { produce(key, entry, producer) }
+        } else {
+            logger.info("oms shared read followed key={}", key)
+        }
+        groovy.json.JsonSlurper slurper = new groovy.json.JsonSlurper()
+        RandomAccessFile tail
+        try {
+            tail = new RandomAccessFile(entry.file, "r")
+        } catch (FileNotFoundException ignored) {
+            return await(entry)   // a read that failed already removed its file: its failure is the answer
+        }
+        ByteArrayOutputStream partial = new ByteArrayOutputStream()
+        byte[] buffer = new byte[65536]
+        try {
+            while (true) {
+                // Done is read BEFORE the bytes: once a finished read's bytes are taken, nothing more is coming.
+                boolean done = entry.result.isDone()
+                int taken = 0
+                int n
+                while ((n = tail.read(buffer)) > 0) {
+                    taken += n
+                    int start = 0
+                    for (int i = 0; i < n; i++) {
+                        if (buffer[i] != (byte) 10) continue
+                        partial.write(buffer, start, i - start)
+                        String line = partial.toString(StandardCharsets.UTF_8.name())
+                        partial.reset()
+                        start = i + 1
+                        if (line) onRecord.call((Map) slurper.parseText(line))
+                    }
+                    partial.write(buffer, start, n - start)
+                }
+                if (done && taken == 0) break
+                if (taken == 0) Thread.sleep(200L)
+            }
+        } finally {
+            tail.close()
+        }
+        producing?.join()
+        return await(entry)
+    }
+
+    /** The key's live or reusable read, or a new entry for a caller to claim and produce. */
+    private static Entry entryFor(String key) {
         sweep()
         Entry mine = new Entry()
         Entry entry = READS.compute(key, { String k, Entry existing ->
@@ -48,8 +109,20 @@ class OmsGqlSharedRead {
                             clock.call() - existing.finishedAt < REUSE_MILLIS))
             return reusable ? existing : mine
         })
-        if (entry.is(mine)) produce(key, mine, producer)
-        else logger.info("oms shared read joined key={}", key)
+        if (!entry.is(mine)) mine.file.delete()
+        return entry
+    }
+
+    /** True for the one caller that is to produce the entry's read. */
+    private static boolean claim(Entry entry) {
+        synchronized (entry) {
+            if (entry.claimed) return false
+            entry.claimed = true
+            return true
+        }
+    }
+
+    private static Map await(Entry entry) {
         try {
             return entry.result.get()
         } catch (ExecutionException e) {
@@ -58,12 +131,13 @@ class OmsGqlSharedRead {
     }
 
     private static void produce(String key, Entry entry, Closure producer) {
-        File file = Files.createTempFile("darpan-oms-shared-", ".ndjson").toFile()
+        File file = entry.file
         long started = clock.call()
         try {
             Map stats
             file.withWriter(StandardCharsets.UTF_8.name()) { Writer w ->
-                Closure emit = { Map record -> synchronized (w) { w.write(JsonOutput.toJson(record)); w.write("\n") } }
+                // Flushed per record, so a follower reads each record as it is written.
+                Closure emit = { Map record -> synchronized (w) { w.write(JsonOutput.toJson(record)); w.write("\n"); w.flush() } }
                 stats = (Map) producer.call(emit) ?: [:]
             }
             entry.finishedAt = clock.call()

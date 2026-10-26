@@ -109,6 +109,16 @@ class OmsGqlQueriesTests {
                 [[fieldExpression: "productStoreId", operator: "EXCLUDE_IN", sequenceNum: 1]]))
     }
 
+    /** DAR-BE-129: an order read the shared orders read covers joins it; one needing a field it lacks reads alone. */
+    @Test
+    void theSharedOrdersReadCoversAReadOfItsFieldsAndTheDerivedOnes() {
+        assertTrue(OmsGqlQueries.sharedOrdersCover(null))
+        assertTrue(OmsGqlQueries.sharedOrdersCover(["orderId", "externalId", "hasPaymentPreference", "isCompleted"] as Set))
+        assertTrue(OmsGqlQueries.sharedOrdersCover(OmsGqlQueries.SHARED_ORDER_FIELDS))
+        assertFalse(OmsGqlQueries.sharedOrdersCover(["orderId", "productStoreId"] as Set))
+        assertFalse(OmsGqlQueries.sharedOrdersCover(["orderId", "identifications"] as Set))
+    }
+
     @Test
     void theReturnsOriginOrderLookupSelectsTheStoreWithinItsReservation() {
         // DAR-BE-068: one more scalar on a lookup already made, so the store costs no extra call.
