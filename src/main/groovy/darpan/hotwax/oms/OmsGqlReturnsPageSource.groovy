@@ -93,7 +93,9 @@ class OmsGqlReturnsPageSource {
         Map serverCounts = (Map) shared.serverCounts
         boolean keepNoShopifyRef = shared.keepNoShopifyRef == true
         String key = "returns|${client.readScope}|${slices.first()[0]}|${slices.last()[1]}".toString()
-        Map read = OmsGqlSharedRead.read(key) { Closure emit ->
+        List<Map> batch = []
+        // DAR-BE-129: followed, so the returns reach the extract's consumer (and the run's progress) as they are read.
+        Map read = OmsGqlSharedRead.follow(key, { Closure emit ->
             Map readPagination = new LinkedHashMap(pagination)
             Map producerShared = new LinkedHashMap(shared) + [pagination: readPagination, keepNoShopifyRef: true, onlyCancelled: false,
                     serverCounts: [returnsCount: 0, excludedNoShopifyRefCount: 0, excludedCancelledCount: 0, keptNoShopifyRefCount: 0],
@@ -103,14 +105,7 @@ class OmsGqlReturnsPageSource {
             }
             readPagination.pageCount = ((AtomicInteger) producerShared.pages).get()
             return [pagination: readPagination]
-        }
-        pagination.putAll((Map) ((Map) read.stats).pagination)
-        pagination.sharedRead = true
-        groovy.json.JsonSlurper slurper = new groovy.json.JsonSlurper()
-        List<Map> batch = []
-        ((File) read.file).eachLine("UTF-8") { String line ->
-            if (!line) return
-            Map record = (Map) slurper.parseText(line)
+        }) { Map record ->
             String verdict = record.remove(SHARED_VERDICT) as String
             serverCounts.returnsCount = (serverCounts.returnsCount as int) + 1
             if (verdict == OmsGqlReturnAssembler.CANCELLED) {
@@ -128,6 +123,8 @@ class OmsGqlReturnsPageSource {
             if (batch.size() >= RETURNS_BATCH) { ((Closure) shared.pageConsumer).call(batch); batch = [] }
         }
         if (batch) ((Closure) shared.pageConsumer).call(batch)
+        pagination.putAll((Map) ((Map) read.stats).pagination)
+        pagination.sharedRead = true
     }
 
     /** The classification a shared read's raw return carries, removed before the record reaches a caller. */

@@ -100,7 +100,7 @@ class OmsGqlOrderPageSource {
                 if (unitGrain && client.realEndpoint) {
                     readUnitsShared(client, shared, slices)
                 } else if (client.realEndpoint && OmsGqlQueries.sharedOrdersCover(required)) {
-                    shapeShared(ordersShared(client, shared, slices), shared)
+                    shapeShared(ordersKey(client, slices), ordersProducer(client, shared, slices), shared)
                 } else {
                     runSlices(slices, CONCURRENCY) { long from, long thru -> fetchSlice(client, shared, window(from, thru)) }
                 }
@@ -126,10 +126,6 @@ class OmsGqlOrderPageSource {
      * always run. The order checks and the order-line checks read a month's orders once between them (the 2026-10-26
      * Oct 1-25 audit read them twice: OmsOrderGrain 1.20M and OmsUnitOrders 1.29M of 5.4M cost).
      */
-    private static Map ordersShared(OmsGqlClient client, Map shared, List<List<Long>> slices) {
-        return OmsGqlSharedRead.read(ordersKey(client, slices), ordersProducer(client, shared, slices))
-    }
-
     private static String ordersKey(OmsGqlClient client, List<List<Long>> slices) {
         return "orders|${client.readScope}|${slices.first()[0]}|${slices.last()[1]}".toString()
     }
@@ -156,7 +152,7 @@ class OmsGqlOrderPageSource {
      */
     private static void readUnitsShared(OmsGqlClient client, Map shared, List<List<Long>> slices) {
         String key = "units|${client.readScope}|${slices.first()[0]}|${slices.last()[1]}".toString()
-        Map read = OmsGqlSharedRead.read(key) { Closure emit ->
+        shapeShared(key, { Closure emit ->
             Map itemsPagination = [lookupCalls: 0]
             // CONCURRENCY batches in flight at a time: a month is ~92,000 orders, too many to hold at once.
             java.util.concurrent.Semaphore slots = new java.util.concurrent.Semaphore(CONCURRENCY)
@@ -193,37 +189,39 @@ class OmsGqlOrderPageSource {
             } finally {
                 pool.shutdownNow()
             }
-        }
-        shapeShared(read, shared)
+        }, shared)
     }
 
-    /** A shared read's file shaped by this caller's own filters and projection, SHARED_SHAPE_BATCH records at a time. */
-    private static void shapeShared(Map read, Map shared) {
+    /**
+     * A shared read shaped by this caller's own filters and projection, SHARED_SHAPE_BATCH records at a time. DAR-BE-129:
+     * it follows the read, so its records reach the extract's page consumer (and the run's progress heartbeat) while the
+     * read runs, not all at its end.
+     */
+    private static void shapeShared(String key, Closure producer, Map shared) {
         Map pagination = (Map) shared.pagination
         Map ctx = (Map) shared.ctx
-        pagination.putAll((Map) ((Map) read.stats).pagination)
-        pagination.sharedRead = true
-        pagination.totalFetched = 0
-        groovy.json.JsonSlurper slurper = new groovy.json.JsonSlurper()
+        int fetched = 0
+        int slotsFull = 0
         List<Map> batch = []
         Closure shapeBatch = {
             Map bundle = OmsRestSourceSupport.shapePageRecords(batch, (Map) shared.extractOptions,
                     (List<Map<String, Object>>) ctx.excludeRules, (Set<String>) ctx.keepFieldSet) + [rawCount: batch.size()]
-            pagination.totalFetched = (pagination.totalFetched as int) + batch.size()
-            pagination.paymentPreferenceSlotsFullCount = (pagination.paymentPreferenceSlotsFullCount as int) +
-                    batch.count { it.paymentPreferenceSlotsFull == true }
+            fetched += batch.size()
+            slotsFull += batch.count { it.paymentPreferenceSlotsFull == true }
             ((Closure) shared.pageConsumer).call(bundle)
             batch = []
         }
-        ((File) read.file).eachLine("UTF-8") { String line ->
-            if (!line) return
-            Map record = (Map) slurper.parseText(line)
+        Map read = OmsGqlSharedRead.follow(key, producer) { Map record ->
             // The shared read always grafts the exchange assocs; a caller without the exchange exclusion never asked.
             if (shared.exchangePass == false) record.remove("orderItemAssocs")
             batch.add(record)
             if (batch.size() >= SHARED_SHAPE_BATCH) shapeBatch.call()
         }
         if (batch) shapeBatch.call()
+        pagination.putAll((Map) ((Map) read.stats).pagination)
+        pagination.sharedRead = true
+        pagination.totalFetched = fetched
+        pagination.paymentPreferenceSlotsFullCount = slotsFull
     }
 
     /**
