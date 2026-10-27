@@ -38,15 +38,8 @@ class OmsReturnsSourceSupport {
     static final int DEFAULT_MAX_PAGE_ATTEMPTS = 3
     /** Linear backoff step: attempt N waits N x this before re-requesting. */
     static final int DEFAULT_RETRY_BACKOFF_MILLIS = 2000
-    /**
-     * Statuses a retry can actually fix. All four are "the server is momentarily unable", not "the
-     * request is wrong": 502/503/504 come from the gateway rather than the OMS app, and 429 is an
-     * explicit ask to come back later.
-     *
-     * 500 is deliberately absent. It signals a deterministic server-side fault, so three attempts
-     * only triple the load and delay a certain failure by the whole backoff.
-     */
-    static final Set<Integer> RETRYABLE_STATUS_CODES = [429, 502, 503, 504] as Set
+    /** Shared with the orders read; see OmsRestSourceSupport.RETRYABLE_STATUS_CODES for why 500 is absent. */
+    static final Set<Integer> RETRYABLE_STATUS_CODES = OmsRestSourceSupport.RETRYABLE_STATUS_CODES
 
     private static final JsonSlurper JSON_SLURPER = new JsonSlurper()
 
@@ -361,26 +354,13 @@ class OmsReturnsSourceSupport {
             if (attempt >= maxAttempts) break
             warnings.add(("OMS returns page ${pageIndex} failed with status ${statusCode}; " +
                     "retrying (attempt ${attempt + 1} of ${maxAttempts}).").toString())
-            sleepQuietly((long) backoffMillis * attempt)
+            OmsRestSourceSupport.sleepQuietly((long) backoffMillis * attempt)
         }
 
         String attemptsNote = attemptsUsed > 1 ? " after ${attemptsUsed} attempts" : ""
         String detailNote = lastDetail ? ": ${lastDetail}" : ""
         return [ok: false, error: ("OMS returns request for page ${pageIndex} failed with " +
                 "status ${lastStatus}${attemptsNote}${detailNote}.").toString()]
-    }
-
-    /**
-     * Restores the interrupt flag rather than swallowing it: this runs inside a Moqui service
-     * thread, and a cancel that arrives mid-backoff must stay visible to the code above.
-     */
-    private static void sleepQuietly(long millis) {
-        if (millis <= 0L) return
-        try {
-            Thread.sleep(millis)
-        } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt()
-        }
     }
 
     /**

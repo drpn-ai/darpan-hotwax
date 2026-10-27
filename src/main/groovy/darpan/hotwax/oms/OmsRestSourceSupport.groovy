@@ -56,6 +56,19 @@ class OmsRestSourceSupport {
     // Some OMS list endpoints silently cap a page at 50 records regardless of the requested pageSize;
     // a 50-record first page is therefore treated as "maybe truncated" and triggers a second-page probe.
     static final int OMS_DEFAULT_SERVER_PAGE_SIZE = 50
+    /**
+     * Statuses a retry can actually fix. All four are "the server is momentarily unable", not "the
+     * request is wrong": 502/503/504 come from the gateway rather than the OMS app, and 429 is an
+     * explicit ask to come back later.
+     *
+     * 500 is deliberately absent. It signals a deterministic server-side fault, so retrying only
+     * multiplies the load and delays a certain failure by the whole backoff.
+     */
+    static final Set<Integer> RETRYABLE_STATUS_CODES = [429, 502, 503, 504] as Set
+    // An orders page is one of hundreds in a month-long window, so it gets more patience than a
+    // returns page: linear 5s steps wait up to 50s in all before the page fails.
+    static final int DEFAULT_MAX_PAGE_ATTEMPTS = 5
+    static final int DEFAULT_PAGE_RETRY_BACKOFF_MILLIS = 5000
     static final String DEFAULT_WINDOW_FIELD_NAME = "orderDate"
 
     // ---- /rest/s1/oms/reconciliationOrders (DAR-BE-018) ------------------------------------------
@@ -1392,10 +1405,25 @@ class OmsRestSourceSupport {
             if (firstStatusCode == 404) {
                 String retryUrl = trailingSlashBeforeQuery(requestUrl)
                 if (retryUrl && retryUrl != requestUrl) {
+                    requestUrl = retryUrl
                     response = callOmsEndpoint(retryUrl, headers, config, !retriedWithoutCompression)
                     attemptCount++
                     retriedWithTrailingSlash = true
                 }
+            }
+            // DAR-BE-142: a gateway 502/503/504 or a 429 is momentary, and this page is one of hundreds
+            // in a long window. Failing here discards every page already read (sm-darpan run 100519 lost
+            // 99 minutes to one 502), and the automation's own retry re-reads the window from page 0.
+            int maxPageAttempts = Math.max(1, normalizeInt(config?.maxPageAttempts, DEFAULT_MAX_PAGE_ATTEMPTS))
+            int retryBackoffMillis = Math.max(0, normalizeInt(config?.retryBackoffMillis, DEFAULT_PAGE_RETRY_BACKOFF_MILLIS))
+            for (int transientAttempt = 1;
+                 RETRYABLE_STATUS_CODES.contains(normalizeInt(response.statusCode, 0)) && transientAttempt < maxPageAttempts;
+                 transientAttempt++) {
+                warnings.add(("OMS REST page ${pageParams ?: '(unpaginated)'} failed with status ${response.statusCode}; " +
+                        "retrying (attempt ${transientAttempt + 1} of ${maxPageAttempts}).").toString())
+                sleepQuietly((long) retryBackoffMillis * transientAttempt)
+                response = callOmsEndpoint(requestUrl, headers, config, !retriedWithoutCompression)
+                attemptCount++
             }
         } catch (Exception e) {
             return pageFailure(0, attemptCount, retriedWithTrailingSlash, "OMS REST request failed: ${e.message}")
@@ -1410,8 +1438,10 @@ class OmsRestSourceSupport {
             // message is left exactly as it was — that endpoint has no such contract.
             String detail = reconEndpoint ? describeEndpointError(response.body) : null
             if (detail == null) {
+                String attemptsNote = RETRYABLE_STATUS_CODES.contains(statusCode) && attemptCount > 1 ?
+                        " after ${attemptCount} attempts" : ""
                 return pageFailure(statusCode, attemptCount, retriedWithTrailingSlash,
-                        "OMS REST request failed with status ${statusCode}.")
+                        "OMS REST request failed with status ${statusCode}${attemptsNote}.")
             }
             // Name the knob. The server states its own maximum, but nothing in that message tells an
             // operator WHERE to change it on the Darpan side, and the whole reason this is an error
@@ -1494,6 +1524,19 @@ class OmsRestSourceSupport {
         String message = normalize(source.get("message") ?: source.get("errorMessage") ?: source.get("error"))
         if (code && message) return "${code} — ${message}".toString()
         return code ?: message
+    }
+
+    /**
+     * Restores the interrupt flag rather than swallowing it: this runs inside a Moqui service
+     * thread, and a cancel that arrives mid-backoff must stay visible to the code above.
+     */
+    protected static void sleepQuietly(long millis) {
+        if (millis <= 0L) return
+        try {
+            Thread.sleep(millis)
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt()
+        }
     }
 
     private static Map<String, Object> pageFailure(int statusCode, int attemptCount, boolean retriedWithTrailingSlash, String error) {

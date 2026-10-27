@@ -339,16 +339,87 @@ class OmsRestSourceSupportTests {
 
     @Test
     void returnsErrorsForNon200ResponseWithoutOutput() {
+        int calls = 0
         OmsRestSourceSupport.setHttpClient { Map ignored ->
+            calls++
             [statusCode: 503, body: '{"error":"unavailable"}']
         }
 
-        Map result = OmsRestSourceSupport.extractOrders(baseConfig(), "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z")
+        Map result = OmsRestSourceSupport.extractOrders(baseConfig([retryBackoffMillis: 0]),
+                "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z")
 
         assertEquals(0, result.recordCount)
         assertFalse(result.errors.isEmpty())
-        assertTrue(result.errors[0].contains("status 503"))
+        assertTrue(result.errors[0].contains("status 503 after 5 attempts"), result.errors[0] as String)
+        assertEquals(OmsRestSourceSupport.DEFAULT_MAX_PAGE_ATTEMPTS, calls)
         assertNull(result.outputText)
+    }
+
+    @Test
+    void retriesAMidWindowGatewayFailureWithoutLosingPages() {
+        // DAR-BE-142, sm-darpan run 100519: one 502 deep in a month-long read used to fail the run.
+        List<Integer> requestedPages = []
+        boolean failedOnce = false
+        OmsRestSourceSupport.setHttpClient { Map request ->
+            int pageIndex = queryInt(request.url as String, "pageIndex")
+            requestedPages.add(pageIndex)
+            if (pageIndex == 1 && !failedOnce) {
+                failedOnce = true
+                return [statusCode: 502, body: "<html>Bad Gateway</html>"]
+            }
+            List orders = [
+                    [[externalId: "O100", orderTypeId: "SALES_ORDER"], [externalId: "O200", orderTypeId: "SALES_ORDER"]],
+                    [[externalId: "O300", orderTypeId: "SALES_ORDER"], [externalId: "O400", orderTypeId: "SALES_ORDER"]],
+                    [[externalId: "O500", orderTypeId: "SALES_ORDER"]],
+            ][pageIndex] ?: []
+            return [statusCode: 200, body: JsonOutput.toJson([orders: orders])]
+        }
+
+        Map result = OmsRestSourceSupport.extractOrders(baseConfig([
+                ordersPageSize        : 2,
+                ordersFetchConcurrency: 1,
+                retryBackoffMillis    : 0,
+        ]), "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z")
+
+        assertTrue(result.errors.isEmpty(), result.errors.toString())
+        assertEquals([0, 1, 1, 2], requestedPages)
+        assertEquals(5, result.recordCount)
+        assertTrue(result.warnings.any { it.contains("status 502; retrying (attempt 2 of 5)") }, result.warnings.toString())
+        Map output = JSON_SLURPER.parseText(result.outputText as String) as Map
+        assertEquals(["O100", "O200", "O300", "O400", "O500"], ((List) output.records).collect { it.externalId })
+    }
+
+    @Test
+    void doesNotRetryADeterministicServerError() {
+        int calls = 0
+        OmsRestSourceSupport.setHttpClient { Map ignored ->
+            calls++
+            [statusCode: 500, body: '{"error":"boom"}']
+        }
+
+        Map result = OmsRestSourceSupport.extractOrders(baseConfig([retryBackoffMillis: 0]),
+                "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z")
+
+        assertEquals(1, calls)
+        assertEquals("OMS REST request failed with status 500.", result.errors[0])
+    }
+
+    @Test
+    void retriesAtTheTrailingSlashUrlAfterA404Fallback() {
+        List<String> urls = []
+        OmsRestSourceSupport.setHttpClient { Map request ->
+            String url = request.url as String
+            urls.add(url)
+            if (!url.contains("/orders/?")) return [statusCode: 404, body: ""]
+            return urls.size() == 2 ? [statusCode: 503, body: ""] : [statusCode: 200, body: '{"orders":[]}']
+        }
+
+        Map result = OmsRestSourceSupport.extractOrders(baseConfig([retryBackoffMillis: 0]),
+                "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z")
+
+        assertTrue(result.errors.isEmpty(), result.errors.toString())
+        assertEquals(3, urls.size())
+        assertTrue(urls[2].contains("/orders/?"), urls[2])
     }
 
     @Test
