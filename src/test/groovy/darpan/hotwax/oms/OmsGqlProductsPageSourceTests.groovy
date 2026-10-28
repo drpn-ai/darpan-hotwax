@@ -45,6 +45,7 @@ class OmsGqlProductsPageSourceTests {
         assertEquals("26161", r.netsuiteProductId)
         assertEquals("26161", r.nsKey)
         assertEquals(false, r.duplicateNetsuiteId)
+        assertEquals("OWN", r.netsuiteIdState)
     }
 
     @Test
@@ -52,6 +53,7 @@ class OmsGqlProductsPageSourceTests {
         Map built = OmsGqlProductsPageSource.buildRecords([product("10056")], [])
         assertNull(built.records[0].netsuiteProductId)
         assertEquals("HOTWAX-ONLY:10056", built.records[0].nsKey)
+        assertEquals("NONE", built.records[0].netsuiteIdState, "conclusions test it with IN: the engine has no prefix operator")
         assertEquals(1, built.metadata.withoutNetsuiteId)
     }
 
@@ -70,6 +72,8 @@ class OmsGqlProductsPageSourceTests {
         Map<String, Map> byId = built.records.collectEntries { [(it.productId): it] }
         assertEquals("43000", byId["10100"].nsKey)
         assertEquals("DUPLICATE:43000:10200", byId["10200"].nsKey)
+        assertEquals("OWN", byId["10100"].netsuiteIdState, "the first product keeps the id and matches")
+        assertEquals("SHARED", byId["10200"].netsuiteIdState)
         assertEquals("43000", byId["10200"].netsuiteProductId)
         assertTrue(byId["10100"].duplicateNetsuiteId && byId["10200"].duplicateNetsuiteId)
         assertEquals(1, built.metadata.netsuiteIdsOnSeveralProducts)

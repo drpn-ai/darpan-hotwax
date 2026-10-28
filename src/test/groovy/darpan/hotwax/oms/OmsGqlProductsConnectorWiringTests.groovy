@@ -57,7 +57,7 @@ class OmsGqlProductsConnectorWiringTests {
         Set<String> paths = new XmlSlurper().parse(file(FIELDS)).'**'.findAll {
             it.name() == "darpan.reconciliation.SourceSystemConnectorField" && it.@systemEnumId == "OMS_PRODUCTS_GQL"
         }.collect { it.@fieldPath.toString() } as Set
-        assertEquals(["nsKey", "netsuiteProductId", "productId", "internalName", "productTypeId", "createdDate", "duplicateNetsuiteId"]
+        assertEquals(["nsKey", "netsuiteProductId", "productId", "internalName", "productTypeId", "createdDate", "duplicateNetsuiteId", "netsuiteIdState"]
                 .collect { "\$.records[*].${it}".toString() } as Set, paths)
     }
 

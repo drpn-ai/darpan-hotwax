@@ -62,7 +62,9 @@ class OmsGqlProductsPageSource {
             List<String> sharing = nsId ? productsByNsId[nsId] : []
             String nsKey = !nsId ? "HOTWAX-ONLY:${productId}" : sharing[0] == productId ? nsId : "DUPLICATE:${nsId}:${productId}"
             [productId: productId, internalName: p.internalName, productTypeId: p.productTypeId, createdDate: p.createdDate,
-             netsuiteProductId: nsId, nsKey: nsKey.toString(), duplicateNetsuiteId: sharing.size() > 1] as Map
+             netsuiteProductId: nsId, nsKey: nsKey.toString(), duplicateNetsuiteId: sharing.size() > 1,
+             // What the key is, for conclusion conditions (IN; the engine has no prefix operator).
+             netsuiteIdState: !nsId ? "NONE" : sharing[0] == productId ? "OWN" : "SHARED"] as Map
         }
         return [records : records,
                 metadata: [productsRead: products.size(), sellable: records.size(),
