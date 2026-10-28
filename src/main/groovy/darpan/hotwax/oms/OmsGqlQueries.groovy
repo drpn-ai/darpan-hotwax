@@ -24,16 +24,18 @@ class OmsGqlQueries {
     /** Two slots: 1-2 OPPs cover 97% of gorjana orders, and k=3 would force the page down to 40. */
     static final int PAYMENT_PREF_SLOTS = 2
     /**
-     * DAR-BE-153: a rule on the OPPs' Shopify transaction ids reads six. An exchange adds OPPs to its ORIGINAL order (the
-     * card capture, a top-up, and the exchange tenders that move them), so gorjana's #GOR197298413 holds four.
+     * DAR-BE-153: a rule on the OPPs' Shopify transaction ids reads five. An exchange adds OPPs to its ORIGINAL order (the
+     * card capture, a top-up, and the exchange tenders that move them), so gorjana's #GOR197298413 holds four, the most
+     * in the 300-order probe; a read that fills every slot cannot tell whether one more exists, so four would leave it
+     * unchecked.
      */
-    static final int REFNUM_PAYMENT_PREF_SLOTS = 6
+    static final int REFNUM_PAYMENT_PREF_SLOTS = 5
     static final double PAGE_OVERHEAD = 100d
     static final double HEADER_COST = 8.0d           // the ALWAYS_FIELDS, per order
     static final double EXTRA_SCALAR_COST = 1.5d     // each further header scalar, per order (conservative)
     static final double PER_SLOT_COST = 4.0d
-    /** A slot costs 1 + its fields (3 fields -> 4 measured; 7 fields: 25 x 6 COST_EXCEEDED, 15 x 4 not, gorjana 2026-10-28). */
-    static final double REFNUM_SLOT_COST = 5.0d
+    /** The OPP fields the presence read has always asked. */
+    static final List<String> PAYMENT_SLOT_FIELDS = ["paymentMethodTypeId", "statusId", "maxAmount"].asImmutable()
     static final int ASSOC_PAGE_SIZE = 50
     static final int ASSOC_RESERVATION = 350         // measured 300 at first: 50
 
@@ -93,14 +95,18 @@ class OmsGqlQueries {
         int extraScalars = scalars.size() - ALWAYS_FIELDS.size()
         boolean refNums = wanted.contains("paymentRefNums")
         int slots = refNums ? REFNUM_PAYMENT_PREF_SLOTS : PAYMENT_PREF_SLOTS
-        double slotCost = refNums ? REFNUM_SLOT_COST : PER_SLOT_COST
+        // DAR-BE-153: HotWax bills every slot asked for, filled or not, so a read of the ids alone asks manualRefNum alone;
+        // anything else that reads a payment row's fields keeps the full row.
+        List<String> slotFields = refNums && !wanted.contains("paymentMethodTypeIds") ? ["manualRefNum"] :
+                (PAYMENT_SLOT_FIELDS + (refNums ? ["manualRefNum"] : []))
+        double slotCost = slotCost(slotFields)
         double perOrder = perOrderCost(slots, extraScalars, nested, slotCost)
         int budget = QUERY_COST_BUDGET
         int pageSize = Math.max(1, Math.min(MAX_PAGE_SIZE, (int) Math.floor((budget - PAGE_OVERHEAD) / perOrder)))
         int reservation = Math.min(budget + 50, estimatedPageCost(pageSize, slots, extraScalars, nested, slotCost) + 50)
 
         String selection = (scalars as List).join(" ") +
-                "\n      paymentPreferences(first: ${slots}) { paymentMethodTypeId statusId maxAmount${refNums ? ' manualRefNum' : ''} }" +
+                "\n      paymentPreferences(first: ${slots}) { ${slotFields.join(' ')} }" +
                 nested.collect { "\n      " + NESTED_FIELDS[it].selection }.join("")
         String document = """query OmsOrderGrain(\$q: String, \$first: Int, \$after: String) {
   orders(query: \$q, sortKey: ORDER_DATE, reverse: false, first: \$first, after: \$after) {
@@ -111,6 +117,14 @@ class OmsGqlQueries {
   }
 }"""
         return [document: document, pageSize: pageSize, reservation: reservation, paymentSlots: slots, paymentRefNums: refNums]
+    }
+
+    /**
+     * What one requested payment slot costs: 1 + its fields. Measured: 3 fields -> 4 (DAR-BE-064); 7 fields, 25 orders x 6
+     * slots COST_EXCEEDED and 15 x 4 not (gorjana 2026-10-28).
+     */
+    static double slotCost(List<String> fields) {
+        return 1.0d + (fields ?: []).size()
     }
 
     /** Requested (= actual) cost of one orders page under the measured model. */

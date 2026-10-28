@@ -141,21 +141,39 @@ class OmsGqlQueriesTests {
         assertTrue(OmsGqlQueries.orderGrainPagePlan(["orderId", "statuses"] as Set).document.contains("statuses(first: 12) { statusId statusDatetime orderItemSeqId }"))
     }
 
-    /** DAR-BE-153: a rule on the OPPs' Shopify transaction ids reads manualRefNum from six slots, under the query cap. */
+    /**
+     * DAR-BE-153: a rule on the OPPs' Shopify transaction ids reads manualRefNum alone from five slots (an order holding the probe's most, four, is not cut short). HotWax bills every
+     * slot asked for, at 1 + its fields, so the page stays within 15% of the two-slot presence read's (47 against 53
+     * orders), where the full four-field row at six slots fit 22.
+     */
     @Test
-    void askingForPaymentRefNumsReadsManualRefNumFromSixSlotsUnderTheQueryCap() {
+    void askingForPaymentRefNumsReadsOnlyManualRefNumFromFiveSlots() {
         Map plan = OmsGqlQueries.orderGrainPagePlan(PRESENCE_KEEP + ["paymentRefNums"] as Set)
+        Map lean = OmsGqlQueries.orderGrainPagePlan(PRESENCE_KEEP)
+        assertEquals(5, OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS)
         assertEquals(OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS, plan.paymentSlots)
         assertEquals(true, plan.paymentRefNums)
-        assertTrue((plan.document as String).contains(
-                "paymentPreferences(first: ${OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS}) { paymentMethodTypeId statusId maxAmount manualRefNum }".toString()))
-        // Live gorjana 2026-10-28: 25 orders x 6 slots of 7 OPP fields was COST_EXCEEDED, 15 x 4 was not; a slot costs 1 + its fields.
-        assertTrue(OmsGqlQueries.estimatedPageCost((int) plan.pageSize, OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS, 0, [], 5.0d) <= OmsGqlQueries.QUERY_COST_BUDGET)
+        assertTrue((plan.document as String).contains("paymentPreferences(first: 5) { manualRefNum }"), plan.document as String)
+        assertTrue((plan.pageSize as int) * 100 >= (lean.pageSize as int) * 85, "${plan.pageSize} vs ${lean.pageSize}")
         assertTrue((plan.reservation as int) <= OmsGqlQueries.QUERY_COST_BUDGET + 50)
 
-        Map lean = OmsGqlQueries.orderGrainPagePlan(PRESENCE_KEEP)
         assertEquals(OmsGqlQueries.PAYMENT_PREF_SLOTS, lean.paymentSlots)
-        assertFalse((lean.document as String).contains("manualRefNum"))
+        assertTrue((lean.document as String).contains("paymentPreferences(first: 2) { paymentMethodTypeId statusId maxAmount }"))
+    }
+
+    @Test
+    void anotherPaymentFieldBesideTheIdsReadsTheFullRow() {
+        String doc = OmsGqlQueries.orderGrainPagePlan(PRESENCE_KEEP + ["paymentRefNums", "paymentMethodTypeIds"] as Set).document
+        assertTrue(doc.contains("paymentPreferences(first: 5) { paymentMethodTypeId statusId maxAmount manualRefNum }"), doc)
+    }
+
+    /** A slot costs 1 + its fields: 3 fields -> 4 measured (DAR-BE-064); 7 fields: 25 x 6 COST_EXCEEDED, 15 x 4 not (2026-10-28). */
+    @Test
+    void aSlotCostsOnePlusItsFields() {
+        assertEquals(4.0d, OmsGqlQueries.slotCost(["paymentMethodTypeId", "statusId", "maxAmount"]))
+        assertEquals(2.0d, OmsGqlQueries.slotCost(["manualRefNum"]))
+        assertTrue(100 + 25 * (8 + 6 * 8) > 1000)
+        assertTrue(100 + 15 * (8 + 4 * 8) <= 950)
     }
 
     @Test

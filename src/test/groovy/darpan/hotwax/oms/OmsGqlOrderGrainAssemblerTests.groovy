@@ -133,8 +133,7 @@ class OmsGqlOrderGrainAssemblerTests {
         // #GOR197298413's original order M1058338: the card capture, an exchange top-up taken a month later, and the
         // exchange tenders that moved both to EXC-#GOR197298413-1 (one with an EPRA- id, one with none).
         List opps = [ref("EXT_SHOP_PAYMENTS", "PAYMENT_SETTLED", "20766330257539"), ref("EXCHANGE_CREDIT", "PAYMENT_REFUNDED", null),
-                     ref("EXCHANGE_PAYMENT", "PAYMENT_REFUNDED", "EPRA-20853219360899"), ref("EXT_SHOP_PAYMENTS", "PAYMENT_SETTLED", "20853219360899"),
-                     ref("EXT_SHOP_PAYMENTS", "PAYMENT_SETTLED", "20766330257539")]
+                     ref("EXCHANGE_PAYMENT", "PAYMENT_REFUNDED", "EPRA-20853219360899"), ref("EXT_SHOP_PAYMENTS", "PAYMENT_SETTLED", "20853219360899")]
         Map o = OmsGqlOrderGrainAssembler.assemble([order("M1058338", opps)], [], OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS, true)[0]
         assertEquals("20766330257539,20853219360899,EPRA-20853219360899", o.paymentRefNums)
         assertEquals(false, o.paymentPreferenceSlotsFull)
@@ -146,6 +145,17 @@ class OmsGqlOrderGrainAssemblerTests {
         assertEquals("", OmsGqlOrderGrainAssembler.assemble([order("M1188468", [ref("EXCHANGE_CREDIT", "PAYMENT_SETTLED", "")])], [],
                 OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS, true)[0].paymentRefNums)
         assertEquals("", OmsGqlOrderGrainAssembler.assemble([order("M1")], [], OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS, true)[0].paymentRefNums)
+    }
+
+    @Test
+    void aReadOfTheIdsAloneClaimsNoPaymentMethods() {
+        // The page asked manualRefNum only, so the rows carry no method: paymentMethodTypeIds is left out, not "".
+        Map o = OmsGqlOrderGrainAssembler.assemble([order("M1", [[manualRefNum: "2"], [manualRefNum: "1"], [manualRefNum: "2"]])], [],
+                OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS, true)[0]
+        assertEquals("1,2", o.paymentRefNums)
+        assertEquals("Y", o.hasPaymentPreference)
+        assertFalse(o.containsKey("paymentMethodTypeIds"))
+        assertEquals("", OmsGqlOrderGrainAssembler.assemble([order("M2")], [])[0].paymentMethodTypeIds)
     }
 
     @Test

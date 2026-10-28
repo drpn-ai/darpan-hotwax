@@ -474,14 +474,13 @@ class OmsGqlOrderPageSourceTests {
     @Test
     void aRuleOnPaymentRefNumsReadsTheOppsShopifyTransactionIds() {
         ScriptedClient client = new ScriptedClient([
-                ordersPage([order("M1", [[paymentMethodTypeId: "EXT_SHOP_PAYMENTS", statusId: "PAYMENT_SETTLED", manualRefNum: "20766330257539"],
-                                         [paymentMethodTypeId: "EXCHANGE_CREDIT", statusId: "PAYMENT_REFUNDED", manualRefNum: null]])], false),
+                ordersPage([order("M1", [[manualRefNum: "20766330257539"], [manualRefNum: null]])], false),
                 assocsPage([])])
         File out = File.createTempFile("gql-", ".json")
         try {
             run(client, out, ["orderId", "externalId", "paymentRefNums"])
             assertTrue(((Map) client.calls[0]).document.toString().contains(
-                    "paymentPreferences(first: ${OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS}) { paymentMethodTypeId statusId maxAmount manualRefNum }".toString()))
+                    "paymentPreferences(first: ${OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS}) { manualRefNum }".toString()))
             List records = (List) (new JsonSlurper().parse(out) as Map).records
             assertEquals("20766330257539", ((Map) records[0]).paymentRefNums)
         } finally { out.delete() }

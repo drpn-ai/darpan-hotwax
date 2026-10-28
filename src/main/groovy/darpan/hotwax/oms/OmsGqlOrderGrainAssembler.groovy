@@ -53,8 +53,11 @@ class OmsGqlOrderGrainAssembler {
 
             List<Map> opps = ((order.get("paymentPreferences") ?: []) as List<Map>)
             order.put("hasPaymentPreference", opps ? "Y" : "N")
-            order.put("paymentMethodTypeIds", opps.collect { it?.get("paymentMethodTypeId") as String }
-                    .findAll { it }.unique().sort().join(","))
+            // A read of the ids alone asks no method (DAR-BE-153), so it claims no methods rather than none.
+            if (!opps || opps.any { it?.containsKey("paymentMethodTypeId") }) {
+                order.put("paymentMethodTypeIds", opps.collect { it?.get("paymentMethodTypeId") as String }
+                        .findAll { it }.unique().sort().join(","))
+            }
             boolean slotsFull = opps.size() >= slots
             order.put("paymentPreferenceSlotsFull", slotsFull)
             // DAR-BE-153: the Shopify transaction ids the OPPs name. A read that filled every slot may have left one out,
