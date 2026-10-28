@@ -141,6 +141,29 @@ class OmsGqlQueriesTests {
         assertTrue(OmsGqlQueries.orderGrainPagePlan(["orderId", "statuses"] as Set).document.contains("statuses(first: 12) { statusId statusDatetime orderItemSeqId }"))
     }
 
+    /** DAR-BE-151: the brain's order-payments question reads raw OPP rows: a taken and a given-back row per tender. */
+    @Test
+    void askingForPaymentPreferencesWidensTheSlotsUnderTheQueryCap() {
+        Map plan = OmsGqlQueries.orderGrainPagePlan(["orderId", "grandTotal", "paymentPreferences"] as Set)
+        assertEquals(OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS, plan.paymentSlots)
+        assertTrue((plan.document as String).contains("paymentPreferences(first: ${OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS}) { paymentMethodTypeId statusId maxAmount }".toString()))
+        assertTrue((plan.reservation as int) <= OmsGqlQueries.QUERY_COST_BUDGET + 50)
+        assertEquals(OmsGqlQueries.PAYMENT_PREF_SLOTS, OmsGqlQueries.orderGrainPagePlan(["orderId", "notes"] as Set).paymentSlots)
+    }
+
+    @Test
+    void aReadOfRawPaymentsNeverJoinsTheTwoSlotSharedRead() {
+        assertFalse(OmsGqlQueries.sharedOrdersCover(["orderId", "externalId", "paymentPreferences"] as Set))
+    }
+
+    @Test
+    void keepingPaymentPreferencesKeepsTheSlotsFullFlag() {
+        assertTrue(OmsGqlQueries.keepWithCompanions(["orderId", "paymentPreferences"] as Set).contains("paymentPreferenceSlotsFull"))
+        assertEquals(["orderId"] as Set, OmsGqlQueries.keepWithCompanions(["orderId"] as Set))
+        assertNull(OmsGqlQueries.keepWithCompanions(null))
+    }
+
+
     /**
      * DAR-BE-153: a rule on the OPPs' Shopify transaction ids reads manualRefNum alone from five slots (an order holding the probe's most, four, is not cut short). HotWax bills every
      * slot asked for, at 1 + its fields, so the page stays within 15% of the two-slot presence read's (47 against 53

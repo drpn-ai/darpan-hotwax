@@ -52,6 +52,11 @@ class OmsGqlQueries {
     /** Computed by OmsGqlOrderGrainAssembler from paymentPreferences and statusId, which are always selected. */
     static final Set<String> DERIVED_FIELDS = ["hasPaymentPreference", "paymentMethodTypeIds", "paymentPreferenceSlotsFull",
             "isCompleted", "paymentRefNums"] as Set
+    /**
+     * DAR-BE-151: the raw OPP rows themselves, kept for the conclusion brain's order-payments question (a tender taken and
+     * given back is two rows). Always selected; asking for them widens the read to six slots, like paymentRefNums.
+     */
+    static final String RAW_PAYMENTS_FIELD = "paymentPreferences"
     /** Nested lists, selected only when something reads them, with their measured per-order cost. */
     static final Map<String, Map> NESTED_FIELDS = [
             identifications: [selection: "identifications(first: 5) { orderIdentificationTypeId idValue }", cost: 18.0d],
@@ -82,7 +87,7 @@ class OmsGqlQueries {
     static Map orderGrainPagePlan(Set<String> requiredFields) {
         Set<String> wanted = requiredFields ?: ([] as Set<String>)
         List<String> unknown = wanted.findAll { String f ->
-            !HEADER_FIELDS.contains(f) && !DERIVED_FIELDS.contains(f) && !NESTED_FIELDS.containsKey(f)
+            !HEADER_FIELDS.contains(f) && !DERIVED_FIELDS.contains(f) && !NESTED_FIELDS.containsKey(f) && f != RAW_PAYMENTS_FIELD
         }.sort()
         if (unknown) {
             throw new IllegalArgumentException("The OMS GraphQL order extract cannot supply field(s) ${unknown}. " +
@@ -97,10 +102,12 @@ class OmsGqlQueries {
 
         int extraScalars = scalars.size() - ALWAYS_FIELDS.size()
         boolean refNums = wanted.contains("paymentRefNums")
-        int slots = refNums ? REFNUM_PAYMENT_PREF_SLOTS : PAYMENT_PREF_SLOTS
+        // DAR-BE-151: a read keeping the raw OPP rows asks the wider slots too.
+        boolean rawPayments = wanted.contains(RAW_PAYMENTS_FIELD)
+        int slots = refNums || rawPayments ? REFNUM_PAYMENT_PREF_SLOTS : PAYMENT_PREF_SLOTS
         // DAR-BE-153: HotWax bills every slot asked for, filled or not, so a read of the ids alone asks manualRefNum alone;
-        // anything else that reads a payment row's fields keeps the full row.
-        List<String> slotFields = refNums && !wanted.contains("paymentMethodTypeIds") ? ["manualRefNum"] :
+        // anything else that reads a payment row's fields (raw rows included) keeps the full row.
+        List<String> slotFields = refNums && !wanted.contains("paymentMethodTypeIds") && !rawPayments ? ["manualRefNum"] :
                 (PAYMENT_SLOT_FIELDS + (refNums ? ["manualRefNum"] : []))
         double slotCost = slotCost(slotFields)
         double perOrder = perOrderCost(slots, extraScalars, nested, slotCost)
@@ -128,6 +135,15 @@ class OmsGqlQueries {
      */
     static double slotCost(List<String> fields) {
         return 1.0d + (fields ?: []).size()
+    }
+
+    /**
+     * DAR-BE-151: a projection keeping the raw OPP rows also keeps paymentPreferenceSlotsFull, or a read the slots cut
+     * short would look complete to whoever reads the rows. Null stays null (no projection).
+     */
+    static Set<String> keepWithCompanions(Set<String> keepFieldSet) {
+        if (keepFieldSet == null || !keepFieldSet.contains(RAW_PAYMENTS_FIELD)) return keepFieldSet
+        return new LinkedHashSet<String>(keepFieldSet) + (["paymentPreferenceSlotsFull"] as Set<String>)
     }
 
     /** Requested (= actual) cost of one orders page under the measured model. */

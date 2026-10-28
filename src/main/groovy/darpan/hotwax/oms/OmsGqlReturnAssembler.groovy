@@ -114,6 +114,8 @@ class OmsGqlReturnAssembler {
         // DAR-BE-116 R8: the origin order's NETSUITE_ORDER_ID, i.e. whether that order reached NetSuite at all; a return
         // whose order never did cannot either. Filterable only, like orderProductStoreId.
         if (sorted) record.orderNetsuiteId = orderNetsuiteIds.get(sorted.first().orderId as String)
+        // DAR-BE-151: and its OMS id, which the conclusion brain asks the order's payments by. Filterable only.
+        if (sorted) record.orderId = normalize(sorted.first().orderId)
         // DAR-BE-118: and its total, 0 when its payment was taken back (gorjana "partial payment"), which is why it never did.
         if (sorted) record.orderGrandTotal = number(orderGrandTotals.get(sorted.first().orderId as String))
         record.statusId = node.statusId

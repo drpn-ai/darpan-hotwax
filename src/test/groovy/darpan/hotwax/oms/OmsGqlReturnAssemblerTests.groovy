@@ -46,8 +46,8 @@ class OmsGqlReturnAssemblerTests {
 
         // orderProductStoreId (DAR-BE-068) is the one GraphQL-only key: filterable, never in keepFieldsBase, so
         // projection strips it and the compared record stays identical to REST's.
-        assertEquals(expected.keySet().toList(), built.keySet().toList() - ["orderProductStoreId", "orderNetsuiteId", "orderGrandTotal", "fromPartyId", "returnDate", "daysBeforeEntry"], "same keys, same order as REST")
-        assertEquals(expected.toString(), normalized(built.findAll { !(it.key in ["orderProductStoreId", "orderNetsuiteId", "orderGrandTotal", "fromPartyId", "returnDate", "daysBeforeEntry"]) }).toString())
+        assertEquals(expected.keySet().toList(), built.keySet().toList() - ["orderProductStoreId", "orderNetsuiteId", "orderGrandTotal", "fromPartyId", "returnDate", "daysBeforeEntry", "orderId"], "same keys, same order as REST")
+        assertEquals(expected.toString(), normalized(built.findAll { !(it.key in ["orderProductStoreId", "orderNetsuiteId", "orderGrandTotal", "fromPartyId", "returnDate", "daysBeforeEntry", "orderId"]) }).toString())
     }
 
     @Test
@@ -77,6 +77,13 @@ class OmsGqlReturnAssemblerTests {
         assertFalse(built.containsKey("orderExternalId"))
         assertEquals("0", built.returnTotal.toString())
         assertEquals([], built.items)
+    }
+
+    /** DAR-BE-151: the brain asks an order's payments by its OMS id, which the return's Shopify id is not. */
+    @Test
+    void aReturnCarriesItsOmsOrderId() {
+        assertEquals("GR1", OmsGqlReturnAssembler.build(node(), [item()], lookups()).orderId)
+        assertFalse(OmsGqlReturnAssembler.build(node(), [], lookups()).containsKey("orderId"))
     }
 
     @Test

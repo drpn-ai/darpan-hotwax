@@ -35,6 +35,8 @@ class OmsGqlOrderPageSource {
     }
 
     static Map fetchAll(OmsGqlClient client, Map ctx) {
+        // DAR-BE-151: kept raw payments carry their slots-full flag.
+        if (ctx.keepFieldSet != null) ctx = ctx + [keepFieldSet: OmsGqlQueries.keepWithCompanions((Set<String>) ctx.keepFieldSet)]
         Map extractOptions = (Map) (ctx.extractOptions ?: [:])
         Map pagination = [strategy: "GRAPHQL_CURSOR", pageCount: 0, totalFetched: 0, orderTypeFilteredServerSide: true,
                           paymentPreferenceSlotsFullCount: 0, exchangeAssocCalls: 0, lookupCalls: 0]

@@ -164,6 +164,23 @@ class OmsGqlOrderPageSourceTests {
         assertThrows(IllegalArgumentException) { OmsGqlQueries.keysFilter("orderId", ["M1 orderDate:>2020"]) }
     }
 
+    /** DAR-BE-151: a lookup that keeps raw payments keeps the flag that says whether the read could have cut them short. */
+    @Test
+    void aLookupKeepingPaymentPreferencesKeepsTheCompletenessFlag() {
+        List opps = [[paymentMethodTypeId: "EXT_SHOP_GFT_CARD", statusId: "PAYMENT_SETTLED", maxAmount: "181"],
+                     [paymentMethodTypeId: "EXT_SHOP_GFT_CARD", statusId: "PAYMENT_REFUNDED", maxAmount: "181"]]
+        ScriptedClient client = new ScriptedClient([ordersPage([order("M1088731", opps) + [grandTotal: "371.54"]], false)])
+        File out = File.createTempFile("gql-", ".json")
+        try {
+            Map result = OmsRestSourceSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, ["orderId", "grandTotal", "paymentPreferences"],
+                    null, null, [applyExchangeExclusion: false], OmsGqlOrderPageSource.fetcher(client, [lookupKeys: ["M1088731"]]))
+            assertEquals([], result.errors)
+            Map record = ((List<Map>) (new JsonSlurper().parse(out) as Map).records)[0]
+            assertEquals(2, ((List) record.paymentPreferences).size())
+            assertEquals(false, record.paymentPreferenceSlotsFull)
+        } finally { out.delete() }
+    }
+
     private static Map unitOrder(String id) {
         return order(id) + [identifications: [[orderIdentificationTypeId: "NETSUITE_ORDER_ID", idValue: "NS" + id]],
                             shipGroups: [edges: [[node: [shipGroupSeqId: "00001", facilityId: "STORE_1"]],
