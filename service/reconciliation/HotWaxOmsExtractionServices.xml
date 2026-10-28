@@ -97,6 +97,16 @@
         </in-parameters>
     </service>
 
+    <service verb="extract" noun="HotWaxOmsGqlProducts" type="script" transaction="ignore" allow-remote="false" authenticate="true"
+            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsGqlProducts.groovy">
+        <description>DAR-BE-157. Every sellable HotWax product (not virtual, FINISHED_GOOD or MARKETING_PKG_PICK, not
+            discontinued) over the GraphQL endpoint, one record per product keyed by nsKey: its NETSUITE_PRODUCT_ID (the
+            NetSuite item internal id), HOTWAX-ONLY:productId when it has none, DUPLICATE:id:productId for every product after
+            the first sharing one. Not windowed: windowStart/windowEnd are accepted and ignored (requestMetadata.windowIgnored).
+            A DISTINCT service name is required: the connector registry resolves rows by it.</description>
+        <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrders"/>
+    </service>
+
     <service verb="extract" noun="HotWaxOmsReconciliationOrders" type="script" transaction="ignore" allow-remote="false" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsReconciliationOrders.groovy">
         <description>Extract HotWax OMS orders for an automation window from the purpose-built

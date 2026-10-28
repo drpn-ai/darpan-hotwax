@@ -30,6 +30,23 @@ class OmsGqlProductsPageSource {
         }
     }
 
+    /**
+     * The extract: both sweeps, the records, and the {records, metadata} document written to workFile (a few thousand small
+     * records, so written whole rather than streamed). Returns the extraction result OmsScriptServiceSupport.runExtract reads.
+     */
+    static Map extractToFile(OmsGqlClient client, File workFile) {
+        Map pagination = [calls: 0]
+        List<Map> products = sweep(client, OmsGqlQueries.productsSweepDocument(), "products", null, pagination)
+        List<Map> ids = sweep(client, OmsGqlQueries.netsuiteIdsSweepDocument(), "goodIdentifications",
+                OmsGqlQueries.NETSUITE_PRODUCT_ID_FILTER, pagination)
+        Map built = buildRecords(products, ids)
+        Map metadata = (Map) built.metadata + [identificationsRead: ids.size(), gqlCalls: pagination.calls]
+        workFile.withWriter("UTF-8") { Writer w -> w.write(groovy.json.JsonOutput.toJson([records: built.records, metadata: metadata])) }
+        List records = (List) built.records
+        return [dataAvailable: !records.isEmpty(), recordCount: records.size(), requestMetadata: metadata,
+                warnings: [], errors: [], fileName: "oms-gql-products.json"]
+    }
+
     static Map buildRecords(List<Map> products, List<Map> identifications) {
         Map<String, String> nsIdByProduct = [:]
         identifications.findAll { !it.thruDate && it.idValue }.each { nsIdByProduct.put(it.productId as String, it.idValue as String) }
