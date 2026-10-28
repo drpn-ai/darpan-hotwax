@@ -31,7 +31,12 @@ class OmsGqlOrderGrainAssembler {
         try { return new BigDecimal(value.toString().trim()) } catch (Exception ignored) { return value }
     }
 
-    static List<Map> assemble(List<Map> orderNodes, List<Map> assocNodes) {
+    /**
+     * `slots` is how many paymentPreferences the page asked for (the plan's paymentSlots); `refNums` whether it asked
+     * for their manualRefNum (the plan's paymentRefNums).
+     */
+    static List<Map> assemble(List<Map> orderNodes, List<Map> assocNodes, int slots = OmsGqlQueries.PAYMENT_PREF_SLOTS,
+                              boolean refNums = false) {
         Map<String, List<Map>> exchangeByOrder = [:]
         for (Map row : (assocNodes ?: [])) {
             // Enforced client-side too: if the server ignored the type term, a non-exchange assoc must
@@ -50,7 +55,12 @@ class OmsGqlOrderGrainAssembler {
             order.put("hasPaymentPreference", opps ? "Y" : "N")
             order.put("paymentMethodTypeIds", opps.collect { it?.get("paymentMethodTypeId") as String }
                     .findAll { it }.unique().sort().join(","))
-            order.put("paymentPreferenceSlotsFull", opps.size() >= OmsGqlQueries.PAYMENT_PREF_SLOTS)
+            boolean slotsFull = opps.size() >= slots
+            order.put("paymentPreferenceSlotsFull", slotsFull)
+            // DAR-BE-153: the Shopify transaction ids the OPPs name. A read that filled every slot may have left one out,
+            // so it claims no list (null) rather than a short one.
+            if (refNums) order.put("paymentRefNums", slotsFull ? null : opps.collect { (it?.get("manualRefNum") as String)?.trim() }
+                    .findAll { it }.unique().sort().join(","))
             // DAR-BE-125 (R20): compared against Shopify isFulfilled.
             order.put("isCompleted", order.get("statusId") == "ORDER_COMPLETED" ? "Y" : "N")
 

@@ -327,7 +327,9 @@ class OmsGqlOrderPageSource {
         Map ctx = (Map) shared.ctx
         List<String> ids = nodes.collect { it.orderId as String }.findAll { it }
         List<Map> assocs = shared.exchangePass == false ? [] : fetchExchangeAssocs(client, ids, pagination)
-        List<Map> assembled = OmsGqlOrderGrainAssembler.assemble(nodes, assocs)
+        Map plan = (Map) shared.plan
+        List<Map> assembled = OmsGqlOrderGrainAssembler.assemble(nodes, assocs,
+                (plan.paymentSlots ?: OmsGqlQueries.PAYMENT_PREF_SLOTS) as int, plan.paymentRefNums == true)
         if (shared.unitGrain == true) attachItemsToShipGroups(client, assembled, ids, pagination)
         if (shared.sink != null) {
             // A shared read: the raw records go to the spill file, and each caller shapes them itself.

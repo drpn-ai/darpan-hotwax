@@ -23,10 +23,17 @@ class OmsGqlQueries {
     static final int QUERY_COST_BUDGET = 950
     /** Two slots: 1-2 OPPs cover 97% of gorjana orders, and k=3 would force the page down to 40. */
     static final int PAYMENT_PREF_SLOTS = 2
+    /**
+     * DAR-BE-153: a rule on the OPPs' Shopify transaction ids reads six. An exchange adds OPPs to its ORIGINAL order (the
+     * card capture, a top-up, and the exchange tenders that move them), so gorjana's #GOR197298413 holds four.
+     */
+    static final int REFNUM_PAYMENT_PREF_SLOTS = 6
     static final double PAGE_OVERHEAD = 100d
     static final double HEADER_COST = 8.0d           // the ALWAYS_FIELDS, per order
     static final double EXTRA_SCALAR_COST = 1.5d     // each further header scalar, per order (conservative)
     static final double PER_SLOT_COST = 4.0d
+    /** A slot costs 1 + its fields (3 fields -> 4 measured; 7 fields: 25 x 6 COST_EXCEEDED, 15 x 4 not, gorjana 2026-10-28). */
+    static final double REFNUM_SLOT_COST = 5.0d
     static final int ASSOC_PAGE_SIZE = 50
     static final int ASSOC_RESERVATION = 350         // measured 300 at first: 50
 
@@ -39,7 +46,7 @@ class OmsGqlQueries {
             "orderDate", "grandTotal"]
     /** Computed by OmsGqlOrderGrainAssembler from paymentPreferences and statusId, which are always selected. */
     static final Set<String> DERIVED_FIELDS = ["hasPaymentPreference", "paymentMethodTypeIds", "paymentPreferenceSlotsFull",
-            "isCompleted"] as Set
+            "isCompleted", "paymentRefNums"] as Set
     /** Nested lists, selected only when something reads them, with their measured per-order cost. */
     static final Map<String, Map> NESTED_FIELDS = [
             identifications: [selection: "identifications(first: 5) { orderIdentificationTypeId idValue }", cost: 18.0d],
@@ -84,13 +91,16 @@ class OmsGqlQueries {
         List<String> nested = NESTED_FIELDS.keySet().findAll { wanted.contains(it) } as List<String>
 
         int extraScalars = scalars.size() - ALWAYS_FIELDS.size()
-        double perOrder = perOrderCost(PAYMENT_PREF_SLOTS, extraScalars, nested)
+        boolean refNums = wanted.contains("paymentRefNums")
+        int slots = refNums ? REFNUM_PAYMENT_PREF_SLOTS : PAYMENT_PREF_SLOTS
+        double slotCost = refNums ? REFNUM_SLOT_COST : PER_SLOT_COST
+        double perOrder = perOrderCost(slots, extraScalars, nested, slotCost)
         int budget = QUERY_COST_BUDGET
         int pageSize = Math.max(1, Math.min(MAX_PAGE_SIZE, (int) Math.floor((budget - PAGE_OVERHEAD) / perOrder)))
-        int reservation = Math.min(budget + 50, estimatedPageCost(pageSize, PAYMENT_PREF_SLOTS, extraScalars, nested) + 50)
+        int reservation = Math.min(budget + 50, estimatedPageCost(pageSize, slots, extraScalars, nested, slotCost) + 50)
 
         String selection = (scalars as List).join(" ") +
-                "\n      paymentPreferences(first: ${PAYMENT_PREF_SLOTS}) { paymentMethodTypeId statusId maxAmount }" +
+                "\n      paymentPreferences(first: ${slots}) { paymentMethodTypeId statusId maxAmount${refNums ? ' manualRefNum' : ''} }" +
                 nested.collect { "\n      " + NESTED_FIELDS[it].selection }.join("")
         String document = """query OmsOrderGrain(\$q: String, \$first: Int, \$after: String) {
   orders(query: \$q, sortKey: ORDER_DATE, reverse: false, first: \$first, after: \$after) {
@@ -100,16 +110,16 @@ class OmsGqlQueries {
     pageInfo { hasNextPage endCursor }
   }
 }"""
-        return [document: document, pageSize: pageSize, reservation: reservation]
+        return [document: document, pageSize: pageSize, reservation: reservation, paymentSlots: slots, paymentRefNums: refNums]
     }
 
     /** Requested (= actual) cost of one orders page under the measured model. */
-    static int estimatedPageCost(int pageSize, int slots, int extraScalars, List<String> nested) {
-        return (int) Math.ceil(PAGE_OVERHEAD + pageSize * perOrderCost(slots, extraScalars, nested))
+    static int estimatedPageCost(int pageSize, int slots, int extraScalars, List<String> nested, double slotCost = PER_SLOT_COST) {
+        return (int) Math.ceil(PAGE_OVERHEAD + pageSize * perOrderCost(slots, extraScalars, nested, slotCost))
     }
 
-    private static double perOrderCost(int slots, int extraScalars, List<String> nested) {
-        return HEADER_COST + extraScalars * EXTRA_SCALAR_COST + slots * PER_SLOT_COST +
+    private static double perOrderCost(int slots, int extraScalars, List<String> nested, double slotCost = PER_SLOT_COST) {
+        return HEADER_COST + extraScalars * EXTRA_SCALAR_COST + slots * slotCost +
                 ((nested ?: []).collect { (NESTED_FIELDS[it].cost as double) }.sum() ?: 0d)
     }
 
@@ -297,7 +307,9 @@ class OmsGqlQueries {
      * 1,948 calls, because it asked only for the always-read fields).
      */
     static boolean sharedOrdersCover(Set<String> requiredFields) {
-        return (requiredFields ?: []).every { ALWAYS_FIELDS.contains(it) || SHARED_ORDER_FIELDS.contains(it) || DERIVED_FIELDS.contains(it) }
+        // DAR-BE-153: paymentRefNums needs manualRefNum from six slots, which the shared read does not ask for.
+        return (requiredFields ?: []).every { it != "paymentRefNums" &&
+                (ALWAYS_FIELDS.contains(it) || SHARED_ORDER_FIELDS.contains(it) || DERIVED_FIELDS.contains(it)) }
     }
 
     // DAR-BE-116: the items an ORDER_LINE_UNIT extract flattens, asked by orderId in batches (nesting

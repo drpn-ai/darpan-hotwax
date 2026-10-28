@@ -140,4 +140,27 @@ class OmsGqlQueriesTests {
         assertFalse(OmsGqlQueries.orderGrainPagePlan(["orderId"] as Set).document.contains("notes("))
         assertTrue(OmsGqlQueries.orderGrainPagePlan(["orderId", "statuses"] as Set).document.contains("statuses(first: 12) { statusId statusDatetime orderItemSeqId }"))
     }
+
+    /** DAR-BE-153: a rule on the OPPs' Shopify transaction ids reads manualRefNum from six slots, under the query cap. */
+    @Test
+    void askingForPaymentRefNumsReadsManualRefNumFromSixSlotsUnderTheQueryCap() {
+        Map plan = OmsGqlQueries.orderGrainPagePlan(PRESENCE_KEEP + ["paymentRefNums"] as Set)
+        assertEquals(OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS, plan.paymentSlots)
+        assertEquals(true, plan.paymentRefNums)
+        assertTrue((plan.document as String).contains(
+                "paymentPreferences(first: ${OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS}) { paymentMethodTypeId statusId maxAmount manualRefNum }".toString()))
+        // Live gorjana 2026-10-28: 25 orders x 6 slots of 7 OPP fields was COST_EXCEEDED, 15 x 4 was not; a slot costs 1 + its fields.
+        assertTrue(OmsGqlQueries.estimatedPageCost((int) plan.pageSize, OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS, 0, [], 5.0d) <= OmsGqlQueries.QUERY_COST_BUDGET)
+        assertTrue((plan.reservation as int) <= OmsGqlQueries.QUERY_COST_BUDGET + 50)
+
+        Map lean = OmsGqlQueries.orderGrainPagePlan(PRESENCE_KEEP)
+        assertEquals(OmsGqlQueries.PAYMENT_PREF_SLOTS, lean.paymentSlots)
+        assertFalse((lean.document as String).contains("manualRefNum"))
+    }
+
+    @Test
+    void theSharedOrdersReadDoesNotCoverPaymentRefNums() {
+        // It reads two slots without manualRefNum, so a run that needs the ids reads its own.
+        assertFalse(OmsGqlQueries.sharedOrdersCover(["orderId", "externalId", "paymentRefNums"] as Set))
+    }
 }

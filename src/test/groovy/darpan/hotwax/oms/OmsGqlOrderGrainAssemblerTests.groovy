@@ -3,6 +3,8 @@ package darpan.hotwax.oms
 import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
+import static org.junit.jupiter.api.Assertions.assertFalse
+import static org.junit.jupiter.api.Assertions.assertNull
 import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
@@ -119,5 +121,45 @@ class OmsGqlOrderGrainAssemblerTests {
         Map o = OmsGqlOrderGrainAssembler.assemble([order("M1") + [orderDate: "not-a-date", grandTotal: null]], [])[0]
         assertEquals("not-a-date", o.orderDate)
         assertEquals(null, o.grandTotal)
+    }
+
+    // DAR-BE-153. Each case is a gorjana prod order's OPPs (probe 2026-10-28): manualRefNum is the Shopify transaction id.
+    private static Map ref(String method, String status, String refNum) {
+        return [paymentMethodTypeId: method, statusId: status, maxAmount: 1, manualRefNum: refNum]
+    }
+
+    @Test
+    void paymentRefNumsAreTheOppsShopifyTransactionIdsSortedAndDistinct() {
+        // #GOR197298413's original order M1058338: the card capture, an exchange top-up taken a month later, and the
+        // exchange tenders that moved both to EXC-#GOR197298413-1 (one with an EPRA- id, one with none).
+        List opps = [ref("EXT_SHOP_PAYMENTS", "PAYMENT_SETTLED", "20766330257539"), ref("EXCHANGE_CREDIT", "PAYMENT_REFUNDED", null),
+                     ref("EXCHANGE_PAYMENT", "PAYMENT_REFUNDED", "EPRA-20853219360899"), ref("EXT_SHOP_PAYMENTS", "PAYMENT_SETTLED", "20853219360899"),
+                     ref("EXT_SHOP_PAYMENTS", "PAYMENT_SETTLED", "20766330257539")]
+        Map o = OmsGqlOrderGrainAssembler.assemble([order("M1058338", opps)], [], OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS, true)[0]
+        assertEquals("20766330257539,20853219360899,EPRA-20853219360899", o.paymentRefNums)
+        assertEquals(false, o.paymentPreferenceSlotsFull)
+    }
+
+    @Test
+    void anOrderWithNoOppOrNoIdsHasNoPaymentRefNums() {
+        // EXC-#GOR197405957-1 (M1188468): paid only by exchange credit, which names no Shopify transaction.
+        assertEquals("", OmsGqlOrderGrainAssembler.assemble([order("M1188468", [ref("EXCHANGE_CREDIT", "PAYMENT_SETTLED", "")])], [],
+                OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS, true)[0].paymentRefNums)
+        assertEquals("", OmsGqlOrderGrainAssembler.assemble([order("M1")], [], OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS, true)[0].paymentRefNums)
+    }
+
+    @Test
+    void aReadThatDidNotAskForTheIdsCarriesNoPaymentRefNums() {
+        assertFalse(OmsGqlOrderGrainAssembler.assemble([order("M1", [opp("CREDIT_CARD")])], [])[0].containsKey("paymentRefNums"))
+    }
+
+    @Test
+    void aReadThatFilledEverySlotLeavesPaymentRefNumsUnread() {
+        // A seventh OPP may hold the id the rule looks for, so the list is not claimed: null, not a short list.
+        List opps = (1..OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS).collect { ref("EXT_SHOP_PAYMENTS", "PAYMENT_SETTLED", "${100 + it}") }
+        Map o = OmsGqlOrderGrainAssembler.assemble([order("M1", opps)], [], OmsGqlQueries.REFNUM_PAYMENT_PREF_SLOTS, true)[0]
+        assertEquals(true, o.paymentPreferenceSlotsFull)
+        assertNull(o.paymentRefNums)
+        assertTrue(o.containsKey("paymentRefNums"))
     }
 }
