@@ -404,6 +404,31 @@ class OmsGqlQueries {
 }'''
     }
 
+    /** DAR-BE-157: a whole-catalogue sweep's page. gorjana's moqui-gql refuses `first` above 100 on these roots (maxFirst). */
+    static final int PRODUCT_PAGE_SIZE = 100
+
+    /** DAR-BE-157: every product, with what decides whether it is sellable. */
+    static String productsSweepDocument() {
+        return '''query OmsProductsSweep($q: String, $first: Int, $after: String) {
+  products(query: $q, first: $first, after: $after) {
+    edges { node { productId internalName productTypeId isVirtual isVariant createdDate salesDiscontinuationDate } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
+    /** DAR-BE-157: every NETSUITE_PRODUCT_ID identification (the NetSuite item internal id), swept rather than looked up. */
+    static final String NETSUITE_PRODUCT_ID_FILTER = "goodIdentificationTypeId:NETSUITE_PRODUCT_ID"
+
+    static String netsuiteIdsSweepDocument() {
+        return '''query OmsNetsuiteIdsSweep($q: String, $first: Int, $after: String) {
+  goodIdentifications(query: $q, first: $first, after: $after) {
+    edges { node { productId idValue thruDate } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
     /** `key:a,b,c` — the comma `in` every flat lookup above relies on. */
     static Map inVariables(String key, List<String> ids, int first, String after) {
         return pageVariables("${key}:${ids.join(',')}".toString(), first, after)

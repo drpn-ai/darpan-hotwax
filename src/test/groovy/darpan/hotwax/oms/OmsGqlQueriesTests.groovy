@@ -204,4 +204,16 @@ class OmsGqlQueriesTests {
         // It reads two slots without manualRefNum, so a run that needs the ids reads its own.
         assertFalse(OmsGqlQueries.sharedOrdersCover(["orderId", "externalId", "paymentRefNums"] as Set))
     }
+
+    // DAR-BE-157: the whole-catalogue product sweeps read what sellability and the key need, nothing nested.
+    @Test
+    void theProductSweepsReadTheSellabilityFieldsAndTheNetsuiteId() {
+        String products = OmsGqlQueries.productsSweepDocument()
+        ["productId", "productTypeId", "isVirtual", "salesDiscontinuationDate"].each { assertTrue(products.contains(it), it) }
+        assertTrue(products.startsWith("query ") && products.contains("pageInfo { hasNextPage endCursor }"))
+        String ids = OmsGqlQueries.netsuiteIdsSweepDocument()
+        assertTrue(ids.contains("goodIdentifications(") && ids.contains("idValue thruDate"))
+        assertEquals("goodIdentificationTypeId:NETSUITE_PRODUCT_ID", OmsGqlQueries.NETSUITE_PRODUCT_ID_FILTER)
+        assertEquals(100, OmsGqlQueries.PRODUCT_PAGE_SIZE)
+    }
 }
