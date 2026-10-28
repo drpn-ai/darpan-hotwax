@@ -98,6 +98,13 @@ class OmsGqlConnectorWiringTests {
         assertTrue(paths.every { suppliable.contains(it) }, "unsuppliable pill(s): ${paths.findAll { !suppliable.contains(it) }}")
     }
 
+    /** DAR-BE-153: Steve Madden's daily order run excludes POS on the HotWax side. */
+    @Test
+    void omsGqlOffersTheSalesChannelPill() {
+        assertTrue(read(FIELDS).contains('systemEnumId="OMS_GQL" fieldPath="$.records[*].salesChannelEnumId"'))
+        assertTrue(OmsGqlQueries.HEADER_FIELDS.contains("salesChannelEnumId"))
+    }
+
     @Test
     void shopifyOffersTheHasPaymentTransactionPill() {
         assertTrue(read(FIELDS).contains('systemEnumId="SHOPIFY" fieldPath="$.records[*].hasPaymentTransaction"'))

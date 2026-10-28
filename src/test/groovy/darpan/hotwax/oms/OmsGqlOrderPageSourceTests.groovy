@@ -423,9 +423,9 @@ class OmsGqlOrderPageSourceTests {
         ScriptedClient client = new ScriptedClient([])
         File out = File.createTempFile("gql-", ".json")
         out.delete()
-        Map result = run(client, out, KEEP, [[fieldExpression: "salesChannelEnumId", operator: "EXCLUDE_IN",
-                                              filterValues: "POS_SALES_CHANNEL", sequenceNum: 1]])
-        assertTrue(((List) result.errors)[0].toString().contains("salesChannelEnumId"))
+        Map result = run(client, out, KEEP, [[fieldExpression: "netsuiteOrderId", operator: "EXCLUDE_IN",
+                                              filterValues: "X", sequenceNum: 1]])
+        assertTrue(((List) result.errors)[0].toString().contains("netsuiteOrderId"))
         assertEquals(0, client.calls.size())
     }
 
@@ -492,9 +492,9 @@ class OmsGqlOrderPageSourceTests {
     void anUnsupportedFilterFieldFailsEvenWithNoProjection() {
         ScriptedClient client = new ScriptedClient([])
         File out = File.createTempFile("gql-", ".json"); out.delete()
-        Map result = run(client, out, null, [[fieldExpression: "salesChannelEnumId", operator: "EXCLUDE_IN",
-                                              filterValues: "POS_SALES_CHANNEL", sequenceNum: 1]])
-        assertTrue(((List) result.errors)[0].toString().contains("salesChannelEnumId"))
+        Map result = run(client, out, null, [[fieldExpression: "netsuiteOrderId", operator: "EXCLUDE_IN",
+                                              filterValues: "X", sequenceNum: 1]])
+        assertTrue(((List) result.errors)[0].toString().contains("netsuiteOrderId"))
         assertEquals(0, client.calls.size())
     }
 
@@ -505,6 +505,23 @@ class OmsGqlOrderPageSourceTests {
         try {
             run(client, out, null, [[fieldExpression: "productStoreId", operator: "EXCLUDE_IN", filterValues: "X", sequenceNum: 1]])
             assertTrue((client.calls[0].document as String).contains("productStoreId"))
+        } finally { out.delete() }
+    }
+
+    /** DAR-BE-153: Steve Madden's run drops POS orders on the HotWax side; its Shopify store holds none to drop. */
+    @Test
+    void aSalesChannelExclusionIsSelectedAndDropsTheChannelsOrders() {
+        Map pos = order("M2") + [salesChannelEnumId: "POS_SALES_CHANNEL"]
+        ScriptedClient client = new ScriptedClient([ordersPage([order("M1") + [salesChannelEnumId: "WEB_SALES_CHANNEL"], pos], false),
+                                                    assocsPage([])])
+        File out = File.createTempFile("gql-", ".json")
+        try {
+            Map result = run(client, out, KEEP, [[fieldExpression: "salesChannelEnumId", operator: "EXCLUDE_IN",
+                                                  filterValues: "POS_SALES_CHANNEL", sequenceNum: 1]])
+            assertEquals([], result.errors ?: [])
+            assertTrue((client.calls[0].document as String).contains("salesChannelEnumId"))
+            List<Map> recs = (List<Map>) (new JsonSlurper().parse(out) as Map).records
+            assertEquals(["#M1"], recs*.orderName)
         } finally { out.delete() }
     }
 

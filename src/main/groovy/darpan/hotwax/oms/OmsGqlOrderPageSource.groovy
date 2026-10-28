@@ -71,8 +71,8 @@ class OmsGqlOrderPageSource {
                 List<String> unknown = unitFilterFieldsNotCarried((List<Map>) ctx.excludeRules)
                 if (unknown) {
                     return failed("The OMS GraphQL order-items extract cannot filter on ${unknown}: its units do not carry " +
-                            "them (salesChannelEnumId is absent from gorjana's Order type, SDL 2026-10-23; netsuiteOrderId is not " +
-                            "read, to keep the page lean). Keep this rule set on REST.")
+                            "them (the shared orders read selects neither salesChannelEnumId nor netsuiteOrderId, to keep the page " +
+                            "lean). Keep this rule set on REST.")
                 }
                 // DAR-BE-129: the shared orders read's document, so a unit read and an order read share one read.
                 plan = OmsGqlQueries.sharedOrdersPlan()

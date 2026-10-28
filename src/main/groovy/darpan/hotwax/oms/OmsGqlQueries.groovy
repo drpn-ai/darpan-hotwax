@@ -39,10 +39,13 @@ class OmsGqlQueries {
     static final int ASSOC_PAGE_SIZE = 50
     static final int ASSOC_RESERVATION = 350         // measured 300 at first: 50
 
-    /** Top-level scalars proven to exist on the deployed Order type (OmsGraphQlLiveProbe, 2026-09-30). */
+    /**
+     * Top-level scalars proven to exist on the deployed Order type (OmsGraphQlLiveProbe, 2026-09-30). salesChannelEnumId
+     * since the 2026-10-28 moqui-gql upgrade (smus-maarg and gorjana SDL): Steve Madden's run excludes POS on it.
+     */
     static final Set<String> HEADER_FIELDS = ["orderId", "orderName", "externalId", "statusId", "statusFlowId",
-            "orderTypeId", "orderDate", "grandTotal", "currencyUomId", "productStoreId", "orderItemCount",
-            "lastUpdatedTxStamp"] as Set
+            "orderTypeId", "orderDate", "grandTotal", "currencyUomId", "productStoreId", "salesChannelEnumId",
+            "orderItemCount", "lastUpdatedTxStamp"] as Set
     /** Always selected: the compare key, the built-in non-sales filter, and the REST keepFieldsBase. */
     static final List<String> ALWAYS_FIELDS = ["orderId", "orderName", "externalId", "statusId", "orderTypeId",
             "orderDate", "grandTotal"]
