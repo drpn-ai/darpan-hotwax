@@ -9,7 +9,9 @@ import darpan.hotwax.oms.OmsScriptServiceSupport
 OmsScriptServiceSupport.runExtract(ec, context, [
         requiredSystemEnumId: "OMS_PRODUCTS_GQL",
         workFilePrefix      : "oms-gql-products-extract-",
+        excludedRecordsSidecar: true,
         extract             : { Map a ->
-            OmsGqlProductsPageSource.extractToFile(new OmsGqlClient(OmsRestSourceSupport.toPlainMap(a.sourceConfig)), (File) a.workFile)
+            OmsGqlProductsPageSource.extractToFile(new OmsGqlClient(OmsRestSourceSupport.toPlainMap(a.sourceConfig)),
+                    (File) a.workFile, (List) a.sourceFilters)
         },
 ])

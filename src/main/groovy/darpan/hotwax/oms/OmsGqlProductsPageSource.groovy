@@ -1,5 +1,7 @@
 package darpan.hotwax.oms
 
+import darpan.reconciliation.source.SourceFilterSupport
+
 /**
  * DAR-BE-157: HotWax's side of the NetSuite <-> HotWax product reconciliation. Every product and every NETSUITE_PRODUCT_ID
  * identification, swept whole (no window: a product missing since August never falls inside a day's window), joined into
@@ -34,17 +36,21 @@ class OmsGqlProductsPageSource {
      * The extract: both sweeps, the records, and the {records, metadata} document written to workFile (a few thousand small
      * records, so written whole rather than streamed). Returns the extraction result OmsScriptServiceSupport.runExtract reads.
      */
-    static Map extractToFile(OmsGqlClient client, File workFile) {
+    static Map extractToFile(OmsGqlClient client, File workFile, List sourceFilters = null) {
         Map pagination = [calls: 0]
         List<Map> products = sweep(client, OmsGqlQueries.productsSweepDocument(), "products", null, pagination)
         List<Map> ids = sweep(client, OmsGqlQueries.netsuiteIdsSweepDocument(), "goodIdentifications",
                 OmsGqlQueries.NETSUITE_PRODUCT_ID_FILTER, pagination)
         Map built = buildRecords(products, ids)
+        // The run's source filters (R22: sellable EXCLUDE_IN N), applied here like every extractor: the dropped records go to
+        // the excluded sidecar, so a conclusion can still name what HotWax has, and every rule is reported.
+        Map filtered = SourceFilterSupport.applyToRecords((List) built.records, SourceFilterSupport.parseRules(sourceFilters))
+        List records = (List) filtered.records
         Map metadata = (Map) built.metadata + [identificationsRead: ids.size(), gqlCalls: pagination.calls]
-        workFile.withWriter("UTF-8") { Writer w -> w.write(groovy.json.JsonOutput.toJson([records: built.records, metadata: metadata])) }
-        List records = (List) built.records
+        if (filtered.configuredExclusions != null) metadata.filters = [configuredExclusions: filtered.configuredExclusions]
+        workFile.withWriter("UTF-8") { Writer w -> w.write(groovy.json.JsonOutput.toJson([records: records, metadata: metadata])) }
         return [dataAvailable: !records.isEmpty(), recordCount: records.size(), requestMetadata: metadata,
-                warnings: [], errors: [], fileName: "oms-gql-products.json"]
+                warnings: [], errors: [], fileName: "oms-gql-products.json", excludedCollector: filtered.excludedCollector]
     }
 
     static Map buildRecords(List<Map> products, List<Map> identifications) {

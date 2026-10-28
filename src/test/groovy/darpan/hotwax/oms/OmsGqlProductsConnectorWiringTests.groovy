@@ -42,6 +42,7 @@ class OmsGqlProductsConnectorWiringTests {
         assertEquals("darpan.hotwax.HotWaxOmsRestSourceConfig", r.configEntityName)
         assertEquals("omsRestSourceConfigId", r.configParameterName)
         assertEquals("N", r.windowed)
+        assertEquals("sourceFilters", r.filterParameterName, "R22 excludes sellable N on this side; the extract must receive it")
         assertEquals("Y", r.enabled)
         List<Map<String, String>> others = connectors().findAll { it.systemEnumId != "OMS_PRODUCTS_GQL" && it.enabled == "Y" }
         assertTrue(others.every { it.extractServiceName != r.extractServiceName && it.expectedSourceConfigType != r.expectedSourceConfigType },
@@ -93,6 +94,35 @@ class OmsGqlProductsConnectorWiringTests {
             Map doc = (Map) new JsonSlurper().parse(work)
             assertEquals(["26161", "HOTWAX-ONLY:10056"], doc.records*.nsKey)
             assertEquals(2, doc.metadata.sellable)
+        } finally {
+            work.delete()
+        }
+    }
+
+    // Live run 2026-10-28: R22's FILE_2 rule (sellable EXCLUDE_IN N) never reached the extract, so a discontinued gift card
+    // read as a finding. Exclusions are applied by the extractor, which reports every rule and keeps what it dropped.
+    @Test
+    void theExtractAppliesTheSourceFiltersAndKeepsWhatItDropped() {
+        OmsGqlClient c = new OmsGqlClient([baseUrl: "https://gorjana-maarg.hotwax.io", authType: "BEARER", apiToken: "t"],
+                { String url, Map headers, String body ->
+                    String root = body.contains("goodIdentifications(") ? "goodIdentifications" : "products"
+                    List<Map> nodes = root == "products"
+                            ? [[productId: "10001", productTypeId: "FINISHED_GOOD", isVirtual: "N"],
+                               [productId: "GIFT_CARD", productTypeId: "DIGITAL_GOOD", isVirtual: "N", salesDiscontinuationDate: "2025-01-01T00:00:00Z"]]
+                            : [[productId: "10001", idValue: "26161"], [productId: "GIFT_CARD", idValue: "22677"]]
+                    return [statusCode: 200, body: JsonOutput.toJson([data: [(root): [edges: nodes.collect { [node: it] },
+                                                                                       pageInfo: [hasNextPage: false]]]])]
+                })
+        c.sleeper = { long ms -> }
+        File work = File.createTempFile("oms-gql-products-test-", ".json")
+        try {
+            Map extraction = OmsGqlProductsPageSource.extractToFile(c, work,
+                    [[sequenceNum: 1, fieldExpression: "sellable", operator: "EXCLUDE_IN", filterValues: "N"]])
+            assertEquals(["10001"], ((Map) new JsonSlurper().parse(work)).records*.productId)
+            assertEquals(1, extraction.recordCount)
+            Map rule = extraction.requestMetadata.filters.configuredExclusions[0]
+            assertEquals(["sellable", "EXCLUDE_IN", 1], [rule.fieldExpression, rule.operator, rule.excludedCount])
+            assertTrue(extraction.excludedCollector != null, "the dropped records go to the excluded sidecar")
         } finally {
             work.delete()
         }
