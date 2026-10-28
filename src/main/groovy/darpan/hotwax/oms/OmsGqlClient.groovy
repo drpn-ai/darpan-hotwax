@@ -33,6 +33,13 @@ class OmsGqlClient {
      * to a second of jitter, so a bucket that other spenders keep empty is not asked again at once.
      */
     static final long MIN_THROTTLE_BACKOFF_MILLIS = 1_000L
+    /**
+     * DAR-BE-142, GraphQL path (2026-10-28): a page that times out, cannot connect, or answers 429/502/503/504 is asked
+     * again, like the REST read (same config keys maxPageAttempts / retryBackoffMillis and defaults, linear backoff), so
+     * one slow HotWax answer does not fail a month's read. Every document is a read-only query, so asking again is safe.
+     * The last failure fails closed (TRANSIENT).
+     */
+    static final Set<String> TRANSIENT_CODES = OmsRestSourceSupport.RETRYABLE_STATUS_CODES.collect { "HTTP_${it}".toString() } as Set<String>
 
     private static final Logger logger = LoggerFactory.getLogger(OmsGqlClient.class)
 
@@ -74,8 +81,8 @@ class OmsGqlClient {
 
     /**
      * Execute one document. Throws on ANY error; there is deliberately no "returned no data" path.
-     * THROTTLED alone is retried, after waiting for the bucket, because a second extract sharing the
-     * same OMS budget can drain it between our observation and our call.
+     * THROTTLED is retried after waiting for the bucket, because a second extract sharing the same OMS budget can
+     * drain it between our observation and our call; a transient failure (DAR-BE-142) is retried a bounded number of times.
      */
     Map execute(String document, Map variables, int reservation) {
         Map payload = [query: document]
@@ -84,6 +91,9 @@ class OmsGqlClient {
         String operation = (document =~ /query\s+(\w+)/).with { it.find() ? it.group(1) : "query" }
 
         long throttledWait = 0L
+        int maxAttempts = Math.max(1, intConfig("maxPageAttempts", OmsRestSourceSupport.DEFAULT_MAX_PAGE_ATTEMPTS))
+        long retryBackoff = Math.max(0, intConfig("retryBackoffMillis", OmsRestSourceSupport.DEFAULT_PAGE_RETRY_BACKOFF_MILLIS))
+        int transientFailures = 0
         for (int attempt = 0; ; attempt++) {
             long wait = governor.sleepMillisFor(reservation)
             if (wait > 0L) sleeper.call(wait)
@@ -99,9 +109,17 @@ class OmsGqlClient {
                 return result
             } catch (OmsGqlException e) {
                 outcome = e.code
-                if (e.code != "THROTTLED" || throttledWait >= MAX_THROTTLE_WAIT_MILLIS) throw e
-                // The answer's reported balance is now the governor's, so the next sleepMillisFor waits the deficit.
-                backoff = MIN_THROTTLE_BACKOFF_MILLIS + (long) (Math.random() * 1000L)
+                if (TRANSIENT_CODES.contains(e.code)) {
+                    backoff = transientBackoff(++transientFailures, maxAttempts, retryBackoff, operation, e.message)
+                } else {
+                    if (e.code != "THROTTLED" || throttledWait >= MAX_THROTTLE_WAIT_MILLIS) throw e
+                    // The answer's reported balance is now the governor's, so the next sleepMillisFor waits the deficit.
+                    backoff = MIN_THROTTLE_BACKOFF_MILLIS + (long) (Math.random() * 1000L)
+                }
+            } catch (IOException e) {
+                // A timeout (HttpTimeoutException), a refused or reset connection: the request may not have reached OMS.
+                outcome = "IO"
+                backoff = transientBackoff(++transientFailures, maxAttempts, retryBackoff, operation, e.toString())
             } finally {
                 governor.settle(reservation, extensions)
                 governor.releaseCall()
@@ -117,6 +135,19 @@ class OmsGqlClient {
         }
     }
 
+    /** The wait before the next attempt of a transient failure, or a fail-closed throw once the attempts are spent. */
+    private static long transientBackoff(int failures, int maxAttempts, long retryBackoff, String operation, String cause) {
+        if (failures >= maxAttempts) {
+            throw new OmsGqlException("TRANSIENT", "OMS GraphQL ${operation} failed ${failures} attempts; last: ${cause}".toString())
+        }
+        return retryBackoff * failures
+    }
+
+    private int intConfig(String key, int fallback) {
+        Object v = config?.get(key)
+        try { return v == null || v.toString().trim().isEmpty() ? fallback : (v.toString().trim() as int) } catch (Exception ignored) { return fallback }
+    }
+
     private Map send(String json, Map extensionsOut = [:]) {
         Map response = (Map) sender.call(getUrl(), headers, json)
         int status = (response?.statusCode ?: 0) as int
@@ -125,6 +156,11 @@ class OmsGqlClient {
         Object parsed = null
         try { parsed = raw ? new JsonSlurper().parseText(raw) : null } catch (ignored) { }
         if (!(parsed instanceof Map)) {
+            // A gateway or overload answer often has no JSON body: transient, not unparseable. A JSON THROTTLED answer
+            // still reaches the governor below, whatever its status.
+            if (OmsRestSourceSupport.RETRYABLE_STATUS_CODES.contains(status)) {
+                throw new OmsGqlException("HTTP_${status}".toString(), "HTTP ${status}: ${raw?.take(200)}".toString())
+            }
             throw new OmsGqlException("UNPARSEABLE", "HTTP ${status}: body was not JSON: ${raw?.take(200)}")
         }
         Map body = (Map) parsed

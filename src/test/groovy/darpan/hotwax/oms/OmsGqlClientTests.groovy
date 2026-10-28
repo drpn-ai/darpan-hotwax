@@ -149,4 +149,60 @@ class OmsGqlClientTests {
         Map result = client([[body: body]]).execute("query { orders { edges { node { orderId } } } }", null, 400)
         assertEquals([edges: []], ((Map) result.data).orders)
     }
+
+    // ---- DAR-BE-142, GraphQL path (2026-10-28): the REST read's transient retry never reached this client, so one slow
+    // HotWax page (live: HttpTimeoutException after 12,500 rows of R1's October) failed a whole month's read.
+
+    /** A sender that answers each call from `steps`: a Map is a response, a Throwable is thrown. */
+    private static OmsGqlClient scripted(List steps, List<Long> slept, Map config = CONFIG) {
+        List queue = new ArrayList(steps)
+        OmsGqlClient c = new OmsGqlClient(config, { String url, Map headers, String body ->
+            Object next = queue.size() > 1 ? queue.remove(0) : queue[0]
+            if (next instanceof Throwable) throw (Throwable) next
+            Map r = (Map) next
+            return [statusCode: (r.statusCode ?: 200) as int, body: r.raw != null ? r.raw : JsonOutput.toJson(r.body)]
+        })
+        c.sleeper = { long ms -> slept.add(ms) }
+        return c
+    }
+
+    @Test
+    void aTimedOutPageIsAskedAgainAndTheReadGoesOn() {
+        List<Long> slept = []
+        OmsGqlClient c = scripted([new java.net.http.HttpTimeoutException("request timed out"), [body: okBody([orders: [edges: []]])]], slept)
+        Map result = c.execute("query { orders { edges { node { orderId } } } }", null, 400)
+        assertEquals([edges: []], ((Map) result.data).orders)
+        assertEquals(2, c.callCount)
+        assertTrue(slept.contains((long) OmsRestSourceSupport.DEFAULT_PAGE_RETRY_BACKOFF_MILLIS), "backs off like the REST read: ${slept}")
+    }
+
+    @Test
+    void aGatewayErrorWithNoJsonBodyIsTransientToo() {
+        List<Long> slept = []
+        OmsGqlClient c = scripted([[statusCode: 502, raw: "<html>Bad Gateway</html>"], [statusCode: 504, raw: ""],
+                                   [body: okBody([orders: [edges: []]])]], slept)
+        assertEquals([edges: []], ((Map) c.execute("query { orders { edges { node { orderId } } } }", null, 400).data).orders)
+        assertEquals(3, c.callCount)
+    }
+
+    @Test
+    void aPageThatKeepsFailingFailsClosedAfterItsAttempts() {
+        List<Long> slept = []
+        OmsGqlClient c = scripted([new java.net.http.HttpTimeoutException("request timed out")], slept, CONFIG + [maxPageAttempts: 3, retryBackoffMillis: 10])
+        OmsGqlException e = assertThrows(OmsGqlException) { c.execute("query { orders { edges { node { orderId } } } }", null, 400) }
+        assertEquals("TRANSIENT", e.code)
+        assertTrue(e.message.contains("3 attempts"), e.message)
+        assertEquals(3, c.callCount)
+        assertEquals([10L, 20L], slept.findAll { it > 0 })
+    }
+
+    @Test
+    void aGraphqlErrorIsNotRetried() {
+        List<Long> slept = []
+        OmsGqlClient c = scripted([[body: [data: null, errors: [[message: "bad field", extensions: [code: "FIELD_UNDEFINED"]]]]]], slept)
+        OmsGqlException e = assertThrows(OmsGqlException) { c.execute("query { orders { edges { node { nope } } } }", null, 400) }
+        assertEquals("FIELD_UNDEFINED", e.code)
+        assertEquals(1, c.callCount)
+    }
+
 }
