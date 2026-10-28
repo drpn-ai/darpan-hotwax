@@ -34,7 +34,7 @@ class OmsGqlProductsPageSourceTests {
                 product("5"),
                 product("6", [productTypeId: "MARKETING_PKG_PICK"]),
         ], [])
-        assertEquals(["5", "6"], built.records*.productId)
+        assertEquals(["5", "6"], built.records*.productId, "a product with no NetSuite id is kept only when sellable")
         assertEquals(6, built.metadata.productsRead)
         assertEquals(2, built.metadata.sellable)
     }
@@ -76,6 +76,8 @@ class OmsGqlProductsPageSourceTests {
         assertEquals("SHARED", byId["10200"].netsuiteIdState)
         assertEquals("43000", byId["10200"].netsuiteProductId)
         assertTrue(byId["10100"].duplicateNetsuiteId && byId["10200"].duplicateNetsuiteId)
+        assertEquals("10200", byId["10100"].sharedWith, "the fix must name every product holding the id, not guess which is right")
+        assertEquals("10100", byId["10200"].sharedWith)
         assertEquals(1, built.metadata.netsuiteIdsOnSeveralProducts)
         assertEquals(true, built.metadata.windowIgnored)
     }
@@ -101,5 +103,26 @@ class OmsGqlProductsPageSourceTests {
         assertEquals([100, 100, 100], sent*.variables*.first)
         assertEquals([null, "c1", "c2"], sent*.variables*.after)
         assertEquals(3, pagination.calls)
+    }
+
+    // A NetSuite item HotWax carries only as a discontinued, virtual or non-selling product must not read "not in HotWax":
+    // the record is emitted, marked sellable N with why, and the run excludes it so a cause can name it.
+    @Test
+    void aNonSellableProductWithANetsuiteIdIsKeptAndMarked() {
+        Map built = OmsGqlProductsPageSource.buildRecords([
+                product("20001", [salesDiscontinuationDate: "2025-01-01T00:00:00Z"]),
+                product("20002", [isVirtual: "Y", isVariant: "N"]),
+                product("20003", [productTypeId: "DIGITAL_GOOD"]),
+                product("20004", [salesDiscontinuationDate: "2025-01-01T00:00:00Z"]),
+                product("20005"),
+        ], [ident("20001", "500"), ident("20002", "501"), ident("20003", "502"), ident("20004", "503"), ident("20005", "503")])
+        Map<String, Map> byId = built.records.collectEntries { [(it.productId): it] }
+        assertEquals([sellable: "N", nsKey: "500", notSellableReason: "discontinued"], byId["20001"].subMap(["sellable", "nsKey", "notSellableReason"]))
+        assertEquals("virtual", byId["20002"].notSellableReason)
+        assertEquals("DIGITAL_GOOD", byId["20003"].notSellableReason)
+        assertTrue(!byId.containsKey("20004"), "a sellable product holds 503, so the discontinued one adds nothing")
+        assertEquals([sellable: "Y", nsKey: "503", duplicateNetsuiteId: false], byId["20005"].subMap(["sellable", "nsKey", "duplicateNetsuiteId"]))
+        assertEquals(1, built.metadata.sellable)
+        assertEquals(3, built.metadata.notSellableWithNetsuiteId)
     }
 }

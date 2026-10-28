@@ -50,9 +50,8 @@ class OmsGqlProductsPageSource {
     static Map buildRecords(List<Map> products, List<Map> identifications) {
         Map<String, String> nsIdByProduct = [:]
         identifications.findAll { !it.thruDate && it.idValue }.each { nsIdByProduct.put(it.productId as String, it.idValue as String) }
-        List<Map> sellable = products.findAll {
-            it.isVirtual != "Y" && SELLABLE_TYPES.contains(it.productTypeId) && !it.salesDiscontinuationDate
-        }.sort { it.productId as String }
+        List<Map> sorted = products.sort(false) { it.productId as String }
+        List<Map> sellable = sorted.findAll { notSellableReason(it) == null }
         Map<String, List<String>> productsByNsId = sellable.findAll { nsIdByProduct[it.productId as String] }
                 .groupBy { nsIdByProduct[it.productId as String] }
                 .collectEntries { k, v -> [(k): v*.productId*.toString()] }
@@ -61,15 +60,41 @@ class OmsGqlProductsPageSource {
             String nsId = nsIdByProduct[productId]
             List<String> sharing = nsId ? productsByNsId[nsId] : []
             String nsKey = !nsId ? "HOTWAX-ONLY:${productId}" : sharing[0] == productId ? nsId : "DUPLICATE:${nsId}:${productId}"
-            [productId: productId, internalName: p.internalName, productTypeId: p.productTypeId, createdDate: p.createdDate,
-             netsuiteProductId: nsId, nsKey: nsKey.toString(), duplicateNetsuiteId: sharing.size() > 1,
-             // What the key is, for conclusion conditions (IN; the engine has no prefix operator).
-             netsuiteIdState: !nsId ? "NONE" : sharing[0] == productId ? "OWN" : "SHARED"] as Map
+            record(p, nsId, nsKey.toString(), sharing - productId) + [
+                    // What the key is, for conclusion conditions (IN; the engine has no prefix operator).
+                    netsuiteIdState: !nsId ? "NONE" : sharing[0] == productId ? "OWN" : "SHARED", sellable: "Y"]
         }
-        return [records : records,
+        // Reviewer 2026-10-28: a NetSuite item HotWax carries only as a discontinued, virtual or non-selling product is not
+        // "missing from HotWax". Such a product is kept, once per NetSuite id no sellable product holds, marked sellable N
+        // with why; the run excludes it, so a cause can name it.
+        Set<String> heldIds = productsByNsId.keySet()
+        List<Map> notSellable = sorted.findAll { notSellableReason(it) != null && nsIdByProduct[it.productId as String] }
+                .findAll { !heldIds.contains(nsIdByProduct[it.productId as String]) }
+                .unique { nsIdByProduct[it.productId as String] }
+                .collect { Map p ->
+                    String nsId = nsIdByProduct[p.productId as String]
+                    record(p, nsId, nsId, []) + [netsuiteIdState: "OWN", sellable: "N", notSellableReason: notSellableReason(p)]
+                }
+        return [records : records + notSellable,
                 metadata: [productsRead: products.size(), sellable: records.size(),
                            withoutNetsuiteId: records.count { !it.netsuiteProductId },
                            netsuiteIdsOnSeveralProducts: productsByNsId.count { k, v -> v.size() > 1 },
+                           notSellableWithNetsuiteId: notSellable.size(),
                            windowIgnored: true]]
     }
+
+    private static Map record(Map p, String nsId, String nsKey, List<String> others) {
+        return [productId: p.productId as String, internalName: p.internalName, productTypeId: p.productTypeId,
+                createdDate: p.createdDate, netsuiteProductId: nsId, nsKey: nsKey,
+                // Every other sellable product holding the same NetSuite id, so a fix names them all instead of guessing.
+                duplicateNetsuiteId: !others.isEmpty(), sharedWith: others ? others.join(", ") : null] as Map
+    }
+
+    /** Why a product is not sellable, or null: discontinued, virtual, or a type other than FINISHED_GOOD / MARKETING_PKG_PICK. */
+    static String notSellableReason(Map p) {
+        if (p.salesDiscontinuationDate) return "discontinued"
+        if (p.isVirtual == "Y") return "virtual"
+        return SELLABLE_TYPES.contains(p.productTypeId) ? null : (p.productTypeId as String)
+    }
+
 }
