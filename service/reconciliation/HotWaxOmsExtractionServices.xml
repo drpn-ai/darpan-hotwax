@@ -93,7 +93,8 @@
                     without it is never asked for a whole window instead.</description>
                 <parameter name="lookupKey"/>
             </parameter>
-            <parameter name="lookupKeyField"><description>The record field lookupKeys are values of: orderId.</description></parameter>
+            <parameter name="lookupKeyField"><description>The record field lookupKeys are values of: orderId, or externalId (the
+                Shopify order id; DAR-BE-156, a Shopify-paired audit check's re-check).</description></parameter>
         </in-parameters>
     </service>
 

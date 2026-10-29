@@ -49,8 +49,10 @@ class OmsGqlOrderPageSource {
         if (!keys && (ctx.fromMillis == null || ctx.thruMillis == null)) {
             return failed("The OMS GraphQL order extract requires a date window; status-only extracts stay on REST.")
         }
-        if (keys && !(ctx.lookupKeyField in [null, "orderId", "omsOrderId"])) {
-            return failed("The OMS GraphQL order extract reads by orderId only, not '${ctx.lookupKeyField}'.")
+        // DAR-BE-156: or by the Shopify order id (externalId), the key a Shopify-paired audit check compares HotWax by.
+        String keyFilterField = ctx.lookupKeyField in [null, "orderId", "omsOrderId"] ? "orderId" : ctx.lookupKeyField == "externalId" ? "externalId" : null
+        if (keys && !keyFilterField) {
+            return failed("The OMS GraphQL order extract reads by orderId or externalId only, not '${ctx.lookupKeyField}'.")
         }
         if (extractOptions.orderStatusIds) {
             return failed("orderStatusIds is not supported by the OMS GraphQL order extract; keep this rule set on REST.")
@@ -94,7 +96,7 @@ class OmsGqlOrderPageSource {
             if (keys) {
                 // DAR-BE-129: a conclusion lookup's 500 ids ran as five chunks in series (3.7 min on the Oct 1-25 run).
                 runEach(keys.collate(OmsGqlQueries.LOOKUP_KEYS_CHUNK), CONCURRENCY) { List<String> chunk ->
-                    fetchSlice(client, shared, OmsGqlQueries.keysFilter("orderId", chunk))
+                    fetchSlice(client, shared, OmsGqlQueries.keysFilter(keyFilterField, chunk))
                 }
             } else {
                 List<List<Long>> slices = daySlices((Long) ctx.fromMillis, (Long) ctx.thruMillis)

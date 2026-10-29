@@ -164,6 +164,24 @@ class OmsGqlOrderPageSourceTests {
         assertThrows(IllegalArgumentException) { OmsGqlQueries.keysFilter("orderId", ["M1 orderDate:>2020"]) }
     }
 
+    /**
+     * DAR-BE-156: gorjana's "Shopify orders against HotWax orders" keys HotWax by the Shopify order id (externalId), so its
+     * older findings are read by externalId, sales orders only, as the window read is; refused before, the re-check failed.
+     */
+    @Test
+    void ordersAreReadByShopifyOrderIdWhenTheKeyIsExternalId() {
+        ScriptedClient client = new ScriptedClient([ordersPage([order("M1088731") + [externalId: "6678597828739"]], false)])
+        File out = File.createTempFile("gql-", ".json")
+        try {
+            Map result = OmsRestSourceSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, ["orderId", "externalId"], null, null,
+                    [applyExchangeExclusion: false],
+                    OmsGqlOrderPageSource.fetcher(client, [lookupKeys: ["6678597828739"], lookupKeyField: "externalId"]))
+            assertEquals([], result.errors)
+            assertEquals(["6678597828739"], ((List<Map>) (new JsonSlurper().parse(out) as Map).records)*.externalId)
+            assertEquals("externalId:6678597828739 orderTypeId:SALES_ORDER", ((Map) client.calls[0].variables).q)
+        } finally { out.delete() }
+    }
+
     /** DAR-BE-151: a lookup that keeps raw payments keeps the flag that says whether the read could have cut them short. */
     @Test
     void aLookupKeepingPaymentPreferencesKeepsTheCompletenessFlag() {
