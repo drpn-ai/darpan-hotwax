@@ -80,17 +80,23 @@ Three pieces keep the extract honest:
 1. **Page sizes are derived from measured cost** (`OmsGqlQueries`). For orders, cost is about
    100 per page plus, per order, 8 for the always-selected fields, 1.5 per extra scalar, 4 per
    payment-preference slot, and about 18 for `identifications(5)` or 12.5 for `shipGroups(3)` when
-   selected. The page size is the largest that fits under a 950 budget, capped at 50. Returns use
-   fixed sizes measured the same way: 25 returns per page, with flat id-keyed follow-up queries
-   (`returnItems`, `orders`, `orderItems`, `products`) instead of nested lists, so cost stays
-   linear.
+   selected. The page size is the largest that fits under a 950 budget (`QUERY_COST_BUDGET`, under the
+   server's 1000 per-query cap), capped at 100 (the server's `first` ceiling). Returns use fixed
+   sizes measured the same way: 43 returns per page, with flat id-keyed follow-up queries
+   (`returnItems` 85 per page, `orders` 60 ids per call, `orderItems` 100) instead of nested
+   lists, so cost stays linear. A page the server still refuses with `COST_EXCEEDED` is halved
+   and asked again.
 2. **`OmsGqlThrottleGovernor`** records the bucket from every response. Before each call the
    client reserves the expected cost; if the bucket does not cover it, the client sleeps for
    `deficit / restoreRate` seconds plus a 500 ms margin. Before the first response nothing is
-   known, so the first call does not wait.
+   known, so the first call does not wait. There is one governor (one bucket) per OMS endpoint,
+   shared by every extract in the JVM, and at most 6 calls are in flight on it at once.
 3. **Retry on `THROTTLED` only.** Another extract sharing the same OMS budget can drain the bucket
-   between observation and call, so a `THROTTLED` answer is retried up to 3 times, each after the
-   governor's wait. Every other error fails the extract at once.
+   between observation and call, so a `THROTTLED` answer is retried, each time after the
+   governor's wait plus 1 to 2 seconds of jitter, until 300 seconds have been spent waiting. A
+   timeout, a refused connection or a 429/502/503/504 answer is retried up to 5 attempts (the
+   `maxPageAttempts` default) with a linear 5 s backoff. Every other error fails the extract at
+   once.
 
 ## Failure rules (both extracts)
 
