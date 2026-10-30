@@ -11,8 +11,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue
  * DAR-BE-116. OMS_ORDER_ITEMS_GQL, the order-items unit extract over GraphQL, is seed wiring no runtime proves before a
  * live run: the registry resolves a connector by extract service and expectedSourceConfigType, the endpoint gate
  * treats an endpoint with no DarpanSystemSource row as DISABLED, and a rule set moves off OMS_ORDER_ITEMS only if the
- * GraphQL row exposes the same unit fields. salesChannelEnumId is the one exception (absent from gorjana's GraphQL
- * Order type), so the run that concludes on it stays on REST.
+ * GraphQL row exposes the same unit fields. salesChannelEnumId is the one exception (absent from the GraphQL Order
+ * type), so a run that concludes on it stays on REST.
  */
 class OmsGqlOrderItemsConnectorWiringTests {
 
@@ -28,7 +28,6 @@ class OmsGqlOrderItemsConnectorWiringTests {
     private static final String UPGRADE = "../darpan/data/upgrade-data.xml"
     private static final String SERVICES = "service/reconciliation/HotWaxOmsExtractionServices.xml"
     private static final String SCRIPT = "src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsGqlOrderItems.groovy"
-    private static final String TRI = "../darpan/data/TriSystemOrderRunsRuleSetData.xml"
 
     private static Map<String, String> connector(String path, String systemEnumId) {
         def row = new XmlSlurper().parse(file(path)).'**'.find {
@@ -88,16 +87,5 @@ class OmsGqlOrderItemsConnectorWiringTests {
         assertTrue(script.contains('requiredSystemEnumId  : "OMS_ORDER_ITEMS_GQL"'))
         assertTrue(script.contains("OmsGqlOrderPageSource.fetcher"), "the pages come from GraphQL, not REST's default fetcher")
         assertTrue(script.contains('emitGrain             : "ORDER_LINE_UNIT"'))
-    }
-
-    @Test
-    void onlyTheRunThatConcludesOnTheSalesChannelStaysOnRest() {
-        def root = new XmlSlurper().parse(file(TRI))
-        Map<String, String> bySystem = root.'**'.findAll {
-            it.name() == "darpan.rule.RuleSetCompareSource" && it.@fileSide == "FILE_1" && it.@compareScopeId.toString().startsWith("GORJANA_OMS_NS_")
-        }.collectEntries { [(it.@compareScopeId.toString()): it.@systemEnumId.toString()] }
-        assertEquals([GORJANA_OMS_NS_ORDER_SCOPE : "OMS_ORDER_ITEMS",
-                      GORJANA_OMS_NS_LINE_SCOPE  : "OMS_ORDER_ITEMS_GQL",
-                      GORJANA_OMS_NS_CANCEL_SCOPE: "OMS_ORDER_ITEMS_GQL"], bySystem)
     }
 }

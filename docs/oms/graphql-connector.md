@@ -228,4 +228,4 @@ All in component `darpan`, `data/`:
 `OmsGqlQueriesTests`, `OmsGqlOrderPageSourceTests`, `OmsGqlOrderGrainAssemblerTests`,
 `OmsGqlConnectorWiringTests`, `OmsGqlReturnsPageSourceTests`, `OmsGqlReturnAssemblerTests`,
 `OmsGqlReturnsConnectorWiringTests`, `OmsReturnsGqlLookupTests`. The paid-has-OPP rule is pinned in darpan
-(`RuleDiffSupportTests`, `GorjanaMonthCloseChecksDataTests`).
+(`RuleDiffSupportTests`).
