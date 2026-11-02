@@ -182,7 +182,8 @@
      },
      "from": "orders.shipGroups[*].facilityId",
      "chunk": 100,
-     "separator": ","
+     "separator": ",",
+     "parallel": 4
     }
    },
    "paging": {
@@ -207,7 +208,8 @@
      },
      "from": "orders.orderId",
      "chunk": 100,
-     "separator": ","
+     "separator": ",",
+     "parallel": 4
     }
    },
    "paging": {
@@ -232,7 +234,8 @@
      },
      "from": "items.productId",
      "chunk": 100,
-     "separator": ","
+     "separator": ",",
+     "parallel": 4
     }
    },
    "paging": {
