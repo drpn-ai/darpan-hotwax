@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- HotWax migrations, registered with darpan core's migration supervisor (run#PendingMigrations). -->
+<entity-facade-xml type="darpan-seed">
+
+    <darpan.migration.DarpanMigration migrationId="OMS_REST_RETIRED" componentName="darpan-hotwax"
+            serviceName="migration.HotWaxMigrationServices.migrate#OmsRestToGraphQl"
+            sequenceNum="80" supportsDryRun="Y" enabled="Y"
+            description="HotWax is read over GraphQL only (DAR-BE-052). Moves every run, automation, endpoint grant,
+                schema and mapping on a deleted HotWax REST endpoint to its GraphQL endpoint, then deletes the REST
+                connector rows. Transfer-order and line-unit sources have no GraphQL endpoint: the dry run names them.
+                Idempotent."/>
+
+</entity-facade-xml>

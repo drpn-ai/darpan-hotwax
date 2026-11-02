@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
+
+    <service verb="migrate" noun="OmsRestToGraphQl" authenticate="false" allow-remote="false">
+        <description>DAR-BE-052, migration OMS_REST_RETIRED: move every stored HotWax source (rule-set compare sources,
+            automation sources with their stored extract service, endpoint grants, schemas, mapping members) from the deleted
+            REST endpoints to their GraphQL endpoints, then delete the REST connector rows and their field pills. Sources on
+            transfer orders or line units have no GraphQL endpoint and are reported, not changed. Idempotent: a second run
+            changes nothing. Not remote: run#PendingMigrations calls it with authz disabled.</description>
+        <in-parameters>
+            <parameter name="dryRun" type="Boolean" default="false"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="rowsChangedCount" type="Integer"/>
+            <parameter name="strandedCount" type="Integer"/>
+            <parameter name="messages" type="List"><parameter name="message"/></parameter>
+        </out-parameters>
+        <actions>
+            <set field="result" from="darpan.hotwax.migration.OmsRestRetirement.run(ec, dryRun as boolean)"/>
+            <set field="rowsChangedCount" from="result.rowsChangedCount"/>
+            <set field="strandedCount" from="result.strandedCount"/>
+            <set field="messages" from="result.messages"/>
+            <set field="ok" from="!ec.message.hasError()"/>
+        </actions>
+    </service>
+
+</services>
