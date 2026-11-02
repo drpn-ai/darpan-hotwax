@@ -1,0 +1,698 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  DAR-BE-176. HotWax reads defined as data (darpan core's DataSourceDefinition; the runner, transport and steps are
+  generic and name no system). Everything HotWax-specific lives here, in darpan-hotwax, never in darpan core.
+
+  OMS_ORDER_ITEMS_GQL_V1: the OMS order-items read at unit grain, equal to the coded extract#HotWaxOmsGqlOrderItems
+  (OmsGqlOrderItemsDataDefinitionTests proves it on scripted answers). Its queries are the coded documents word for
+  word; the coded read's quirks are kept on purpose for equality (netsuiteOrderId "NONE", salesChannelEnumId never
+  selected, omsOrderDate as epoch millis, quantity "1.0" = 0 units under STRICT_INT, a 4th ship group cut by first: 3),
+  each fixed later as a one-row edit. DRAFT: no connector reads with it until the cutover.
+-->
+<entity-facade-xml type="darpan-seed">
+    <darpan.datasource.DataSourceDefinition dataSourceDefinitionId="OMS_ORDER_ITEMS_GQL_V1"
+            definitionName="HotWax order items, unit grain" protocol="GRAPHQL" definitionVersion="1" statusId="DRAFT"
+            description="The OMS order-items read as data (DAR-BE-176): orders with ship groups, items by order, product and facility names; one record per unit.">
+        <definitionJson><![CDATA[{
+ "connection": {
+  "urlTemplate": "{baseUrl}/rest/s1/graphql",
+  "auth": {
+   "kindField": "authType",
+   "defaultKind": "NONE",
+   "headersJsonField": "headersJson",
+   "kinds": {
+    "NONE": {
+     "method": "NONE"
+    },
+    "BASIC": {
+     "method": "BASIC",
+     "userField": "username",
+     "passwordField": "password"
+    },
+    "BEARER": {
+     "method": "BEARER",
+     "tokenFields": [
+      "apiToken",
+      "password"
+     ]
+    },
+    "API_KEY": {
+     "method": "HEADER",
+     "header": "api_key",
+     "tokenFields": [
+      "apiToken",
+      "password"
+     ]
+    }
+   }
+  },
+  "timeoutSeconds": 120
+ },
+ "limits": {
+  "maxCostPerCall": 1000,
+  "maxInFlight": 6,
+  "errorCodeAt": "errors[*].extensions.code",
+  "throttledCodes": [
+   "THROTTLED"
+  ],
+  "maxThrottleWaitSeconds": 300,
+  "costRefusedCodes": [
+   "COST_EXCEEDED"
+  ],
+  "retryStatuses": [
+   429,
+   502,
+   503,
+   504
+  ],
+  "maxAttempts": 3,
+  "retryBackoffMillis": 2000,
+  "costBucket": {
+   "at": "extensions.cost.throttleStatus",
+   "available": "currentlyAvailable",
+   "maximum": "maximumAvailable",
+   "restoreRate": "restoreRate"
+  }
+ },
+ "batchRecords": 1000,
+ "metadata": {
+  "droppedNullLineIdCount": 0
+ },
+ "steps": [
+  {
+   "id": "orders",
+   "kind": "query",
+   "document": "query OmsOrderGrain($q: String, $first: Int, $after: String) {\n  orders(query: $q, sortKey: ORDER_DATE, reverse: false, first: $first, after: $after) {\n    edges { node {\n      orderId orderName externalId statusId orderTypeId orderDate grandTotal currencyUomId\n      paymentPreferences(first: 2) { paymentMethodTypeId statusId maxAmount }\n      shipGroups(first: 3) { edges { node { shipGroupSeqId facilityId shipmentMethodTypeId } } }\n      billToCustomer { firstName lastName }\n    } }\n    pageInfo { hasNextPage endCursor }\n  }\n}",
+   "connectionAt": "orders",
+   "recordsAt": "edges[*].node",
+   "hasNextAt": "pageInfo.hasNextPage",
+   "cursorAt": "pageInfo.endCursor",
+   "bind": {
+    "window": {
+     "variables": {
+      "q": "orderDate:>={from} orderDate:<{thru} orderTypeId:SALES_ORDER"
+     },
+     "field": "orderDate",
+     "sliceHours": 24,
+     "instantFormat": "ISO_INSTANT",
+     "parallel": 4
+    },
+    "ids": {
+     "variables": {
+      "q": "{keyField}:{ids} orderTypeId:SALES_ORDER"
+     },
+     "from": "LOOKUP_KEYS",
+     "chunk": 100,
+     "parallel": 4,
+     "defaultKeyField": "orderId",
+     "keyFields": {
+      "orderId": "orderId",
+      "omsOrderId": "orderId",
+      "externalId": "externalId"
+     },
+     "idPattern": "[A-Za-z0-9_\\-]{1,40}",
+     "separator": ","
+    }
+   },
+   "paging": {
+    "firstVariable": "first",
+    "afterVariable": "after",
+    "pageSize": {
+     "budget": 850,
+     "costPerRecord": 32.2
+    },
+    "maxPages": 20000
+   },
+   "reservation": 988
+  },
+  {
+   "id": "groupList",
+   "kind": "unwrap",
+   "of": "orders",
+   "field": "shipGroups",
+   "path": "edges[*].node"
+  },
+  {
+   "id": "orderFacts",
+   "kind": "derive",
+   "on": "orders",
+   "rules": [
+    {
+     "set": "orderDate",
+     "value": {
+      "fn": "epochMillis",
+      "args": [
+       {
+        "copy": "orderDate"
+       }
+      ]
+     }
+    },
+    {
+     "set": "grandTotal",
+     "value": {
+      "fn": "decimal",
+      "args": [
+       {
+        "copy": "grandTotal"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "facilities",
+   "kind": "query",
+   "document": "query OmsFacilityNames($q: String, $first: Int, $after: String) {\n  facilities(query: $q, first: $first, after: $after) {\n    edges { node { facilityId facilityName } }\n    pageInfo { hasNextPage endCursor }\n  }\n}",
+   "connectionAt": "facilities",
+   "recordsAt": "edges[*].node",
+   "hasNextAt": "pageInfo.hasNextPage",
+   "cursorAt": "pageInfo.endCursor",
+   "bind": {
+    "ids": {
+     "variables": {
+      "q": "facilityId:{ids}"
+     },
+     "from": "orders.shipGroups[*].facilityId",
+     "chunk": 100,
+     "separator": ","
+    }
+   },
+   "paging": {
+    "firstVariable": "first",
+    "afterVariable": "after",
+    "pageSize": 100
+   },
+   "reservation": 350
+  },
+  {
+   "id": "items",
+   "kind": "query",
+   "document": "query OmsUnitOrderItems($q: String, $first: Int, $after: String) {\n  orderItems(query: $q, first: $first, after: $after) {\n    edges { node { orderId orderItemSeqId externalId productId quantity statusId shipGroupSeqId } }\n    pageInfo { hasNextPage endCursor }\n  }\n}",
+   "connectionAt": "orderItems",
+   "recordsAt": "edges[*].node",
+   "hasNextAt": "pageInfo.hasNextPage",
+   "cursorAt": "pageInfo.endCursor",
+   "bind": {
+    "ids": {
+     "variables": {
+      "q": "orderId:{ids}"
+     },
+     "from": "orders.orderId",
+     "chunk": 100,
+     "separator": ","
+    }
+   },
+   "paging": {
+    "firstVariable": "first",
+    "afterVariable": "after",
+    "pageSize": 100
+   },
+   "reservation": 850
+  },
+  {
+   "id": "products",
+   "kind": "query",
+   "document": "query OmsProductNames($q: String, $first: Int, $after: String) {\n  products(query: $q, first: $first, after: $after) {\n    edges { node { productId internalName } }\n    pageInfo { hasNextPage endCursor }\n  }\n}",
+   "connectionAt": "products",
+   "recordsAt": "edges[*].node",
+   "hasNextAt": "pageInfo.hasNextPage",
+   "cursorAt": "pageInfo.endCursor",
+   "bind": {
+    "ids": {
+     "variables": {
+      "q": "productId:{ids}"
+     },
+     "from": "items.productId",
+     "chunk": 100,
+     "separator": ","
+    }
+   },
+   "paging": {
+    "firstVariable": "first",
+    "afterVariable": "after",
+    "pageSize": 100
+   },
+   "reservation": 350
+  },
+  {
+   "id": "itemSku",
+   "kind": "join",
+   "into": "items",
+   "from": "products",
+   "on": [
+    {
+     "into": "productId",
+     "from": "productId"
+    }
+   ],
+   "copy": {
+    "sku": "internalName"
+   }
+  },
+  {
+   "id": "groupFacilityName",
+   "kind": "join",
+   "into": "orders",
+   "from": "facilities",
+   "at": "shipGroups[*]",
+   "atOn": [
+    {
+     "at": "facilityId",
+     "from": "facilityId"
+    }
+   ],
+   "copy": {
+    "facilityName": "facilityName"
+   }
+  },
+  {
+   "id": "itemsInGroups",
+   "kind": "join",
+   "into": "orders",
+   "from": "items",
+   "on": [
+    {
+     "into": "orderId",
+     "from": "orderId"
+    }
+   ],
+   "at": "shipGroups[*]",
+   "atOn": [
+    {
+     "at": "shipGroupSeqId",
+     "from": "shipGroupSeqId"
+    }
+   ],
+   "many": true,
+   "as": "items",
+   "missingAt": {
+    "create": true,
+    "set": {
+     "facilityId": null
+    }
+   }
+  },
+  {
+   "id": "perItem",
+   "kind": "split",
+   "from": "orders",
+   "path": "shipGroups[*].items[*]",
+   "levels": [
+    "order",
+    "group",
+    "item"
+   ]
+  },
+  {
+   "id": "itemFields",
+   "kind": "derive",
+   "rules": [
+    {
+     "set": "unitCount",
+     "value": {
+      "fn": "units",
+      "parse": "STRICT_INT",
+      "nullAs": 1,
+      "args": [
+       {
+        "copy": "item.quantity"
+       }
+      ]
+     }
+    },
+    {
+     "set": "shopifyOrderId",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "order.externalId"
+       }
+      ]
+     }
+    },
+    {
+     "set": "shopifyLineId",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "item.externalId"
+       }
+      ]
+     }
+    },
+    {
+     "set": "lineGroup",
+     "value": {
+      "fn": "join",
+      "sep": "|",
+      "args": [
+       "~unkeyed",
+       {
+        "fn": "text",
+        "args": [
+         {
+          "copy": "item.orderItemSeqId"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "set": "lineGroup",
+     "when": [
+      {
+       "field": "item.externalId",
+       "op": "NOT_BLANK"
+      },
+      {
+       "field": "order.externalId",
+       "op": "NOT_BLANK"
+      }
+     ],
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "item.externalId"
+       }
+      ]
+     }
+    },
+    {
+     "set": "omsOrderId",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "order.orderId"
+       }
+      ]
+     }
+    },
+    {
+     "set": "omsOrderName",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "order.orderName"
+       }
+      ]
+     }
+    },
+    {
+     "set": "orderItemSeqId",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "item.orderItemSeqId"
+       }
+      ]
+     }
+    },
+    {
+     "set": "productId",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "item.productId"
+       }
+      ]
+     }
+    },
+    {
+     "set": "statusId",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "item.statusId"
+       }
+      ]
+     }
+    },
+    {
+     "set": "unitState",
+     "value": {
+      "map": {
+       "ITEM_CREATED": "OPEN",
+       "ITEM_APPROVED": "OPEN",
+       "ITEM_COMPLETED": "COMPLETED",
+       "ITEM_CANCELLED": "CANCELLED"
+      },
+      "from": "statusId",
+      "default": "OTHER"
+     }
+    },
+    {
+     "set": "netsuiteOrderId",
+     "value": {
+      "literal": "NONE"
+     }
+    },
+    {
+     "set": "omsOrderStatusId",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "order.statusId"
+       }
+      ]
+     }
+    },
+    {
+     "set": "omsOrderDate",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "order.orderDate"
+       }
+      ]
+     }
+    },
+    {
+     "set": "orderGrandTotal",
+     "value": {
+      "fn": "decimalPlain",
+      "args": [
+       {
+        "copy": "order.grandTotal"
+       }
+      ]
+     }
+    },
+    {
+     "set": "facilityId",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "group.facilityId"
+       }
+      ]
+     }
+    },
+    {
+     "set": "salesChannelEnumId",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "order.salesChannelEnumId"
+       }
+      ]
+     }
+    },
+    {
+     "set": "sku",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "item.sku"
+       }
+      ]
+     }
+    },
+    {
+     "set": "facilityName",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "group.facilityName"
+       }
+      ]
+     }
+    },
+    {
+     "set": "shipmentMethodTypeId",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "group.shipmentMethodTypeId"
+       }
+      ]
+     }
+    },
+    {
+     "set": "customerName",
+     "value": {
+      "fn": "join",
+      "sep": " ",
+      "args": [
+       {
+        "fn": "text",
+        "args": [
+         {
+          "copy": "order.billToCustomer.firstName"
+         }
+        ]
+       },
+       {
+        "fn": "text",
+        "args": [
+         {
+          "copy": "order.billToCustomer.lastName"
+         }
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "unkeyedItems",
+   "kind": "count",
+   "name": "keptNullShopifyIdCount",
+   "when": [
+    {
+     "any": [
+      {
+       "field": "item.externalId",
+       "op": "BLANK"
+      },
+      {
+       "field": "order.externalId",
+       "op": "BLANK"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "nonUnitItems",
+   "kind": "count",
+   "name": "nonUnitQuantityCount",
+   "when": [
+    {
+     "field": "unitCount",
+     "op": "NOT_IN",
+     "values": [
+      1
+     ]
+    }
+   ]
+  },
+  {
+   "id": "perUnit",
+   "kind": "repeat",
+   "times": "unitCount",
+   "parse": "STRICT_INT",
+   "nullAs": 1,
+   "index": "unitIndex"
+  },
+  {
+   "id": "unitOrdinal",
+   "kind": "number",
+   "field": "unitOrdinal",
+   "partitionBy": [
+    "omsOrderId",
+    "lineGroup"
+   ],
+   "orderBy": [
+    {
+     "path": "orderItemSeqId",
+     "as": "TEXT"
+    },
+    "unitIndex"
+   ]
+  },
+  {
+   "id": "stateOrdinal",
+   "kind": "number",
+   "field": "stateOrdinal",
+   "partitionBy": [
+    "omsOrderId",
+    "lineGroup",
+    "unitState"
+   ],
+   "orderBy": [
+    "unitOrdinal"
+   ]
+  },
+  {
+   "id": "exclusions",
+   "kind": "filter",
+   "overlay": "order",
+   "fields": [
+    "shopifyOrderId",
+    "shopifyLineId",
+    "unitOrdinal",
+    "omsOrderId",
+    "omsOrderName",
+    "orderItemSeqId",
+    "productId",
+    "statusId",
+    "unitState",
+    "stateOrdinal",
+    "omsOrderStatusId",
+    "facilityId",
+    "orderId",
+    "orderName",
+    "externalId",
+    "orderTypeId",
+    "orderDate"
+   ]
+  }
+ ],
+ "record": {
+  "fields": [
+   "shopifyOrderId",
+   "shopifyLineId",
+   "unitOrdinal",
+   "omsOrderId",
+   "omsOrderName",
+   "orderItemSeqId",
+   "productId",
+   "statusId",
+   "unitState",
+   "stateOrdinal",
+   "netsuiteOrderId",
+   "omsOrderStatusId",
+   "omsOrderDate",
+   "orderGrandTotal",
+   "facilityId",
+   "salesChannelEnumId"
+  ],
+  "optionalFields": [
+   "sku",
+   "facilityName",
+   "shipmentMethodTypeId",
+   "customerName"
+  ]
+ }
+}]]></definitionJson>
+    </darpan.datasource.DataSourceDefinition>
+</entity-facade-xml>
