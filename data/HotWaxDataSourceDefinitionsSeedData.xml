@@ -14,6 +14,12 @@
   the coded costs (OmsGqlQueries: 8 an order, 1.5 an extra scalar, slots x (1 + fields), the nested parts' measured
   costs, (950 - 100) / cost, at most 100 a page); exchange orders are dropped with their manifest beside the extract.
   Allowed differences: no shared read, a fixed reservation, counts at the metadata top level. DRAFT until cutover.
+
+  OMS_PRODUCTS_GQL_V1: the whole-catalogue products read, equal to the coded extract#HotWaxOmsGqlProducts
+  (OmsGqlProductsDataDefinitionTests). wholeSet: both sweeps read once and every step sees the catalogue as one batch;
+  the coded keying (HOTWAX-ONLY / own id / DUPLICATE, lowest productId as text owns a shared id) and the kept
+  not-selling products are derive rows over two rankings. No window, no keys (the coded read ignores both).
+  Allowed differences: identificationsRead and gqlCalls not counted; dataAvailable true on an empty catalogue.
 -->
 <entity-facade-xml type="darpan-seed">
     <darpan.datasource.DataSourceDefinition dataSourceDefinitionId="OMS_ORDER_ITEMS_GQL_V1"
@@ -1464,6 +1470,678 @@
     "paymentPreferenceSlotsFull"
    ]
   }
+ }
+}]]></definitionJson>
+    </darpan.datasource.DataSourceDefinition>
+    <darpan.datasource.DataSourceDefinition dataSourceDefinitionId="OMS_PRODUCTS_GQL_V1"
+            definitionName="HotWax sellable products, whole catalogue" protocol="GRAPHQL" definitionVersion="1" statusId="DRAFT"
+            description="The OMS products read as data (DAR-BE-176): every product and NetSuite id swept whole, one record per sellable product keyed by its NetSuite id, plus a NetSuite id only a non-selling product holds.">
+        <definitionJson><![CDATA[{
+ "connection": {
+  "urlTemplate": "{baseUrl}/rest/s1/graphql",
+  "auth": {
+   "kindField": "authType",
+   "defaultKind": "NONE",
+   "headersJsonField": "headersJson",
+   "kinds": {
+    "NONE": {
+     "method": "NONE"
+    },
+    "BASIC": {
+     "method": "BASIC",
+     "userField": "username",
+     "passwordField": "password"
+    },
+    "BEARER": {
+     "method": "BEARER",
+     "tokenFields": [
+      "apiToken",
+      "password"
+     ]
+    },
+    "API_KEY": {
+     "method": "HEADER",
+     "header": "api_key",
+     "tokenFields": [
+      "apiToken",
+      "password"
+     ]
+    }
+   }
+  },
+  "timeoutSeconds": 120
+ },
+ "limits": {
+  "maxCostPerCall": 1000,
+  "maxInFlight": 6,
+  "errorCodeAt": "errors[*].extensions.code",
+  "throttledCodes": [
+   "THROTTLED"
+  ],
+  "maxThrottleWaitSeconds": 300,
+  "costRefusedCodes": [
+   "COST_EXCEEDED"
+  ],
+  "retryStatuses": [
+   429,
+   502,
+   503,
+   504
+  ],
+  "maxAttempts": 3,
+  "retryBackoffMillis": 2000,
+  "costBucket": {
+   "at": "extensions.cost.throttleStatus",
+   "available": "currentlyAvailable",
+   "maximum": "maximumAvailable",
+   "restoreRate": "restoreRate"
+  },
+  "maxRecordsInMemory": 1000000
+ },
+ "wholeSet": true,
+ "metadata": {
+  "windowIgnored": true
+ },
+ "steps": [
+  {
+   "id": "products",
+   "kind": "query",
+   "document": "query OmsProductsSweep($q: String, $first: Int, $after: String) {\n  products(query: $q, first: $first, after: $after) {\n    edges { node { productId internalName productTypeId isVirtual isVariant createdDate salesDiscontinuationDate } }\n    pageInfo { hasNextPage endCursor }\n  }\n}",
+   "connectionAt": "products",
+   "recordsAt": "edges[*].node",
+   "hasNextAt": "pageInfo.hasNextPage",
+   "cursorAt": "pageInfo.endCursor",
+   "bind": {
+    "all": {
+     "variables": {}
+    }
+   },
+   "paging": {
+    "firstVariable": "first",
+    "afterVariable": "after",
+    "pageSize": 100,
+    "maxPages": 20000
+   },
+   "reservation": 100
+  },
+  {
+   "id": "netsuiteIds",
+   "kind": "query",
+   "document": "query OmsNetsuiteIdsSweep($q: String, $first: Int, $after: String) {\n  goodIdentifications(query: $q, first: $first, after: $after) {\n    edges { node { productId idValue thruDate } }\n    pageInfo { hasNextPage endCursor }\n  }\n}",
+   "connectionAt": "goodIdentifications",
+   "recordsAt": "edges[*].node",
+   "hasNextAt": "pageInfo.hasNextPage",
+   "cursorAt": "pageInfo.endCursor",
+   "bind": {
+    "all": {
+     "variables": {
+      "q": "goodIdentificationTypeId:NETSUITE_PRODUCT_ID"
+     }
+    }
+   },
+   "paging": {
+    "firstVariable": "first",
+    "afterVariable": "after",
+    "pageSize": 100,
+    "maxPages": 20000
+   },
+   "reservation": 100
+  },
+  {
+   "id": "netsuiteId",
+   "kind": "join",
+   "into": "products",
+   "from": "netsuiteIds",
+   "on": [
+    {
+     "into": "productId",
+     "from": "productId"
+    }
+   ],
+   "copy": {
+    "netsuiteProductId": "idValue"
+   },
+   "fromWhen": [
+    {
+     "field": "thruDate",
+     "op": "BLANK"
+    },
+    {
+     "field": "idValue",
+     "op": "NOT_BLANK"
+    }
+   ],
+   "last": true
+  },
+  {
+   "id": "whyNotSellable",
+   "kind": "derive",
+   "rules": [
+    {
+     "set": "notSellableReason",
+     "when": [
+      {
+       "field": "productTypeId",
+       "op": "NOT_IN",
+       "values": [
+        "FINISHED_GOOD",
+        "MARKETING_PKG_PICK"
+       ]
+      }
+     ],
+     "value": {
+      "copy": "productTypeId"
+     }
+    },
+    {
+     "set": "notSellableReason",
+     "when": [
+      {
+       "field": "isVirtual",
+       "op": "IN",
+       "values": [
+        "Y"
+       ]
+      }
+     ],
+     "value": {
+      "literal": "virtual"
+     }
+    },
+    {
+     "set": "notSellableReason",
+     "when": [
+      {
+       "field": "salesDiscontinuationDate",
+       "op": "NOT_BLANK"
+      }
+     ],
+     "value": {
+      "literal": "discontinued"
+     }
+    }
+   ]
+  },
+  {
+   "id": "sellableFacts",
+   "kind": "derive",
+   "rules": [
+    {
+     "set": "sellable",
+     "value": {
+      "literal": "Y"
+     }
+    },
+    {
+     "set": "sellable",
+     "when": [
+      {
+       "field": "notSellableReason",
+       "op": "NOT_BLANK"
+      }
+     ],
+     "value": {
+      "literal": "N"
+     }
+    },
+    {
+     "set": "sellableOrder",
+     "value": {
+      "map": {
+       "Y": 0
+      },
+      "from": "sellable",
+      "default": 1
+     }
+    }
+   ]
+  },
+  {
+   "id": "productsRead",
+   "kind": "count",
+   "name": "productsRead"
+  },
+  {
+   "id": "rankAmongSellable",
+   "kind": "number",
+   "field": "nsRank",
+   "partitionBy": [
+    "sellable",
+    "netsuiteProductId"
+   ],
+   "orderBy": [
+    {
+     "path": "productId",
+     "as": "TEXT"
+    }
+   ],
+   "sizeField": "nsGroupSize",
+   "collect": {
+    "field": "productId",
+    "as": "nsGroup"
+   }
+  },
+  {
+   "id": "rankAmongAll",
+   "kind": "number",
+   "field": "nsAllRank",
+   "partitionBy": [
+    "netsuiteProductId"
+   ],
+   "orderBy": [
+    "sellableOrder",
+    {
+     "path": "productId",
+     "as": "TEXT"
+    }
+   ]
+  },
+  {
+   "id": "onlyNetsuiteItemsNoSellableHolds",
+   "kind": "drop",
+   "name": "notSellableLeftOut",
+   "when": {
+    "any": [
+     {
+      "all": [
+       {
+        "field": "sellable",
+        "op": "IN",
+        "values": [
+         "N"
+        ]
+       },
+       {
+        "field": "netsuiteProductId",
+        "op": "BLANK"
+       }
+      ]
+     },
+     {
+      "all": [
+       {
+        "field": "sellable",
+        "op": "IN",
+        "values": [
+         "N"
+        ]
+       },
+       {
+        "field": "nsAllRank",
+        "op": "NOT_IN",
+        "values": [
+         1
+        ]
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "id": "keys",
+   "kind": "derive",
+   "rules": [
+    {
+     "set": "duplicateNetsuiteId",
+     "value": {
+      "literal": false
+     }
+    },
+    {
+     "set": "duplicateNetsuiteId",
+     "when": [
+      {
+       "field": "sellable",
+       "op": "IN",
+       "values": [
+        "Y"
+       ]
+      },
+      {
+       "field": "netsuiteProductId",
+       "op": "NOT_BLANK"
+      }
+     ],
+     "value": {
+      "fn": "atLeast",
+      "args": [
+       {
+        "copy": "nsGroupSize"
+       },
+       2
+      ]
+     }
+    },
+    {
+     "set": "sharedWith",
+     "when": [
+      {
+       "field": "sellable",
+       "op": "IN",
+       "values": [
+        "Y"
+       ]
+      },
+      {
+       "field": "netsuiteProductId",
+       "op": "NOT_BLANK"
+      }
+     ],
+     "value": {
+      "fn": "join",
+      "sep": ", ",
+      "args": [
+       {
+        "fn": "without",
+        "args": [
+         {
+          "copy": "nsGroup"
+         },
+         {
+          "copy": "productId"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "set": "nsKey",
+     "when": [
+      {
+       "field": "sellable",
+       "op": "IN",
+       "values": [
+        "Y"
+       ]
+      },
+      {
+       "field": "netsuiteProductId",
+       "op": "BLANK"
+      }
+     ],
+     "value": {
+      "fn": "join",
+      "sep": ":",
+      "args": [
+       "HOTWAX-ONLY",
+       {
+        "copy": "productId"
+       }
+      ]
+     }
+    },
+    {
+     "set": "nsKey",
+     "when": [
+      {
+       "field": "sellable",
+       "op": "IN",
+       "values": [
+        "Y"
+       ]
+      },
+      {
+       "field": "netsuiteProductId",
+       "op": "NOT_BLANK"
+      },
+      {
+       "field": "nsRank",
+       "op": "IN",
+       "values": [
+        1
+       ]
+      }
+     ],
+     "value": {
+      "copy": "netsuiteProductId"
+     }
+    },
+    {
+     "set": "nsKey",
+     "when": [
+      {
+       "field": "sellable",
+       "op": "IN",
+       "values": [
+        "Y"
+       ]
+      },
+      {
+       "field": "netsuiteProductId",
+       "op": "NOT_BLANK"
+      },
+      {
+       "field": "nsRank",
+       "op": "NOT_IN",
+       "values": [
+        1
+       ]
+      }
+     ],
+     "value": {
+      "fn": "join",
+      "sep": ":",
+      "args": [
+       "DUPLICATE",
+       {
+        "copy": "netsuiteProductId"
+       },
+       {
+        "copy": "productId"
+       }
+      ]
+     }
+    },
+    {
+     "set": "nsKey",
+     "when": [
+      {
+       "field": "sellable",
+       "op": "IN",
+       "values": [
+        "N"
+       ]
+      }
+     ],
+     "value": {
+      "copy": "netsuiteProductId"
+     }
+    },
+    {
+     "set": "netsuiteIdState",
+     "when": [
+      {
+       "field": "sellable",
+       "op": "IN",
+       "values": [
+        "Y"
+       ]
+      },
+      {
+       "field": "netsuiteProductId",
+       "op": "BLANK"
+      }
+     ],
+     "value": {
+      "literal": "NONE"
+     }
+    },
+    {
+     "set": "netsuiteIdState",
+     "when": [
+      {
+       "field": "sellable",
+       "op": "IN",
+       "values": [
+        "Y"
+       ]
+      },
+      {
+       "field": "netsuiteProductId",
+       "op": "NOT_BLANK"
+      },
+      {
+       "field": "nsRank",
+       "op": "IN",
+       "values": [
+        1
+       ]
+      }
+     ],
+     "value": {
+      "literal": "OWN"
+     }
+    },
+    {
+     "set": "netsuiteIdState",
+     "when": [
+      {
+       "field": "sellable",
+       "op": "IN",
+       "values": [
+        "Y"
+       ]
+      },
+      {
+       "field": "netsuiteProductId",
+       "op": "NOT_BLANK"
+      },
+      {
+       "field": "nsRank",
+       "op": "NOT_IN",
+       "values": [
+        1
+       ]
+      }
+     ],
+     "value": {
+      "literal": "SHARED"
+     }
+    },
+    {
+     "set": "netsuiteIdState",
+     "when": [
+      {
+       "field": "sellable",
+       "op": "IN",
+       "values": [
+        "N"
+       ]
+      }
+     ],
+     "value": {
+      "literal": "OWN"
+     }
+    }
+   ]
+  },
+  {
+   "id": "sellableCount",
+   "kind": "count",
+   "name": "sellable",
+   "when": [
+    {
+     "field": "sellable",
+     "op": "IN",
+     "values": [
+      "Y"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "withoutNetsuiteId",
+   "kind": "count",
+   "name": "withoutNetsuiteId",
+   "when": [
+    {
+     "field": "sellable",
+     "op": "IN",
+     "values": [
+      "Y"
+     ]
+    },
+    {
+     "field": "netsuiteProductId",
+     "op": "BLANK"
+    }
+   ]
+  },
+  {
+   "id": "severalProducts",
+   "kind": "count",
+   "name": "netsuiteIdsOnSeveralProducts",
+   "when": [
+    {
+     "field": "sellable",
+     "op": "IN",
+     "values": [
+      "Y"
+     ]
+    },
+    {
+     "field": "netsuiteProductId",
+     "op": "NOT_BLANK"
+    },
+    {
+     "field": "nsRank",
+     "op": "IN",
+     "values": [
+      2
+     ]
+    }
+   ]
+  },
+  {
+   "id": "notSellableKept",
+   "kind": "count",
+   "name": "notSellableWithNetsuiteId",
+   "when": [
+    {
+     "field": "sellable",
+     "op": "IN",
+     "values": [
+      "N"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "rules",
+   "kind": "filter",
+   "fields": [
+    "productId",
+    "internalName",
+    "productTypeId",
+    "createdDate",
+    "netsuiteProductId",
+    "nsKey",
+    "duplicateNetsuiteId",
+    "sharedWith",
+    "netsuiteIdState",
+    "sellable",
+    "notSellableReason"
+   ]
+  }
+ ],
+ "record": {
+  "fields": [
+   "productId",
+   "internalName",
+   "productTypeId",
+   "createdDate",
+   "netsuiteProductId",
+   "nsKey",
+   "duplicateNetsuiteId",
+   "sharedWith",
+   "netsuiteIdState",
+   "sellable"
+  ],
+  "optionalFields": [
+   "notSellableReason"
+  ]
  }
 }]]></definitionJson>
     </darpan.datasource.DataSourceDefinition>
