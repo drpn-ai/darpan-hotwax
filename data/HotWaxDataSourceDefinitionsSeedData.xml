@@ -20,6 +20,12 @@
   the coded keying (HOTWAX-ONLY / own id / DUPLICATE, lowest productId as text owns a shared id) and the kept
   not-selling products are derive rows over two rankings. No window, no keys (the coded read ignores both).
   Allowed differences: identificationsRead and gqlCalls not counted; dataAvailable true on an empty catalogue.
+
+  OMS_RETURNS_GQL_V1: the OMS returns read, equal to the coded extract#HotWaxOmsGqlReturns (OmsGqlReturnsDataDefinitionTests).
+  The two switches are declared options (the connector's extractOptionsJson): onlyCancelledReturns picks the status text
+  of the search, and both decide what the drop rows leave out. Items, orders, order lines, product names and NetSuite ids
+  are read per 200 kept returns; the exchange chain reads responses, replacement orders, orders sharing their Shopify id
+  and those orders' open return items. Allowed differences: no shared read or lookup caches, null and absent as one.
 -->
 <entity-facade-xml type="darpan-seed">
     <darpan.datasource.DataSourceDefinition dataSourceDefinitionId="OMS_ORDER_ITEMS_GQL_V1"
@@ -2141,6 +2147,1340 @@
   ],
   "optionalFields": [
    "notSellableReason"
+  ]
+ }
+}]]></definitionJson>
+    </darpan.datasource.DataSourceDefinition>
+    <darpan.datasource.DataSourceDefinition dataSourceDefinitionId="OMS_RETURNS_GQL_V1"
+            definitionName="HotWax returns with their items" protocol="GRAPHQL" definitionVersion="1" statusId="DRAFT"
+            description="The OMS returns read as data (DAR-BE-176): returns by entry-date window or id, the Shopify reference, items with order and product facts, an exchange's replacement order and the open return holding it.">
+        <definitionJson><![CDATA[{
+ "connection": {
+  "urlTemplate": "{baseUrl}/rest/s1/graphql",
+  "auth": {
+   "kindField": "authType",
+   "defaultKind": "NONE",
+   "headersJsonField": "headersJson",
+   "kinds": {
+    "NONE": {
+     "method": "NONE"
+    },
+    "BASIC": {
+     "method": "BASIC",
+     "userField": "username",
+     "passwordField": "password"
+    },
+    "BEARER": {
+     "method": "BEARER",
+     "tokenFields": [
+      "apiToken",
+      "password"
+     ]
+    },
+    "API_KEY": {
+     "method": "HEADER",
+     "header": "api_key",
+     "tokenFields": [
+      "apiToken",
+      "password"
+     ]
+    }
+   }
+  },
+  "timeoutSeconds": 120
+ },
+ "limits": {
+  "maxCostPerCall": 1000,
+  "maxInFlight": 6,
+  "errorCodeAt": "errors[*].extensions.code",
+  "throttledCodes": [
+   "THROTTLED"
+  ],
+  "maxThrottleWaitSeconds": 300,
+  "costRefusedCodes": [
+   "COST_EXCEEDED"
+  ],
+  "retryStatuses": [
+   429,
+   502,
+   503,
+   504
+  ],
+  "maxAttempts": 3,
+  "retryBackoffMillis": 2000,
+  "costBucket": {
+   "at": "extensions.cost.throttleStatus",
+   "available": "currentlyAvailable",
+   "maximum": "maximumAvailable",
+   "restoreRate": "restoreRate"
+  }
+ },
+ "batchRecords": 200,
+ "options": [
+  {
+   "name": "includeReturnsWithoutShopifyRef",
+   "type": "BOOLEAN",
+   "default": false,
+   "field": "optIncludeNoRef"
+  },
+  {
+   "name": "onlyCancelledReturns",
+   "type": "BOOLEAN",
+   "default": false,
+   "field": "optOnlyCancelled",
+   "text": {
+    "true": "statusId:RETURN_CANCELLED ",
+    "false": ""
+   }
+  }
+ ],
+ "steps": [
+  {
+   "id": "returns",
+   "kind": "query",
+   "document": "query OmsReturns($q: String, $first: Int, $after: String) {\n  returns(query: $q, sortKey: RETURN_ID, first: $first, after: $after) {\n    edges { node { returnId statusId entryDate returnDate externalId currencyUomId returnChannelEnumId fromPartyId\n      identifications(first: 4) { returnIdentificationTypeId idValue thruDate } } }\n    pageInfo { hasNextPage endCursor }\n  }\n}",
+   "connectionAt": "returns",
+   "recordsAt": "edges[*].node",
+   "hasNextAt": "pageInfo.hasNextPage",
+   "cursorAt": "pageInfo.endCursor",
+   "bind": {
+    "window": {
+     "variables": {
+      "q": "{onlyCancelledReturns}entryDate:>={from} entryDate:<{thru}"
+     },
+     "field": "entryDate",
+     "sliceHours": 24,
+     "instantFormat": "ISO_INSTANT",
+     "parallel": 4
+    },
+    "ids": {
+     "variables": {
+      "q": "{onlyCancelledReturns}returnId:{ids}"
+     },
+     "from": "LOOKUP_KEYS",
+     "chunk": 100,
+     "parallel": 4,
+     "defaultKeyField": "returnId",
+     "keyFields": {
+      "returnId": "returnId"
+     },
+     "idPattern": "[A-Za-z0-9_\\-]{1,40}",
+     "separator": ","
+    }
+   },
+   "paging": {
+    "firstVariable": "first",
+    "afterVariable": "after",
+    "pageSize": 43,
+    "maxPages": 20000
+   },
+   "reservation": 1000
+  },
+  {
+   "id": "returnFacts",
+   "kind": "derive",
+   "rules": [
+    {
+     "set": "shopifyReturnId",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "fn": "firstPresent",
+        "args": [
+         {
+          "fn": "firstWhere",
+          "list": "identifications",
+          "field": "idValue",
+          "when": [
+           {
+            "field": "returnIdentificationTypeId",
+            "op": "IN",
+            "values": [
+             "SHOPIFY_RTN_ID"
+            ]
+           },
+           {
+            "field": "idValue",
+            "op": "MATCHES",
+            "values": [
+             "\\d+"
+            ]
+           },
+           {
+            "any": [
+             {
+              "field": "thruDate",
+              "op": "BLANK"
+             },
+             {
+              "field": "thruDate",
+              "op": "AFTER_NOW"
+             }
+            ]
+           }
+          ]
+         },
+         {
+          "fn": "firstWhere",
+          "list": "identifications",
+          "field": "idValue",
+          "when": [
+           {
+            "field": "returnIdentificationTypeId",
+            "op": "IN",
+            "values": [
+             "SHOPIFY_RETURN_ID"
+            ]
+           },
+           {
+            "field": "idValue",
+            "op": "MATCHES",
+            "values": [
+             "\\d+"
+            ]
+           },
+           {
+            "any": [
+             {
+              "field": "thruDate",
+              "op": "BLANK"
+             },
+             {
+              "field": "thruDate",
+              "op": "AFTER_NOW"
+             }
+            ]
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "set": "externalId",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "externalId"
+       }
+      ]
+     }
+    },
+    {
+     "set": "netsuiteCreditMemoId",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "fn": "firstWhere",
+        "list": "identifications",
+        "field": "idValue",
+        "when": [
+         {
+          "field": "returnIdentificationTypeId",
+          "op": "IN",
+          "values": [
+           "NETSUITE_CM_ID"
+          ]
+         },
+         {
+          "field": "idValue",
+          "op": "MATCHES",
+          "values": [
+           ".+"
+          ]
+         },
+         {
+          "any": [
+           {
+            "field": "thruDate",
+            "op": "BLANK"
+           },
+           {
+            "field": "thruDate",
+            "op": "AFTER_NOW"
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "set": "warrantyId",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "fn": "firstWhere",
+        "list": "identifications",
+        "field": "idValue",
+        "when": [
+         {
+          "field": "returnIdentificationTypeId",
+          "op": "IN",
+          "values": [
+           "AFTSHIP_WTY_RMA_ID"
+          ]
+         },
+         {
+          "field": "idValue",
+          "op": "MATCHES",
+          "values": [
+           ".+"
+          ]
+         },
+         {
+          "any": [
+           {
+            "field": "thruDate",
+            "op": "BLANK"
+           },
+           {
+            "field": "thruDate",
+            "op": "AFTER_NOW"
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "set": "fromPartyId",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "fromPartyId"
+       }
+      ]
+     }
+    },
+    {
+     "set": "entryDate",
+     "value": {
+      "fn": "epochMillis",
+      "args": [
+       {
+        "fn": "text",
+        "args": [
+         {
+          "copy": "entryDate"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "set": "returnDate",
+     "value": {
+      "fn": "epochMillis",
+      "args": [
+       {
+        "fn": "text",
+        "args": [
+         {
+          "copy": "returnDate"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "set": "daysBeforeEntry",
+     "value": {
+      "fn": "daysBetween",
+      "args": [
+       {
+        "copy": "entryDate"
+       },
+       {
+        "copy": "returnDate"
+       }
+      ]
+     }
+    },
+    {
+     "set": "statusText",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "statusId"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "verdict",
+   "kind": "derive",
+   "rules": [
+    {
+     "set": "verdict",
+     "value": {
+      "literal": "KEEP"
+     }
+    },
+    {
+     "set": "verdict",
+     "when": [
+      {
+       "field": "shopifyReturnId",
+       "op": "BLANK"
+      },
+      {
+       "field": "externalId",
+       "op": "BLANK"
+      }
+     ],
+     "value": {
+      "literal": "NO_SHOPIFY_REF"
+     }
+    },
+    {
+     "set": "verdict",
+     "when": [
+      {
+       "field": "statusText",
+       "op": "IN",
+       "values": [
+        "RETURN_CANCELLED"
+       ]
+      }
+     ],
+     "value": {
+      "literal": "CANCELLED"
+     }
+    },
+    {
+     "set": "keepNoRef",
+     "value": {
+      "literal": false
+     }
+    },
+    {
+     "set": "keepNoRef",
+     "when": [
+      {
+       "field": "optIncludeNoRef",
+       "op": "IN",
+       "values": [
+        true
+       ]
+      }
+     ],
+     "value": {
+      "literal": true
+     }
+    },
+    {
+     "set": "keepNoRef",
+     "when": [
+      {
+       "field": "optOnlyCancelled",
+       "op": "IN",
+       "values": [
+        true
+       ]
+      }
+     ],
+     "value": {
+      "literal": true
+     }
+    }
+   ]
+  },
+  {
+   "id": "returnsCount",
+   "kind": "count",
+   "name": "serverReportedReturnsCount"
+  },
+  {
+   "id": "cancelledLeftOut",
+   "kind": "drop",
+   "name": "excludedCancelledCount",
+   "when": [
+    {
+     "field": "verdict",
+     "op": "IN",
+     "values": [
+      "CANCELLED"
+     ]
+    },
+    {
+     "field": "optOnlyCancelled",
+     "op": "IN",
+     "values": [
+      false
+     ]
+    }
+   ]
+  },
+  {
+   "id": "statusNotAsked",
+   "kind": "drop",
+   "name": "otherStatusLeftOut",
+   "when": [
+    {
+     "field": "optOnlyCancelled",
+     "op": "IN",
+     "values": [
+      true
+     ]
+    },
+    {
+     "field": "verdict",
+     "op": "NOT_IN",
+     "values": [
+      "CANCELLED"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "noRefLeftOut",
+   "kind": "drop",
+   "name": "excludedNoShopifyRefCount",
+   "when": [
+    {
+     "field": "verdict",
+     "op": "IN",
+     "values": [
+      "NO_SHOPIFY_REF"
+     ]
+    },
+    {
+     "field": "keepNoRef",
+     "op": "IN",
+     "values": [
+      false
+     ]
+    }
+   ]
+  },
+  {
+   "id": "noRefKept",
+   "kind": "count",
+   "name": "keptNoShopifyRefCount",
+   "when": [
+    {
+     "field": "verdict",
+     "op": "IN",
+     "values": [
+      "NO_SHOPIFY_REF"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "items",
+   "kind": "query",
+   "document": "query OmsReturnItems($q: String, $first: Int, $after: String) {\n  returnItems(query: $q, first: $first, after: $after) {\n    edges { node { returnId returnItemSeqId orderId orderItemSeqId productId returnQuantity receivedQuantity\n      returnPrice returnReasonId statusId returnTypeId } }\n    pageInfo { hasNextPage endCursor }\n  }\n}",
+   "connectionAt": "returnItems",
+   "recordsAt": "edges[*].node",
+   "hasNextAt": "pageInfo.hasNextPage",
+   "cursorAt": "pageInfo.endCursor",
+   "bind": {
+    "ids": {
+     "variables": {
+      "q": "returnId:{ids}"
+     },
+     "from": "returns.returnId",
+     "chunk": 85,
+     "separator": ",",
+     "parallel": 4
+    }
+   },
+   "paging": {
+    "firstVariable": "first",
+    "afterVariable": "after",
+    "pageSize": 85,
+    "maxPages": 20000
+   },
+   "reservation": 1000
+  },
+  {
+   "id": "itemFacts",
+   "kind": "derive",
+   "on": "items",
+   "rules": [
+    {
+     "set": "lineAmount",
+     "value": {
+      "fn": "decimalPlain",
+      "args": [
+       {
+        "fn": "multiply",
+        "args": [
+         {
+          "copy": "returnPrice"
+         },
+         {
+          "copy": "returnQuantity"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "set": "returnQuantity",
+     "value": {
+      "fn": "decimalPlain",
+      "args": [
+       {
+        "copy": "returnQuantity"
+       }
+      ]
+     }
+    },
+    {
+     "set": "receivedQuantity",
+     "value": {
+      "fn": "decimalPlain",
+      "args": [
+       {
+        "copy": "receivedQuantity"
+       }
+      ]
+     }
+    },
+    {
+     "set": "returnPrice",
+     "value": {
+      "fn": "decimalPlain",
+      "args": [
+       {
+        "copy": "returnPrice"
+       }
+      ]
+     }
+    },
+    {
+     "set": "returnItemStatusId",
+     "value": {
+      "copy": "statusId"
+     }
+    },
+    {
+     "set": "orderIdText",
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "copy": "orderId"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "orders",
+   "kind": "query",
+   "document": "query OmsOrderExternalIds($q: String, $first: Int, $after: String) {\n  orders(query: $q, first: $first, after: $after) {\n    edges { node { orderId orderName externalId productStoreId grandTotal orderDate billToCustomer { firstName lastName } identifications(first: 3) { orderIdentificationTypeId idValue } } }\n    pageInfo { hasNextPage endCursor }\n  }\n}",
+   "connectionAt": "orders",
+   "recordsAt": "edges[*].node",
+   "hasNextAt": "pageInfo.hasNextPage",
+   "cursorAt": "pageInfo.endCursor",
+   "bind": {
+    "ids": {
+     "variables": {
+      "q": "orderId:{ids}"
+     },
+     "from": "items.orderId",
+     "chunk": 60,
+     "separator": ",",
+     "parallel": 4
+    }
+   },
+   "paging": {
+    "firstVariable": "first",
+    "afterVariable": "after",
+    "pageSize": 60,
+    "maxPages": 20000
+   },
+   "reservation": 950
+  },
+  {
+   "id": "orderFacts",
+   "kind": "derive",
+   "on": "orders",
+   "rules": [
+    {
+     "set": "customerName",
+     "value": {
+      "fn": "join",
+      "sep": " ",
+      "args": [
+       {
+        "fn": "text",
+        "args": [
+         {
+          "copy": "billToCustomer.firstName"
+         }
+        ]
+       },
+       {
+        "fn": "text",
+        "args": [
+         {
+          "copy": "billToCustomer.lastName"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "set": "netsuiteId",
+     "value": {
+      "fn": "firstWhere",
+      "list": "identifications",
+      "field": "idValue",
+      "when": [
+       {
+        "field": "orderIdentificationTypeId",
+        "op": "IN",
+        "values": [
+         "NETSUITE_ORDER_ID"
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "set": "grandTotalPlain",
+     "value": {
+      "fn": "decimalPlain",
+      "args": [
+       {
+        "copy": "grandTotal"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "orderLines",
+   "kind": "query",
+   "document": "query OmsOrderItemExternalIds($q: String, $first: Int, $after: String) {\n  orderItems(query: $q, first: $first, after: $after) {\n    edges { node { orderId orderItemSeqId externalId } }\n    pageInfo { hasNextPage endCursor }\n  }\n}",
+   "connectionAt": "orderItems",
+   "recordsAt": "edges[*].node",
+   "hasNextAt": "pageInfo.hasNextPage",
+   "cursorAt": "pageInfo.endCursor",
+   "bind": {
+    "ids": {
+     "variables": {
+      "q": "orderId:{ids}"
+     },
+     "from": "items.orderId",
+     "chunk": 100,
+     "separator": ",",
+     "parallel": 4
+    }
+   },
+   "paging": {
+    "firstVariable": "first",
+    "afterVariable": "after",
+    "pageSize": 100,
+    "maxPages": 20000
+   },
+   "reservation": 450
+  },
+  {
+   "id": "productNames",
+   "kind": "query",
+   "document": "query OmsProductNames($q: String, $first: Int, $after: String) {\n  products(query: $q, first: $first, after: $after) {\n    edges { node { productId internalName } }\n    pageInfo { hasNextPage endCursor }\n  }\n}",
+   "connectionAt": "products",
+   "recordsAt": "edges[*].node",
+   "hasNextAt": "pageInfo.hasNextPage",
+   "cursorAt": "pageInfo.endCursor",
+   "bind": {
+    "ids": {
+     "variables": {
+      "q": "productId:{ids}"
+     },
+     "from": "items.productId",
+     "chunk": 100,
+     "separator": ",",
+     "parallel": 4
+    }
+   },
+   "paging": {
+    "firstVariable": "first",
+    "afterVariable": "after",
+    "pageSize": 100,
+    "maxPages": 20000
+   },
+   "reservation": 350
+  },
+  {
+   "id": "productNetsuiteIds",
+   "kind": "query",
+   "document": "query OmsProductNetsuiteIds($q: String, $first: Int, $after: String) {\n  goodIdentifications(query: $q, first: $first, after: $after) {\n    edges { node { productId idValue thruDate } }\n    pageInfo { hasNextPage endCursor }\n  }\n}",
+   "connectionAt": "goodIdentifications",
+   "recordsAt": "edges[*].node",
+   "hasNextAt": "pageInfo.hasNextPage",
+   "cursorAt": "pageInfo.endCursor",
+   "bind": {
+    "ids": {
+     "variables": {
+      "q": "goodIdentificationTypeId:NETSUITE_PRODUCT_ID productId:{ids}"
+     },
+     "from": "items.productId",
+     "chunk": 100,
+     "separator": ",",
+     "parallel": 4
+    }
+   },
+   "paging": {
+    "firstVariable": "first",
+    "afterVariable": "after",
+    "pageSize": 100,
+    "maxPages": 20000
+   },
+   "reservation": 350
+  },
+  {
+   "id": "lineIds",
+   "kind": "join",
+   "into": "items",
+   "from": "orderLines",
+   "on": [
+    {
+     "into": "orderId",
+     "from": "orderId"
+    },
+    {
+     "into": "orderItemSeqId",
+     "from": "orderItemSeqId"
+    }
+   ],
+   "copy": {
+    "orderItemExternalId": "externalId"
+   }
+  },
+  {
+   "id": "sku",
+   "kind": "join",
+   "into": "items",
+   "from": "productNames",
+   "on": [
+    {
+     "into": "productId",
+     "from": "productId"
+    }
+   ],
+   "copy": {
+    "sku": "internalName"
+   }
+  },
+  {
+   "id": "productNetsuiteId",
+   "kind": "join",
+   "into": "items",
+   "from": "productNetsuiteIds",
+   "on": [
+    {
+     "into": "productId",
+     "from": "productId"
+    }
+   ],
+   "copy": {
+    "productNetsuiteId": "idValue"
+   },
+   "fromWhen": [
+    {
+     "field": "thruDate",
+     "op": "BLANK"
+    }
+   ],
+   "last": true
+  },
+  {
+   "id": "orderOfItem",
+   "kind": "join",
+   "into": "items",
+   "from": "orders",
+   "on": [
+    {
+     "into": "orderId",
+     "from": "orderId"
+    }
+   ],
+   "copy": {
+    "orderExternalId": "externalId",
+    "orderName": "orderName",
+    "orderDate": "orderDate",
+    "customerName": "customerName",
+    "orderProductStoreId": "productStoreId",
+    "orderNetsuiteId": "netsuiteId",
+    "orderGrandTotal": "grandTotalPlain"
+   }
+  },
+  {
+   "id": "itemRank",
+   "kind": "number",
+   "on": "items",
+   "field": "itemRank",
+   "partitionBy": [
+    "returnId"
+   ],
+   "orderBy": [
+    {
+     "path": "returnItemSeqId",
+     "as": "TEXT"
+    }
+   ]
+  },
+  {
+   "id": "responses",
+   "kind": "query",
+   "document": "query OmsReturnResponses($q: String, $first: Int, $after: String) {\n  returns(query: $q, first: $first, after: $after) {\n    edges { node { returnId responses(first: 3) { replacementOrderId } } }\n    pageInfo { hasNextPage endCursor }\n  }\n}",
+   "connectionAt": "returns",
+   "recordsAt": "edges[*].node",
+   "hasNextAt": "pageInfo.hasNextPage",
+   "cursorAt": "pageInfo.endCursor",
+   "bind": {
+    "ids": {
+     "variables": {
+      "q": "returnId:{ids}"
+     },
+     "from": "items.returnId",
+     "chunk": 50,
+     "separator": ",",
+     "parallel": 4,
+     "when": [
+      {
+       "field": "returnTypeId",
+       "op": "IN",
+       "values": [
+        "RTN_EXCHANGE"
+       ]
+      }
+     ]
+    }
+   },
+   "paging": {
+    "firstVariable": "first",
+    "afterVariable": "after",
+    "pageSize": 50,
+    "maxPages": 20000
+   },
+   "reservation": 400
+  },
+  {
+   "id": "replacement",
+   "kind": "derive",
+   "on": "responses",
+   "rules": [
+    {
+     "set": "replacementOrderId",
+     "value": {
+      "fn": "first",
+      "args": [
+       {
+        "copy": "responses[*].replacementOrderId"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "exchangeOrders",
+   "kind": "query",
+   "document": "query OmsOrderExternalIds($q: String, $first: Int, $after: String) {\n  orders(query: $q, first: $first, after: $after) {\n    edges { node { orderId orderName externalId productStoreId grandTotal orderDate billToCustomer { firstName lastName } identifications(first: 3) { orderIdentificationTypeId idValue } } }\n    pageInfo { hasNextPage endCursor }\n  }\n}",
+   "connectionAt": "orders",
+   "recordsAt": "edges[*].node",
+   "hasNextAt": "pageInfo.hasNextPage",
+   "cursorAt": "pageInfo.endCursor",
+   "bind": {
+    "ids": {
+     "variables": {
+      "q": "orderId:{ids}"
+     },
+     "from": "responses.replacementOrderId",
+     "chunk": 60,
+     "separator": ",",
+     "parallel": 4
+    }
+   },
+   "paging": {
+    "firstVariable": "first",
+    "afterVariable": "after",
+    "pageSize": 60,
+    "maxPages": 20000
+   },
+   "reservation": 950
+  },
+  {
+   "id": "exchangeOrderFacts",
+   "kind": "derive",
+   "on": "exchangeOrders",
+   "rules": [
+    {
+     "set": "netsuiteId",
+     "value": {
+      "fn": "firstWhere",
+      "list": "identifications",
+      "field": "idValue",
+      "when": [
+       {
+        "field": "orderIdentificationTypeId",
+        "op": "IN",
+        "values": [
+         "NETSUITE_ORDER_ID"
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "pairOrders",
+   "kind": "query",
+   "document": "query OmsOrderExternalIds($q: String, $first: Int, $after: String) {\n  orders(query: $q, first: $first, after: $after) {\n    edges { node { orderId orderName externalId productStoreId grandTotal orderDate billToCustomer { firstName lastName } identifications(first: 3) { orderIdentificationTypeId idValue } } }\n    pageInfo { hasNextPage endCursor }\n  }\n}",
+   "connectionAt": "orders",
+   "recordsAt": "edges[*].node",
+   "hasNextAt": "pageInfo.hasNextPage",
+   "cursorAt": "pageInfo.endCursor",
+   "bind": {
+    "ids": {
+     "variables": {
+      "q": "externalId:{ids}"
+     },
+     "from": "exchangeOrders.externalId",
+     "chunk": 60,
+     "separator": ",",
+     "parallel": 4,
+     "when": [
+      {
+       "field": "netsuiteId",
+       "op": "BLANK"
+      },
+      {
+       "field": "externalId",
+       "op": "NOT_BLANK"
+      }
+     ]
+    }
+   },
+   "paging": {
+    "firstVariable": "first",
+    "afterVariable": "after",
+    "pageSize": 60,
+    "maxPages": 20000
+   },
+   "reservation": 950
+  },
+  {
+   "id": "openItems",
+   "kind": "query",
+   "document": "query OmsReturnItems($q: String, $first: Int, $after: String) {\n  returnItems(query: $q, first: $first, after: $after) {\n    edges { node { returnId returnItemSeqId orderId orderItemSeqId productId returnQuantity receivedQuantity\n      returnPrice returnReasonId statusId returnTypeId } }\n    pageInfo { hasNextPage endCursor }\n  }\n}",
+   "connectionAt": "returnItems",
+   "recordsAt": "edges[*].node",
+   "hasNextAt": "pageInfo.hasNextPage",
+   "cursorAt": "pageInfo.endCursor",
+   "bind": {
+    "ids": {
+     "variables": {
+      "q": "orderId:{ids}"
+     },
+     "from": "pairOrders.orderId",
+     "chunk": 85,
+     "separator": ",",
+     "parallel": 4
+    }
+   },
+   "paging": {
+    "firstVariable": "first",
+    "afterVariable": "after",
+    "pageSize": 85,
+    "maxPages": 20000
+   },
+   "reservation": 1000
+  },
+  {
+   "id": "closedLeftOut",
+   "kind": "drop",
+   "name": "closedReturnItemsLeftOut",
+   "on": "openItems",
+   "when": [
+    {
+     "field": "statusId",
+     "op": "IN",
+     "values": [
+      "RETURN_COMPLETED",
+      "RETURN_CANCELLED",
+      "RETURN_REJECTED"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "openShopifyId",
+   "kind": "join",
+   "into": "openItems",
+   "from": "pairOrders",
+   "on": [
+    {
+     "into": "orderId",
+     "from": "orderId"
+    }
+   ],
+   "copy": {
+    "shopifyId": "externalId"
+   }
+  },
+  {
+   "id": "exchangeOrder",
+   "kind": "join",
+   "into": "responses",
+   "from": "exchangeOrders",
+   "on": [
+    {
+     "into": "replacementOrderId",
+     "from": "orderId"
+    }
+   ],
+   "copy": {
+    "exchangeOrderName": "orderName",
+    "exchangeOrderNetsuiteId": "netsuiteId",
+    "exchangeExternalId": "externalId"
+   }
+  },
+  {
+   "id": "exchangeOfReturn",
+   "kind": "join",
+   "into": "returns",
+   "from": "responses",
+   "on": [
+    {
+     "into": "returnId",
+     "from": "returnId"
+    }
+   ],
+   "copy": {
+    "exchangeOrderId": "replacementOrderId",
+    "exchangeOrderName": "exchangeOrderName",
+    "exchangeOrderNetsuiteId": "exchangeOrderNetsuiteId",
+    "exchangeExternalId": "exchangeExternalId"
+   }
+  },
+  {
+   "id": "openReturn",
+   "kind": "join",
+   "into": "returns",
+   "from": "openItems",
+   "on": [
+    {
+     "into": "exchangeExternalId",
+     "from": "shopifyId"
+    }
+   ],
+   "notOn": [
+    {
+     "into": "returnId",
+     "from": "returnId"
+    }
+   ],
+   "copy": {
+    "openReturnOnOrderId": "returnId",
+    "openReturnOnOrderStatus": "statusId"
+   }
+  },
+  {
+   "id": "orderOfReturn",
+   "kind": "join",
+   "into": "returns",
+   "from": "items",
+   "on": [
+    {
+     "into": "returnId",
+     "from": "returnId"
+    }
+   ],
+   "fromWhen": [
+    {
+     "field": "itemRank",
+     "op": "IN",
+     "values": [
+      1
+     ]
+    }
+   ],
+   "copy": {
+    "orderExternalId": "orderExternalId",
+    "orderName": "orderName",
+    "orderDate": "orderDate",
+    "customerName": "customerName",
+    "orderProductStoreId": "orderProductStoreId",
+    "orderNetsuiteId": "orderNetsuiteId",
+    "orderId": "orderIdText",
+    "orderGrandTotal": "orderGrandTotal"
+   }
+  },
+  {
+   "id": "itemsOfReturn",
+   "kind": "join",
+   "into": "returns",
+   "from": "items",
+   "on": [
+    {
+     "into": "returnId",
+     "from": "returnId"
+    }
+   ],
+   "many": true,
+   "as": "items",
+   "sortBy": [
+    {
+     "path": "returnItemSeqId",
+     "as": "TEXT"
+    }
+   ],
+   "fields": [
+    "returnItemSeqId",
+    "orderItemExternalId",
+    "productId",
+    "sku",
+    "returnQuantity",
+    "receivedQuantity",
+    "returnPrice",
+    "lineAmount",
+    "returnReasonId",
+    "returnTypeId",
+    "returnItemStatusId"
+   ],
+   "optionalFields": [
+    "productNetsuiteId"
+   ],
+   "always": true
+  },
+  {
+   "id": "total",
+   "kind": "derive",
+   "rules": [
+    {
+     "set": "returnTotal",
+     "value": {
+      "fn": "decimalPlain",
+      "args": [
+       {
+        "fn": "sum",
+        "args": [
+         {
+          "copy": "items[*].lineAmount"
+         }
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "rules",
+   "kind": "filter",
+   "fields": [
+    "returnId",
+    "shopifyReturnId",
+    "externalId",
+    "statusId",
+    "entryDate",
+    "returnDate",
+    "daysBeforeEntry",
+    "returnTotal",
+    "currencyUomId",
+    "returnChannelEnumId",
+    "fromPartyId",
+    "items",
+    "orderExternalId",
+    "orderName",
+    "orderDate",
+    "customerName",
+    "orderProductStoreId",
+    "orderNetsuiteId",
+    "orderId",
+    "orderGrandTotal",
+    "exchangeOrderId",
+    "exchangeOrderName",
+    "exchangeOrderNetsuiteId",
+    "openReturnOnOrderId",
+    "openReturnOnOrderStatus",
+    "netsuiteCreditMemoId",
+    "warrantyId"
+   ]
+  },
+  {
+   "id": "joinKeyFallback",
+   "kind": "derive",
+   "rules": [
+    {
+     "set": "externalId",
+     "when": [
+      {
+       "field": "externalId",
+       "op": "BLANK"
+      }
+     ],
+     "value": {
+      "copy": "shopifyReturnId"
+     }
+    }
+   ]
+  }
+ ],
+ "record": {
+  "fields": [
+   "returnId",
+   "shopifyReturnId",
+   "externalId",
+   "statusId",
+   "entryDate",
+   "returnDate",
+   "daysBeforeEntry",
+   "returnTotal",
+   "currencyUomId",
+   "returnChannelEnumId",
+   "fromPartyId",
+   "items"
+  ],
+  "optionalFields": [
+   "orderExternalId",
+   "orderName",
+   "orderDate",
+   "customerName",
+   "orderProductStoreId",
+   "orderNetsuiteId",
+   "orderId",
+   "orderGrandTotal",
+   "exchangeOrderId",
+   "exchangeOrderName",
+   "exchangeOrderNetsuiteId",
+   "openReturnOnOrderId",
+   "openReturnOnOrderStatus",
+   "netsuiteCreditMemoId",
+   "warrantyId"
+  ],
+  "keepRecordFields": true,
+  "keepAlways": [
+   "items"
   ]
  }
 }]]></definitionJson>
