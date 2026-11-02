@@ -78,6 +78,12 @@
  "metadata": {
   "droppedNullLineIdCount": 0
  },
+ "warnings": [
+  {
+   "count": "keptNullShopifyIdCount",
+   "text": "{n} order item(s) had no Shopify order or line id; they were compared with it left empty."
+  }
+ ],
  "steps": [
   {
    "id": "orders",
