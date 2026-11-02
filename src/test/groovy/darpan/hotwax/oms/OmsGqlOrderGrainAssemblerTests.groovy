@@ -75,7 +75,7 @@ class OmsGqlOrderGrainAssemblerTests {
     void theRealExchangeExclusionDropsAGraftedOrder() {
         List assembled = OmsGqlOrderGrainAssembler.assemble(
                 [order("M1", [opp("CREDIT_CARD")]), order("M2", [opp("CREDIT_CARD")])], [exch("M2", "M0")])
-        Map shaped = OmsRestSourceSupport.shapePageRecords(assembled, null, null, null)
+        Map shaped = OmsExtractSupport.shapePageRecords(assembled, null, null, null)
         assertEquals(1, shaped.excludedExchangeOrderCount)
         assertEquals("M0", ((Map) ((List) shaped.excludedExchangeOrders)[0]).toOrderId)
         assertTrue((shaped.serializedRecords as String).contains("\"orderId\":\"M1\""))
@@ -87,14 +87,14 @@ class OmsGqlOrderGrainAssemblerTests {
         // If the two-term query does not AND server-side, the type is still enforced here.
         List assembled = OmsGqlOrderGrainAssembler.assemble([order("M1")],
                 [exch("M1", "M0") + [orderItemAssocTypeId: "REPLACEMENT"], exch("M9", "M0")])
-        Map shaped = OmsRestSourceSupport.shapePageRecords(assembled, null, null, null)
+        Map shaped = OmsExtractSupport.shapePageRecords(assembled, null, null, null)
         assertEquals(0, shaped.excludedExchangeOrderCount)
     }
 
     @Test
     void theDerivedFieldsSurviveTheRealProjection() {
         List assembled = OmsGqlOrderGrainAssembler.assemble([order("M1", [])], [])
-        Map shaped = OmsRestSourceSupport.shapePageRecords(assembled, null, null,
+        Map shaped = OmsExtractSupport.shapePageRecords(assembled, null, null,
                 ["orderId", "externalId", "hasPaymentPreference"] as Set)
         assertEquals('{"orderId":"M1","externalId":"SHM1","hasPaymentPreference":"N"}', shaped.serializedRecords)
     }

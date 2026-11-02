@@ -3,7 +3,7 @@ package darpan.hotwax.oms
 /**
  * GraphQL order nodes (+ the page's EXCHANGE assocs) -> documents the REST shaper accepts unchanged.
  *
- * THE EXCHANGE GRAFT IS THE POINT. OmsRestSourceSupport.containsExchangeOrderAssociation scans the
+ * THE EXCHANGE GRAFT IS THE POINT. OmsExtractSupport.containsExchangeOrderAssociation scans the
  * whole document for orderItemAssocTypeId == EXCHANGE, and a GraphQL order node carries no
  * association data, so without the graft every exchange order would re-enter the presence compare
  * as "in OMS, missing from Shopify". Grafting puts the rows where the existing scan finds them, so

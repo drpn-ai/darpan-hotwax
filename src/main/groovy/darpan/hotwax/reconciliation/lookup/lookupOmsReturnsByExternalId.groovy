@@ -7,7 +7,7 @@ missingIds = []
 unresolvedIds = []
 errors = []
 
-Map gate = OmsScriptServiceSupport.gateConfig(ec, omsRestSourceConfigId, companyUserGroupId, "OMS")
+Map gate = OmsScriptServiceSupport.gateConfig(ec, omsRestSourceConfigId, companyUserGroupId, "OMS_RETURNS_GQL")
 if (!gate.usable) { errors = gate.errors; return }
 def sourceConfig = gate.sourceConfig
 

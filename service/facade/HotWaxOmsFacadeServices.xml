@@ -4,7 +4,7 @@
 
     <service verb="list" noun="HotWaxOmsRestSourceConfigs" type="script" authz-action="view" allow-remote="true" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/facade/settings/listOmsRestSourceConfigs.groovy">
-        <description>List OMS REST source configurations available to the active tenant.</description>
+        <description>List OMS source configurations available to the active tenant.</description>
         <in-parameters>
             <parameter name="query"/>
             <parameter name="pageIndex" type="Integer" default-value="0"/>
@@ -19,7 +19,7 @@
                      SettingsFacadeServices.xml's list#NsAuthConfigs): declare every field the
                      service actually returns, not a subset. A List/Map out-parameter with a
                      partial child set publishes a contract that is actively false — this row is
-                     OmsRestSourceSupport.safeConfigMapFromPlain (:409-429) plus isShared, in the
+                     OmsExtractSupport.safeConfigMapFromPlain plus isShared, in the
                      same order, so it stays truthful. Declaring the full set also happens to be
                      the only way a List out-parameter with exactly one child avoids the contract
                      generator reading it as "array of that child's scalar type" instead of "array
@@ -28,7 +28,6 @@
                 <parameter name="description"/>
                 <parameter name="companyUserGroupId"/>
                 <parameter name="baseUrl"/>
-                <parameter name="ordersPath"/>
                 <parameter name="timeZone"/>
                 <parameter name="authType"/>
                 <parameter name="hasUsername" type="Boolean"/>
@@ -37,7 +36,6 @@
                 <parameter name="customHeaderNames" type="List"/>
                 <parameter name="connectTimeoutSeconds" type="Integer"/>
                 <parameter name="readTimeoutSeconds" type="Integer"/>
-                <parameter name="returnsPageSize" type="Integer"/>
                 <parameter name="isActive"/>
                 <parameter name="canReadOrders" type="Boolean"/>
                 <parameter name="createdDate"/>
@@ -55,13 +53,12 @@
 
     <service verb="save" noun="HotWaxOmsRestSourceConfig" type="script" allow-remote="true" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/facade/settings/saveOmsRestSourceConfig.groovy">
-        <description>Create or update a tenant-owned OMS REST source configuration. Secret fields are stored encrypted and are never returned in clear text.</description>
+        <description>Create or update a tenant-owned OMS source configuration. Secret fields are stored encrypted and are never returned in clear text.</description>
         <in-parameters>
             <parameter name="omsRestSourceConfigId"><description>DAR-BE-135: names a config this tenant owns or was granted,
                 to update it. Leave it out to create one; the server mints the id.</description></parameter>
             <parameter name="description"/>
             <parameter name="baseUrl" required="true"/>
-            <parameter name="ordersPath" default-value="/rest/s1/oms/orders"/>
             <parameter name="timeZone" default-value="UTC"/>
             <parameter name="authType" default-value="NONE">
                 <description>Supported values are NONE, BASIC, BEARER, and API_KEY. API_KEY sends the encrypted API token in the OMS Swagger-documented api_key header.</description>
@@ -72,9 +69,6 @@
             <parameter name="headersJson"/>
             <parameter name="connectTimeoutSeconds" type="Integer" default-value="30"/>
             <parameter name="readTimeoutSeconds" type="Integer" default-value="60"/>
-            <parameter name="returnsPageSize" type="Integer">
-                <description>Rows per page requested from the OMS reconciliationReturns endpoint, 1..1000. Omit to keep the stored value; unset means the 500 default. Lower it when OMS cannot build a full page inside its gateway timeout.</description>
-            </parameter>
             <parameter name="isActive" type="Boolean" default-value="true"/>
             <parameter name="canReadOrders" type="Boolean" default-value="true"/>
         </in-parameters>
@@ -89,7 +83,6 @@
                 <parameter name="description"/>
                 <parameter name="companyUserGroupId"/>
                 <parameter name="baseUrl"/>
-                <parameter name="ordersPath"/>
                 <parameter name="timeZone"/>
                 <parameter name="authType"/>
                 <parameter name="hasUsername" type="Boolean"/>
@@ -98,7 +91,6 @@
                 <parameter name="customHeaderNames" type="List"/>
                 <parameter name="connectTimeoutSeconds" type="Integer"/>
                 <parameter name="readTimeoutSeconds" type="Integer"/>
-                <parameter name="returnsPageSize" type="Integer"/>
                 <parameter name="isActive"/>
                 <parameter name="canReadOrders" type="Boolean"/>
                 <parameter name="createdDate"/>
@@ -110,7 +102,7 @@
 
     <service verb="delete" noun="HotWaxOmsRestSourceConfig" type="script" allow-remote="true" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/facade/settings/deleteOmsRestSourceConfig.groovy">
-        <description>Delete one tenant-owned HotWax OMS REST source configuration.</description>
+        <description>Delete one tenant-owned HotWax OMS source configuration.</description>
         <in-parameters>
             <parameter name="omsRestSourceConfigId" required="true"/>
         </in-parameters>
@@ -125,10 +117,10 @@
 
     <service verb="probe" noun="HotWaxOmsConnection" type="script" allow-remote="false" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/facade/settings/probeOmsRestSourceConnection.groovy">
-        <description>Connection diagnostics for a saved OMS REST source config. Registered on the
-            SourceSystemConnector OMS row as healthCheckServiceName and invoked only through
+        <description>Connection diagnostics for a saved OMS source config: one orders(first: 1) GraphQL query.
+            Registered on the OMS GraphQL connector rows as healthCheckServiceName and invoked only through
             facade.SettingsFacadeServices.test#SourceConnection, which owns the permission gate.
-            Read-only, one record, no retries. Never writes to ec.message: a rejected credential is
+            Read-only, one record, no retries, no throttle wait. Never writes to ec.message: a rejected credential is
             a check row, not a service error.</description>
         <in-parameters>
             <parameter name="omsRestSourceConfigId" required="true"/>

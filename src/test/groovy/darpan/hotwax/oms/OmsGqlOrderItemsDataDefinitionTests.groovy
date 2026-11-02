@@ -140,7 +140,7 @@ class OmsGqlOrderItemsDataDefinitionTests {
         OmsGqlClient client = new OmsGqlClient(CONFIG, server.sender())
         File out = File.createTempFile("coded-items-", ".json")
         try {
-            Map result = OmsRestSourceSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, null, null, rawFilters, UNIT_OPTIONS,
+            Map result = OmsExtractSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, null, null, rawFilters, UNIT_OPTIONS,
                     OmsGqlOrderPageSource.fetcher(client, fetchOptions))
             assertEquals([], result.errors, "coded extract errors")
             Map file = (Map) new JsonSlurper().parse(out)

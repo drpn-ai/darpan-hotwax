@@ -1,6 +1,6 @@
 import darpan.hotwax.oms.OmsGqlClient
 import darpan.hotwax.oms.OmsGqlReturnsPageSource
-import darpan.hotwax.oms.OmsRestSourceSupport
+import darpan.hotwax.oms.OmsExtractSupport
 import darpan.hotwax.oms.OmsReturnsSourceSupport
 import darpan.hotwax.oms.OmsScriptServiceSupport
 
@@ -18,7 +18,7 @@ OmsScriptServiceSupport.runExtract(ec, context, [
             // fed by GraphQL pages, which still carry the returns reconciliationReturns stopped serving.
             OmsReturnsSourceSupport.extractReturnsToFile(a.sourceConfig, windowStart, windowEnd,
                     a.workFile, a.keepRecordFields, a.pageProgressListener, a.sourceFilters,
-                    [pageFetcher: OmsGqlReturnsPageSource.fetcher(new OmsGqlClient(OmsRestSourceSupport.toPlainMap(a.sourceConfig)),
+                    [pageFetcher: OmsGqlReturnsPageSource.fetcher(new OmsGqlClient(OmsExtractSupport.toPlainMap(a.sourceConfig)),
                             [includeReturnsWithoutShopifyRef: includeReturnsWithoutShopifyRef == true,
                              onlyCancelledReturns: onlyCancelledReturns == true,
                              // DAR-BE-119: an audit re-checking older open findings reads their returns by id.

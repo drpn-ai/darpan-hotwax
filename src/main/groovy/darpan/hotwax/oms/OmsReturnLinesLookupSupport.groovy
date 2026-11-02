@@ -58,7 +58,7 @@ class OmsReturnLinesLookupSupport {
             return [ok: false, returnLinesByExternalId: [:], errors: ["Shopify order ids must be plain identifiers."]]
         }
 
-        Map<String, Object> config = OmsRestSourceSupport.toPlainMap(rawConfig)
+        Map<String, Object> config = OmsExtractSupport.toPlainMap(rawConfig)
         if (!config) return [ok: false, returnLinesByExternalId: [:], errors: ["OMS source config could not be read."]]
 
         OmsGqlClient client

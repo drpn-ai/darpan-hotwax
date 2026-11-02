@@ -51,32 +51,14 @@ class OmsGqlReturnsConnectorWiringTests {
         assertEquals("Y", r.enabled)
     }
 
-    @Test
-    void itMirrorsTheRestRowSoARuleSetMovesWithNoRuleChange() {
-        Map rest = connector(SEED, "OMS_RETURNS")
-        Map gql = connector(SEED, "OMS_RETURNS_GQL")
-        ["configEntityName", "configParameterName", "remoteId", "dateFromParameterName", "dateToParameterName",
-         "keepFieldsParameterName", "keepFieldsBase", "filterParameterName", "preserveWindowInstants",
-         "healthCheckServiceName", "orderStateLookupServiceName", "returnLinesLookupServiceName", "lookupServiceName", "lookupIdsParameterName",
-         "lookupMaxIds"].each { String k ->
-            assertEquals(rest[k], gql[k], "${k} must match OMS_RETURNS")
-        }
-        assertEquals("Y", rest.enabled, "the REST row stays enabled; tenants without the GraphQL upgrade still need it")
-    }
-
-    /** Pills only the GraphQL record can carry (DAR-BE-068): REST's record has no orderId to reach the order by. */
+    /** Pills reached through the return's origin order (DAR-BE-068). */
     private static final Set<String> GQL_ONLY_FIELDS = ["\$.records[*].orderProductStoreId", "\$.records[*].orderNetsuiteId", "\$.records[*].fromPartyId", "\$.records[*].daysBeforeEntry"] as Set
 
     @Test
-    void itExposesTheSameFieldsAsTheRestRow() {
-        Map<String, Map<String, String>> rest = fields(FIELDS, "OMS_RETURNS")
-        Map<String, Map<String, String>> gql = fields(FIELDS, "OMS_RETURNS_GQL")
-        assertEquals(rest.keySet(), gql.keySet() - GQL_ONLY_FIELDS, "every REST pill, plus only the GraphQL-only ones")
-        rest.each { String path, Map<String, String> r ->
-            ["label", "fieldType", "isPrimaryIdCandidate", "sequenceNum"].each { String k ->
-                assertEquals(r[k], gql[path][k], "${path}.${k}")
-            }
-        }
+    void itOffersTheReturnFieldsAndTheOriginOrderPills() {
+        Set<String> gql = fields(FIELDS, "OMS_RETURNS_GQL").keySet()
+        assertTrue(gql.containsAll(GQL_ONLY_FIELDS + ["\$.records[*].returnId", "\$.records[*].externalId",
+                "\$.records[*].shopifyReturnId", "\$.records[*].orderExternalId"]), gql.toString())
     }
 
     /**
@@ -92,7 +74,7 @@ class OmsGqlReturnsConnectorWiringTests {
                 "\$.records[*].externalId"     : "Refund or return ID",
         ]
         [FIELDS, UPGRADE].each { String path ->
-            ["OMS_RETURNS", "OMS_RETURNS_GQL"].each { String system ->
+            ["OMS_RETURNS_GQL"].each { String system ->
                 Map<String, Map<String, String>> rows = fields(path, system)
                 Map<String, String> candidates = rows.findAll { it.value.isPrimaryIdCandidate == "Y" }
                         .collectEntries { [(it.key): it.value.label] }
@@ -107,7 +89,7 @@ class OmsGqlReturnsConnectorWiringTests {
     @Test
     void theOriginOrderStoreIsAFilterPillNotAProjectedField() {
         // DAR-BE-068, the DAR-BE-017 shape: filters run before projection, so the pill works without
-        // joining keepFieldsBase, and keepFieldsBase must stay equal to REST's (itMirrorsTheRestRow...).
+        // joining keepFieldsBase.
         Map<String, String> pill = fields(FIELDS, "OMS_RETURNS_GQL")["\$.records[*].orderProductStoreId"]
         assertTrue(pill != null, "no orderProductStoreId pill on OMS_RETURNS_GQL")
         assertEquals("N", pill.isPrimaryIdCandidate ?: "N")
@@ -140,7 +122,7 @@ class OmsGqlReturnsConnectorWiringTests {
         assertTrue(services.contains('extractOmsGqlReturns.groovy'))
         String script = file(SCRIPT).getText("UTF-8")
         assertTrue(script.contains("OmsGqlReturnsPageSource.fetcher("))
-        assertTrue(script.contains('"OMS_RETURNS_GQL"'), "the endpoint gate must check this connector, not OMS_RETURNS")
+        assertTrue(script.contains('"OMS_RETURNS_GQL"'), "the endpoint gate must check this connector")
     }
 
     @Test

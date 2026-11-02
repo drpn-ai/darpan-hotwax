@@ -2,7 +2,7 @@ import darpan.facade.common.FacadeSupport
 import darpan.facade.common.SharedConfigAccessSupport
 import darpan.facade.common.SharedConfigGrantSupport
 import darpan.facade.common.TenantAccessSupport
-import darpan.hotwax.oms.OmsRestSourceSupport
+import darpan.hotwax.oms.OmsExtractSupport
 import darpan.reconciliation.automation.SourceEndpointAccessSupport
 
 import static darpan.common.ValueSupport.normalize
@@ -29,7 +29,7 @@ if (!ec.message.hasError()) {
         // Only an owned row is ever forwarded here (or none) — the peer-vs-stranger split below
         // owns the ownership-mismatch decision for delete, so this call is left doing exactly what
         // it always did (tenant-required, read-only) and never leaks via its own mismatch message.
-        OmsRestSourceSupport.requireWritableTenantConfig(
+        OmsExtractSupport.requireWritableTenantConfig(
             isOwner ? [companyUserGroupId: config.companyUserGroupId] : null,
             activeTenantUserGroupId,
             TenantAccessSupport.hasActiveTenantWriteAccess(ec)

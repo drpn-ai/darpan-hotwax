@@ -9,10 +9,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
  * DAR-BE-116. OMS_ORDER_ITEMS_GQL, the order-items unit extract over GraphQL, is seed wiring no runtime proves before a
- * live run: the registry resolves a connector by extract service and expectedSourceConfigType, the endpoint gate
- * treats an endpoint with no DarpanSystemSource row as DISABLED, and a rule set moves off OMS_ORDER_ITEMS only if the
- * GraphQL row exposes the same unit fields. salesChannelEnumId is the one exception (absent from the GraphQL Order
- * type), so a run that concludes on it stays on REST.
+ * live run: the registry resolves a connector by extract service and expectedSourceConfigType, and the endpoint gate
+ * treats an endpoint with no DarpanSystemSource row as DISABLED. salesChannelEnumId and the NetSuite id are not unit
+ * fields the GraphQL read carries, so no pill offers them.
  */
 class OmsGqlOrderItemsConnectorWiringTests {
 
@@ -53,20 +52,10 @@ class OmsGqlOrderItemsConnectorWiringTests {
     }
 
     @Test
-    void itMirrorsTheRestRowSoARuleSetMovesWithNoRuleChange() {
-        Map rest = connector(SEED, "OMS_ORDER_ITEMS")
-        Map gql = connector(SEED, "OMS_ORDER_ITEMS_GQL")
-        ["configEntityName", "configParameterName", "remoteId", "dateFromParameterName", "dateToParameterName",
-         "filterParameterName", "preserveWindowInstants", "windowFieldName", "healthCheckServiceName", "evidenceFieldsJson"].each {
-            assertEquals(rest[it], gql[it], it)
-        }
-    }
-
-    @Test
     void itOffersEveryUnitFieldButTheSalesChannelAndTheNetsuiteId() {
-        Set<String> rest = fieldPaths(FIELDS, "OMS_ORDER_ITEMS")
         Set<String> gql = fieldPaths(FIELDS, "OMS_ORDER_ITEMS_GQL")
-        assertEquals(rest - ['$.records[*].salesChannelEnumId', '$.records[*].netsuiteOrderId'], gql)
+        assertTrue(gql.containsAll(['$.records[*].omsOrderId', '$.records[*].shopifyLineId', '$.records[*].unitOrdinal']), gql.toString())
+        assertFalse(gql.contains('$.records[*].salesChannelEnumId') || gql.contains('$.records[*].netsuiteOrderId'), gql.toString())
         assertEquals(gql, fieldPaths(UPGRADE, "OMS_ORDER_ITEMS_GQL"), "upgrade data carries the same pills")
     }
 
@@ -81,11 +70,11 @@ class OmsGqlOrderItemsConnectorWiringTests {
     void theServiceImplementsTheUnitContractAndRunsTheGraphqlScript() {
         def svc = new XmlSlurper().parse(file(SERVICES)).'**'.find { it.name() == "service" && it.@noun == "HotWaxOmsGqlOrderItems" }
         assertTrue(svc != null && svc.size() == 1, "no extract#HotWaxOmsGqlOrderItems")
-        assertEquals("reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrderLineUnits", svc.implements.@service.toString())
+        assertEquals("reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrderUnitsContract", svc.implements.@service.toString())
         assertTrue(svc.@location.toString().endsWith("extractOmsGqlOrderItems.groovy"))
         String script = file(SCRIPT).text
         assertTrue(script.contains('requiredSystemEnumId  : "OMS_ORDER_ITEMS_GQL"'))
-        assertTrue(script.contains("OmsGqlOrderPageSource.fetcher"), "the pages come from GraphQL, not REST's default fetcher")
+        assertTrue(script.contains("OmsGqlOrderPageSource.fetcher"), "the pages come from GraphQL")
         assertTrue(script.contains('emitGrain             : "ORDER_LINE_UNIT"'))
     }
 }

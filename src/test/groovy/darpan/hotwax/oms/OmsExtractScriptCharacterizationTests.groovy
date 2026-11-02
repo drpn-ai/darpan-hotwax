@@ -36,9 +36,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue
  * written document, the work file's name prefix while the extract runs and its removal afterwards
  * (success and failure alike), the sidecars, and the throttled progress heartbeat.
  *
- * The REST transport is OmsRestSourceSupport.setHttpClient. The GraphQL scripts build their own
- * OmsGqlClient with the default socket sender, so those cases swap the client's constructor for one
- * that injects a scripted sender — no socket is ever opened.
+ * The scripts build their own OmsGqlClient with the default socket sender, so these cases swap the
+ * client's constructor for one that injects a scripted sender — no socket is ever opened.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class OmsExtractScriptCharacterizationTests {
@@ -54,14 +53,9 @@ class OmsExtractScriptCharacterizationTests {
 
     /** Extract service noun -> the endpoint its gate must name. */
     private static final Map<String, String> EXTRACT_ENDPOINTS = [
-            HotWaxOmsOrders              : "OMS",
-            HotWaxOmsGqlOrders           : "OMS_GQL",
-            HotWaxOmsReconciliationOrders: "OMS_RECON_ORDERS",
-            HotWaxOmsReturns             : "OMS_RETURNS",
-            HotWaxOmsGqlReturns          : "OMS_RETURNS_GQL",
-            HotWaxOmsTransferOrders      : "OMS_TRANSFER_ORDERS",
-            HotWaxOmsOrderLineUnits      : "OMS_ORDER_LINE_UNITS",
-            HotWaxOmsOrderItems          : "OMS_ORDER_ITEMS",
+            HotWaxOmsGqlOrders    : "OMS_GQL",
+            HotWaxOmsGqlReturns   : "OMS_RETURNS_GQL",
+            HotWaxOmsGqlOrderItems: "OMS_ORDER_ITEMS_GQL",
     ]
 
     private ExecutionContext ec
@@ -85,7 +79,7 @@ class OmsExtractScriptCharacterizationTests {
         [(CONFIG_ID): "Y", (INACTIVE_ID): "N", (GATED_ID): "Y"].each { String id, String active ->
             upsert("darpan.hotwax.HotWaxOmsRestSourceConfig", [omsRestSourceConfigId: id], [
                     omsRestSourceConfigId: id, description: id, companyUserGroupId: TENANT,
-                    baseUrl: "https://char.hotwax.io", ordersPath: "/rest/s1/oms/orders", authType: "NONE",
+                    baseUrl: "https://char.hotwax.io", authType: "NONE",
                     connectTimeoutSeconds: 5, readTimeoutSeconds: 10, isActive: active, canReadOrders: "Y",
                     createdDate: FROM, lastUpdatedDate: FROM])
         }
@@ -110,7 +104,6 @@ class OmsExtractScriptCharacterizationTests {
     @AfterEach
     void resetSeams() {
         ec.message.clearErrors()
-        OmsRestSourceSupport.resetHttpClient()
         OmsReturnsSourceSupport.resetGqlClientFactory()
         GroovySystem.metaClassRegistry.removeMetaClass(OmsGqlClient)
     }
@@ -118,7 +111,7 @@ class OmsExtractScriptCharacterizationTests {
     // ---- the effective contracts ----------------------------------------------------------------
 
     /**
-     * Four services take their parameters through <implements> of a sibling, and a script service DROPS any
+     * The extracts take their parameters through <implements> of an interface contract, and a script service DROPS any
      * result key it does not declare. Pin each service's effective in/out names, in order, as Moqui merges them.
      */
     @Test
@@ -133,17 +126,12 @@ class OmsExtractScriptCharacterizationTests {
                                   "requestMetadata", "warnings", "errors"]
         List<String> plainOut = ["dataAvailable", "fileLocation", "fileName", "recordCount", "requestMetadata", "warnings", "errors"]
         Map<String, List<List<String>>> expected = [
-                "extract#HotWaxOmsOrders"              : [windowedIn, ordersOut],
                 // DAR-BE-120: read by key, for a conclusion lookup (an order's notes behind R1's "never reached NetSuite").
                 "extract#HotWaxOmsGqlOrders"           : [windowedIn + ["lookupKeys", "lookupKeyField"], ordersOut],
-                "extract#HotWaxOmsReconciliationOrders": [windowedIn, ordersOut],
-                "extract#HotWaxOmsReturns"             : [windowedIn, plainOut],
                 // DAR-BE-094 R8 / R16 added the two returns-scope switches.
                 // DAR-BE-119: lookupKeys / lookupKeyField, an audit's re-check of its older open findings by key.
                 "extract#HotWaxOmsGqlReturns"          : [windowedIn + ["lookupKeys", "lookupKeyField", "includeReturnsWithoutShopifyRef", "onlyCancelledReturns"], plainOut],
-                "extract#HotWaxOmsTransferOrders"      : [windowedIn[0..4] + ["windowFieldName", "orderStatusIds"] + windowedIn[5..-1], plainOut],
-                "extract#HotWaxOmsOrderLineUnits"      : [unitIn, plainOut],
-                "extract#HotWaxOmsOrderItems"          : [unitIn, plainOut],
+                "extract#HotWaxOmsGqlOrderItems"       : [unitIn + ["lookupKeys", "lookupKeyField"], plainOut],
                 // DAR-BE-129: over GraphQL, any date, so no window.
                 "lookup#HotWaxOmsOrdersByExternalId"   : [["omsRestSourceConfigId", "externalIds", "companyUserGroupId"],
                                                           ["ok", "ordersByExternalId", "errors"]],
@@ -156,16 +144,13 @@ class OmsExtractScriptCharacterizationTests {
             assertEquals(inOut[0], sd.getInParameterNames() as List, "${name} in-parameters")
             assertEquals(inOut[1], sd.getOutParameterNames() as List, "${name} out-parameters")
         }
-        // Required-ness survives the merge: the windowed extracts require a window, transfer orders do not.
-        ["extract#HotWaxOmsGqlOrders", "extract#HotWaxOmsReconciliationOrders", "extract#HotWaxOmsGqlReturns",
-         "extract#HotWaxOmsOrderItems"].each { String name ->
+        // Required-ness survives the merge: every extract requires a config and a window.
+        ["extract#HotWaxOmsGqlOrders", "extract#HotWaxOmsGqlReturns", "extract#HotWaxOmsGqlOrderItems"].each { String name ->
             def sd = ec.factory.serviceFacade.getServiceDefinition(SVC + name)
             ["omsRestSourceConfigId", "windowStart", "windowEnd"].each { String p ->
                 assertEquals("true", sd.getInParameter(p).attribute("required"), "${name}.${p}")
             }
         }
-        assertNull(ec.factory.serviceFacade.getServiceDefinition(SVC + "extract#HotWaxOmsTransferOrders")
-                .getInParameter("windowStart").attribute("required"))
     }
 
     // ---- the config gate, every extract -------------------------------------------------------
@@ -175,7 +160,7 @@ class OmsExtractScriptCharacterizationTests {
         EXTRACT_ENDPOINTS.keySet().each { String noun ->
             String out = freshOut()
             Map result = extract(noun, baseParams(out) + [omsRestSourceConfigId: "   ", fileName: "keep-me.json"])
-            assertEquals(["OMS REST Source Config ID is required."], result.errors, noun)
+            assertEquals(["OMS source config ID is required."], result.errors, noun)
             assertGateFailureShape(noun, result, out)
         }
     }
@@ -185,7 +170,7 @@ class OmsExtractScriptCharacterizationTests {
         EXTRACT_ENDPOINTS.keySet().each { String noun ->
             String out = freshOut()
             Map result = extract(noun, baseParams(out) + [omsRestSourceConfigId: "NO_SUCH_CONFIG", fileName: "keep-me.json"])
-            assertEquals(["OMS REST source config NO_SUCH_CONFIG not found."], result.errors, noun)
+            assertEquals(["OMS source config NO_SUCH_CONFIG not found."], result.errors, noun)
             assertGateFailureShape(noun, result, out)
         }
     }
@@ -195,7 +180,7 @@ class OmsExtractScriptCharacterizationTests {
         EXTRACT_ENDPOINTS.keySet().each { String noun ->
             String out = freshOut()
             Map result = extract(noun, baseParams(out) + [omsRestSourceConfigId: INACTIVE_ID, fileName: "keep-me.json"])
-            assertEquals(["OMS REST source config ${INACTIVE_ID} is inactive.".toString()], result.errors, noun)
+            assertEquals(["OMS source config ${INACTIVE_ID} is inactive.".toString()], result.errors, noun)
             assertGateFailureShape(noun, result, out)
         }
     }
@@ -207,14 +192,14 @@ class OmsExtractScriptCharacterizationTests {
             Map params = baseParams(out) + [omsRestSourceConfigId: INACTIVE_ID, fileName: "keep-me.json"]
             params.remove("companyUserGroupId")
             Map result = extract(noun, params)
-            assertEquals(["OMS REST source config ${INACTIVE_ID} not found.".toString(),
-                          "OMS REST source config ${INACTIVE_ID} is inactive.".toString()], result.errors, noun)
+            assertEquals(["OMS source config ${INACTIVE_ID} not found.".toString(),
+                          "OMS source config ${INACTIVE_ID} is inactive.".toString()], result.errors, noun)
             assertGateFailureShape(noun, result, out)
         }
         ["lookup#HotWaxOmsOrdersByExternalId", "lookup#HotWaxOmsReturnsByExternalId"].each { String lookup ->
             Map result = callService(lookup, [omsRestSourceConfigId: INACTIVE_ID, externalIds: ["E1"]])
-            assertEquals(["OMS REST source config ${INACTIVE_ID} not found.".toString(),
-                          "OMS REST source config ${INACTIVE_ID} is inactive.".toString()], result.errors, lookup)
+            assertEquals(["OMS source config ${INACTIVE_ID} not found.".toString(),
+                          "OMS source config ${INACTIVE_ID} is inactive.".toString()], result.errors, lookup)
             assertEquals(false, result.ok, lookup)
         }
     }
@@ -224,7 +209,7 @@ class OmsExtractScriptCharacterizationTests {
         EXTRACT_ENDPOINTS.each { String noun, String endpoint ->
             String out = freshOut()
             Map result = extract(noun, baseParams(out) + [omsRestSourceConfigId: GATED_ID, fileName: "keep-me.json"])
-            assertEquals(["OMS REST source config ${GATED_ID} is not enabled for ${endpoint}.".toString()], result.errors, noun)
+            assertEquals(["OMS source config ${GATED_ID} is not enabled for ${endpoint}.".toString()], result.errors, noun)
             assertGateFailureShape(noun, result, out)
         }
     }
@@ -243,221 +228,7 @@ class OmsExtractScriptCharacterizationTests {
         assertFalse(outDir(out).exists(), "${noun}: the gate runs before the output directory is created")
     }
 
-    // ---- REST order-shaped extracts: success --------------------------------------------------
-
-    @Test
-    void ordersWritesTheDocumentAndRemovesItsWorkFile() {
-        String out = freshOut()
-        List<String> partialsSeen = []
-        List<String> urls = []
-        serveRest(out, partialsSeen, urls) { String url -> [orders: [salesOrder("O1"), salesOrder("O2")]] }
-
-        Map result = extract("HotWaxOmsOrders", baseParams(out))
-
-        assertEquals([], result.errors)
-        assertEquals([], result.warnings)
-        assertEquals(true, result.dataAvailable)
-        assertEquals(2, result.recordCount)
-        assertEquals(expectedOrdersFileName(), result.fileName)
-        assertEquals("${out}/${result.fileName}".toString(), result.fileLocation)
-        assertNull(result.exchangeManifestFileLocation)
-        assertTrue(result.requestMetadata instanceof Map)
-        assertEquals(["O1", "O2"], records(result)*.orderId)
-        assertTrue(partialsSeen.every { it.startsWith("oms-orders-extract-") && it.endsWith(".partial") }, partialsSeen.toString())
-        assertFalse(partialsSeen.isEmpty(), "the work file sits in the output directory while pages arrive")
-        assertEquals([result.fileName], listing(out))
-    }
-
-    @Test
-    void ordersHonoursAnExplicitFileNameAndKeepRecordFields() {
-        String out = freshOut()
-        serveRest(out, [], []) { String url -> [orders: [salesOrder("O1")]] }
-
-        Map result = extract("HotWaxOmsOrders", baseParams(out) + [fileName: "../my orders.json", keepRecordFields: ["orderId"]])
-
-        assertEquals([], result.errors)
-        assertEquals(OmsRestSourceSupport.safeFileName("../my orders.json"), result.fileName)
-        assertEquals([[orderId: "O1"]], records(result))
-        assertEquals([result.fileName], listing(out))
-    }
-
-    @Test
-    void ordersWritesTheExchangeManifestSidecar() {
-        String out = freshOut()
-        serveRest(out, [], []) { String url ->
-            [orders: [salesOrder("O1"), salesOrder("X1", [orderName: "EXC-1", orderItemAssocs: [[orderItemAssocTypeId: "EXCHANGE", toOrderId: "O9"]]])]]
-        }
-
-        Map result = extract("HotWaxOmsOrders", baseParams(out))
-
-        assertEquals([], result.errors)
-        assertEquals(["O1"], records(result)*.orderId)
-        assertNotNull(result.exchangeManifestFileLocation, result.toString())
-        String manifestName = OmsRestSourceSupport.exchangeManifestFileName(result.fileName)
-        assertEquals("${out}/${manifestName}".toString(), result.exchangeManifestFileLocation)
-        Map manifest = (Map) JSON.parseText(fileAt((String) result.exchangeManifestFileLocation))
-        assertEquals(result.fileName, manifest.sourceFileName)
-        assertEquals(false, manifest.truncated)
-        assertEquals(["X1"], ((List<Map>) manifest.manifest)*.omsOrderId)
-        assertEquals([result.fileName, manifestName].sort(), listing(out))
-    }
-
-    @Test
-    void reconciliationOrdersUsesTheReconEndpointAndWritesTheInlineExchangeManifest() {
-        String out = freshOut()
-        List<String> partialsSeen = []
-        List<String> urls = []
-        serveRest(out, partialsSeen, urls) { String url ->
-            reconPage([reconOrder("O1"), reconOrder("X1") + [isExchange: true, originalOrderId: "O9", originalExternalId: "E9"]], false)
-        }
-
-        Map result = extract("HotWaxOmsReconciliationOrders", baseParams(out))
-
-        assertEquals([], result.errors)
-        assertEquals(1, result.recordCount)
-        assertEquals(expectedOrdersFileName(), result.fileName)
-        assertTrue(urls.every { it.contains("/rest/s1/oms/reconciliationOrders") }, urls.toString())
-        assertTrue(partialsSeen.every { it.startsWith("oms-recon-orders-extract-") }, partialsSeen.toString())
-        assertFalse(partialsSeen.isEmpty())
-        String manifestName = OmsRestSourceSupport.exchangeManifestFileName(result.fileName)
-        assertEquals("${out}/${manifestName}".toString(), result.exchangeManifestFileLocation)
-        Map manifest = (Map) JSON.parseText(fileAt((String) result.exchangeManifestFileLocation))
-        assertEquals("O9", ((List<Map>) manifest.manifest)[0].toOrderId)
-        assertEquals([result.fileName, manifestName].sort(), listing(out))
-    }
-
-    @Test
-    void transferOrdersSendsTheTransferTypeWindowFieldAndStatuses() {
-        String out = freshOut()
-        List<String> partialsSeen = []
-        List<String> urls = []
-        serveRest(out, partialsSeen, urls) { String url -> [orders: [salesOrder("T1", [orderTypeId: "TRANSFER_ORDER"])]] }
-
-        Map result = extract("HotWaxOmsTransferOrders", baseParams(out) + [windowFieldName: " lastUpdatedTxStamp ",
-                orderStatusIds: ["ORDER_APPROVED"]])
-
-        assertEquals([], result.errors)
-        assertEquals(1, result.recordCount)
-        assertEquals(["T1"], records(result)*.orderId)
-        assertTrue(urls.every { it.contains("TRANSFER_ORDER") }, urls.toString())
-        assertTrue(urls.every { it.contains("lastUpdatedTxStamp") }, urls.toString())
-        assertTrue(urls.every { it.contains("ORDER_APPROVED") }, urls.toString())
-        assertTrue(partialsSeen.every { it.startsWith("oms-transfer-orders-extract-") }, partialsSeen.toString())
-        assertFalse(partialsSeen.isEmpty())
-        assertFalse(result.containsKey("exchangeManifestFileLocation"))
-        assertEquals([result.fileName], listing(out))
-    }
-
-    @Test
-    void orderLineUnitsWarnsAboutUnkeyedUnitsAndWritesTheExcludedSidecar() {
-        String out = freshOut()
-        List<String> partialsSeen = []
-        serveRest(out, partialsSeen, []) { String url ->
-            [orders: [salesOrder("M1", [shipGroups: [[facilityId: "WH", items: [
-                    [orderItemSeqId: "01", externalId: "L1", statusId: "ITEM_COMPLETED", quantity: 1],
-                    [orderItemSeqId: "02", externalId: null, statusId: "ITEM_COMPLETED", quantity: 1],
-                    [orderItemSeqId: "03", externalId: "L3", statusId: "ITEM_CANCELLED", quantity: 1]]]]])]]
-        }
-
-        Map result = extract("HotWaxOmsOrderLineUnits", baseParams(out) + [keepRecordFields: ["orderId"],
-                sourceFilters: [[sequenceNum: 1, fieldExpression: "statusId", operator: "EXCLUDE_IN", filterValues: "ITEM_CANCELLED"]]])
-
-        assertEquals([], result.errors)
-        assertEquals(["1 order item(s) had no Shopify line id and were not compared."], result.warnings)
-        assertEquals(1, result.recordCount)
-        assertEquals(1, ((Map) result.requestMetadata).droppedNullLineIdCount)
-        assertTrue(records(result)[0].containsKey("unitOrdinal"), "keepRecordFields is NOT applied at unit grain")
-        assertTrue(partialsSeen.every { it.startsWith("oms-order-line-units-extract-") }, partialsSeen.toString())
-        assertFalse(partialsSeen.isEmpty())
-        assertFalse(result.containsKey("exchangeManifestFileLocation"))
-        List<String> files = listing(out)
-        assertTrue(files.contains(result.fileName), files.toString())
-        assertEquals(2, files.size(), "the extract plus the excluded-records sidecar: ${files}")
-    }
-
-    @Test
-    void orderItemsKeepsUnkeyedItemsWithAWarningAndWritesTheExcludedSidecar() {
-        String out = freshOut()
-        List<String> partialsSeen = []
-        serveRest(out, partialsSeen, []) { String url ->
-            [orders: [salesOrder("M1", [shipGroups: [[facilityId: "WH", items: [
-                    [orderItemSeqId: "01", externalId: "L1", statusId: "ITEM_COMPLETED", quantity: 1],
-                    [orderItemSeqId: "02", externalId: null, statusId: "ITEM_COMPLETED", quantity: 1],
-                    [orderItemSeqId: "03", externalId: "L3", statusId: "ITEM_CANCELLED", quantity: 1]]]]])]]
-        }
-
-        Map result = extract("HotWaxOmsOrderItems", baseParams(out) + [
-                sourceFilters: [[sequenceNum: 1, fieldExpression: "unitState", operator: "INCLUDE_IN", filterValues: "COMPLETED"]]])
-
-        assertEquals([], result.errors)
-        assertEquals(["1 order item(s) had no Shopify order or line id; they were compared with it left empty."], result.warnings)
-        assertEquals(2, result.recordCount)
-        assertTrue(partialsSeen.every { it.startsWith("oms-order-items-extract-") }, partialsSeen.toString())
-        assertFalse(partialsSeen.isEmpty())
-        List<String> files = listing(out)
-        assertTrue(files.contains(result.fileName), files.toString())
-        assertEquals(2, files.size(), "the extract plus the excluded-records sidecar: ${files}")
-    }
-
-    @Test
-    void returnsWritesTheReturnsDocumentUnderTheReturnsFileName() {
-        String out = freshOut()
-        List<String> partialsSeen = []
-        List<String> urls = []
-        serveRest(out, partialsSeen, urls) { String url -> returnsPage([returnRecord("R1", "5001")], false) }
-
-        Map result = extract("HotWaxOmsReturns", baseParams(out))
-
-        assertEquals([], result.errors)
-        assertEquals(1, result.recordCount)
-        assertEquals(true, result.dataAvailable)
-        assertTrue(((String) result.fileName).startsWith("oms-returns-"), result.fileName as String)
-        assertEquals(OmsReturnsSourceSupport.safeReturnsFileName(result.fileName), result.fileName)
-        assertEquals(["R1"], records(result)*.returnId)
-        assertTrue(urls.every { it.contains("/rest/s1/oms/reconciliationReturns") }, urls.toString())
-        assertTrue(partialsSeen.every { it.startsWith("oms-returns-extract-") }, partialsSeen.toString())
-        assertFalse(partialsSeen.isEmpty())
-        assertFalse(result.containsKey("exchangeManifestFileLocation"))
-        assertEquals([result.fileName], listing(out))
-    }
-
-    // ---- REST extracts: failure inside the extraction -----------------------------------------
-
-    @Test
-    void anExtractionErrorClearsTheFileOutputsAndDeletesTheWorkFile() {
-        EXTRACT_ENDPOINTS.keySet().findAll { !it.contains("Gql") }.each { String noun ->
-            String out = freshOut()
-            List<String> partialsSeen = []
-            serveRestStatus(out, partialsSeen, 401, '{"errors":"Unauthorized"}')
-
-            Map result = extract(noun, baseParams(out) + [fileName: "keep-me.json"])
-
-            assertFalse(((List) result.errors).isEmpty(), "${noun}: ${result}")
-            assertNull(result.fileName, "${noun}: an extraction error clears the input fileName")
-            assertNull(result.fileLocation, noun)
-            assertTrue(result.requestMetadata instanceof Map, noun)
-            assertEquals(0, result.recordCount, noun)
-            assertEquals(false, result.dataAvailable, noun)
-            assertFalse(partialsSeen.isEmpty(), "${noun}: the work file existed during the call")
-            assertEquals([], listing(out), "${noun}: the work file is deleted on failure")
-        }
-    }
-
-    @Test
-    void aTransportExceptionPropagatesAfterTheWorkFileIsDeleted() {
-        EXTRACT_ENDPOINTS.keySet().findAll { !it.contains("Gql") }.each { String noun ->
-            String out = freshOut()
-            OmsRestSourceSupport.setHttpClient { Map request -> throw new IllegalStateException("socket closed") }
-
-            Map result = extract(noun, baseParams(out))
-
-            assertEquals([], listing(out), "${noun}: no work file survives a thrown transport error")
-            assertEquals(0, (result.recordCount ?: 0) as int, "${noun}: ${result}")
-            assertFalse(result.dataAvailable == true, noun)
-        }
-    }
-
-    // ---- GraphQL extracts ----------------------------------------------------------------------
+// ---- GraphQL extracts ----------------------------------------------------------------------
 
     @Test
     void gqlOrdersWritesTheDocumentAndTheExchangeManifest() {
@@ -480,7 +251,7 @@ class OmsExtractScriptCharacterizationTests {
         assertEquals("${out}/${result.fileName}".toString(), result.fileLocation)
         assertTrue(partialsSeen.every { it.startsWith("oms-gql-orders-extract-") }, partialsSeen.toString())
         assertFalse(partialsSeen.isEmpty())
-        String manifestName = OmsRestSourceSupport.exchangeManifestFileName(result.fileName)
+        String manifestName = OmsExtractSupport.exchangeManifestFileName(result.fileName)
         assertEquals("${out}/${manifestName}".toString(), result.exchangeManifestFileLocation)
         // The excluded-records sidecar is attempted but empty at order grain, so it writes nothing.
         assertEquals([result.fileName, manifestName].sort(), listing(out))
@@ -536,47 +307,18 @@ class OmsExtractScriptCharacterizationTests {
     // ---- progress heartbeat --------------------------------------------------------------------
 
     @Test
-    void theHeartbeatLandsOnTheNamedStageAndIsThrottledAcrossPages() {
+    void theHeartbeatDefaultsToFile2AndOmitsThePercentWithoutAnExpectedTotal() {
         String out = freshOut()
         String runId = RunObservability.beginRun(ec, [companyUserGroupId: TENANT])
-        def step = RunObservability.beginStep(ec, runId, [companyUserGroupId: TENANT], RunObservability.STAGE_EXTRACT_FILE1)
-        assertNotNull(step)
-        serveRest(out, [], []) { String url ->
-            int pageIndex = queryInt(url, "pageIndex")
-            pageIndex < 2 ? reconPage([reconOrder("P${pageIndex}A"), reconOrder("P${pageIndex}B")], true, 5)
-                          : reconPage([reconOrder("P2A")], false, 5)
-        }
+        RunObservability.beginStep(ec, runId, [companyUserGroupId: TENANT], RunObservability.STAGE_EXTRACT_FILE2)
+        serveGql(out, [], [orders: { Map v -> conn([gqlOrder("G1")]) }, orderItemAssocs: { Map v -> conn([]) }])
 
-        Map result = extract("HotWaxOmsReconciliationOrders", baseParams(out) + [reconciliationRunResultId: " ${runId} ",
-                progressStageCode: " EXTRACT_FILE1 ", expectedRecordCount: 10])
+        Map result = extract("HotWaxOmsGqlOrders", baseParams(out) + [reconciliationRunResultId: runId])
 
         assertEquals([], result.errors)
-        assertEquals(5, result.recordCount)
-        Map stepRow = stepRow(runId, RunObservability.STAGE_EXTRACT_FILE1)
-        assertEquals(2L, (stepRow.recordCount as Long), "only the first page's heartbeat lands inside the 2s throttle")
-        assertEquals(20L, (runRow(runId).progressPercent as Long), "percent = first heartbeat / expectedRecordCount")
-    }
-
-    @Test
-    void theHeartbeatDefaultsToFile2AndOmitsThePercentWithoutAnExpectedTotal() {
-        EXTRACT_ENDPOINTS.keySet().findAll { !it.contains("Gql") }.each { String noun ->
-            String out = freshOut()
-            String runId = RunObservability.beginRun(ec, [companyUserGroupId: TENANT])
-            RunObservability.beginStep(ec, runId, [companyUserGroupId: TENANT], RunObservability.STAGE_EXTRACT_FILE2)
-            serveRest(out, [], []) { String url ->
-                if (noun == "HotWaxOmsReconciliationOrders") return reconPage([reconOrder("O1")], false)
-                if (noun == "HotWaxOmsReturns") return returnsPage([returnRecord("R1", "5001")], false)
-                return [orders: [salesOrder("O1", [shipGroups: [[facilityId: "WH", items: [
-                        [orderItemSeqId: "01", externalId: "L1", statusId: "ITEM_COMPLETED", quantity: 1]]]]])]]
-            }
-
-            Map result = extract(noun, baseParams(out) + [reconciliationRunResultId: runId])
-
-            assertEquals([], result.errors, noun)
-            assertTrue(((stepRow(runId, RunObservability.STAGE_EXTRACT_FILE2).recordCount ?: 0) as Long) > 0L,
-                    "${noun}: the heartbeat targets EXTRACT_FILE2 when no stage code is passed")
-            assertNull(runRow(runId).progressPercent, "${noun}: no expected total, no percent")
-        }
+        assertTrue(((stepRow(runId, RunObservability.STAGE_EXTRACT_FILE2).recordCount ?: 0) as Long) > 0L,
+                "the heartbeat targets EXTRACT_FILE2 when no stage code is passed")
+        assertNull(runRow(runId).progressPercent, "no expected total, no percent")
     }
 
     @Test
@@ -584,9 +326,9 @@ class OmsExtractScriptCharacterizationTests {
         String out = freshOut()
         String runId = RunObservability.beginRun(ec, [companyUserGroupId: TENANT])
         RunObservability.beginStep(ec, runId, [companyUserGroupId: TENANT], RunObservability.STAGE_EXTRACT_FILE2)
-        serveRest(out, [], []) { String url -> [orders: [salesOrder("O1")]] }
+        serveGql(out, [], [orders: { Map v -> conn([gqlOrder("G1")]) }, orderItemAssocs: { Map v -> conn([]) }])
 
-        Map result = extract("HotWaxOmsOrders", baseParams(out) + [reconciliationRunResultId: "  ", expectedRecordCount: 4])
+        Map result = extract("HotWaxOmsGqlOrders", baseParams(out) + [reconciliationRunResultId: "  ", expectedRecordCount: 4])
 
         assertEquals([], result.errors)
         assertNull(stepRow(runId, RunObservability.STAGE_EXTRACT_FILE2).recordCount)
@@ -596,10 +338,10 @@ class OmsExtractScriptCharacterizationTests {
 
     @Test
     void lookupOrdersGateFailuresReturnOnlyErrorsBesideTheEmptyDefaults() {
-        ["   ": "OMS REST Source Config ID is required.",
-         NO_SUCH_CONFIG: "OMS REST source config NO_SUCH_CONFIG not found.",
-         (INACTIVE_ID): "OMS REST source config ${INACTIVE_ID} is inactive.".toString(),
-         (GATED_ID): "OMS REST source config ${GATED_ID} is not enabled for OMS.".toString()].each { String id, String error ->
+        ["   ": "OMS source config ID is required.",
+         NO_SUCH_CONFIG: "OMS source config NO_SUCH_CONFIG not found.",
+         (INACTIVE_ID): "OMS source config ${INACTIVE_ID} is inactive.".toString(),
+         (GATED_ID): "OMS source config ${GATED_ID} is not enabled for OMS_GQL.".toString()].each { String id, String error ->
             ec.message.clearErrors()
             Map result = callService("lookup#HotWaxOmsOrdersByExternalId", [omsRestSourceConfigId: id, externalIds: ["E1"],
                     companyUserGroupId: TENANT])
@@ -635,10 +377,10 @@ class OmsExtractScriptCharacterizationTests {
 
     @Test
     void lookupReturnsGateFailuresReturnOnlyErrorsBesideTheEmptyDefaults() {
-        ["   ": "OMS REST Source Config ID is required.",
-         NO_SUCH_CONFIG: "OMS REST source config NO_SUCH_CONFIG not found.",
-         (INACTIVE_ID): "OMS REST source config ${INACTIVE_ID} is inactive.".toString(),
-         (GATED_ID): "OMS REST source config ${GATED_ID} is not enabled for OMS.".toString()].each { String id, String error ->
+        ["   ": "OMS source config ID is required.",
+         NO_SUCH_CONFIG: "OMS source config NO_SUCH_CONFIG not found.",
+         (INACTIVE_ID): "OMS source config ${INACTIVE_ID} is inactive.".toString(),
+         (GATED_ID): "OMS source config ${GATED_ID} is not enabled for OMS_RETURNS_GQL.".toString()].each { String id, String error ->
             ec.message.clearErrors()
             Map result = callService("lookup#HotWaxOmsReturnsByExternalId", [omsRestSourceConfigId: id, externalIds: ["E1"],
                     companyUserGroupId: TENANT])
@@ -668,7 +410,6 @@ class OmsExtractScriptCharacterizationTests {
             c.sleeper = { long ms -> }
             return c
         }
-        OmsRestSourceSupport.setHttpClient { Map request -> throw new AssertionError("REST must not be called") }
 
         Map result = callService("lookup#HotWaxOmsReturnsByExternalId", [omsRestSourceConfigId: CONFIG_ID,
                 externalIds: ["aaa", "bbb"], companyUserGroupId: TENANT])
@@ -733,23 +474,6 @@ class OmsExtractScriptCharacterizationTests {
         return listing(loc).findAll { it.endsWith(".partial") }
     }
 
-    private void serveRest(String out, List<String> partialsSeen, List<String> urls, Closure bodyFor) {
-        OmsRestSourceSupport.setHttpClient { Map request ->
-            String url = request.url as String
-            urls.add(url)
-            partialsSeen.addAll(partials(out))
-            Object body = bodyFor.call(url)
-            return [statusCode: 200, body: body instanceof String ? body : JsonOutput.toJson(body)]
-        }
-    }
-
-    private void serveRestStatus(String out, List<String> partialsSeen, int status, String body) {
-        OmsRestSourceSupport.setHttpClient { Map request ->
-            partialsSeen.addAll(partials(out))
-            return [statusCode: status, body: body]
-        }
-    }
-
     /** Swaps OmsGqlClient's one-arg constructor (the one the scripts call) for a scripted sender. */
     private void serveGql(String out, List<String> partialsSeen, Map<String, Closure> handlers, boolean fail = false) {
         Closure sender = { String url, Map headers, String body ->
@@ -774,22 +498,6 @@ class OmsExtractScriptCharacterizationTests {
         return [edges: nodes.collect { [node: it] }, pageInfo: [hasNextPage: endCursor != null, endCursor: endCursor]]
     }
 
-    private static Map salesOrder(String id, Map extra = [:]) {
-        return [orderId: id, orderName: "#${id}".toString(), externalId: "EXT-${id}".toString(), orderTypeId: "SALES_ORDER",
-                statusId: "ORDER_APPROVED", grandTotal: 10, orderDate: 1777600000000L] + extra
-    }
-
-    private static Map reconOrder(String id) {
-        return [orderId: id, externalId: "EXT-${id}".toString(), orderName: "#${id}".toString(), grandTotal: 42.50,
-                orderDate: 1777600000000L, statusId: "ORDER_APPROVED", isExchange: false]
-    }
-
-    private static String reconPage(List orders, boolean hasMore, Integer ordersCount = null) {
-        return JsonOutput.toJson([orders: orders, ordersCount: ordersCount != null ? ordersCount : orders.size(),
-                hasMore: hasMore, pageIndex: 0, pageSize: 500, exchangeOrderCount: 0,
-                excludedNonSalesOrderCount: 0, missingExternalIdCount: 0])
-    }
-
     private static Map gqlOrder(String id) {
         return [orderId: id, orderName: "#" + id, externalId: "SH" + id, statusId: "ORDER_COMPLETED",
                 orderTypeId: "SALES_ORDER", orderDate: "2026-05-01T10:00:00Z", grandTotal: 10,
@@ -800,25 +508,6 @@ class OmsExtractScriptCharacterizationTests {
         return [returnId: id, statusId: "RETURN_REQUESTED", entryDate: "2026-05-01T10:00:00Z", externalId: null,
                 currencyUomId: "USD", returnChannelEnumId: "ADMIN_RTN_CHANNEL",
                 identifications: [[returnIdentificationTypeId: "SHOPIFY_RETURN_ID", idValue: "3744700${id.takeRight(4)}", thruDate: null]]]
-    }
-
-    private static Map returnRecord(String returnId, String externalId) {
-        return [returnId: returnId, externalId: externalId, orderExternalId: "7025799037059", statusId: "RETURN_COMPLETED",
-                entryDate: "2026-05-01T10:00:00Z", returnTotal: "42.00", currencyUomId: "USD",
-                returnChannelEnumId: "SHOPIFY_RETURN_CHANNEL",
-                items: [[returnItemSeqId: "00001", orderItemExternalId: "oi-1", productId: "P1", sku: "SKU-1",
-                         returnQuantity: 1, receivedQuantity: 1, returnPrice: "42.00", lineAmount: "42.00",
-                         returnReasonId: "DAMAGED", returnItemStatusId: "RETURN_ITEM_COMPLETED"]]]
-    }
-
-    private static String returnsPage(List returns, boolean hasMore) {
-        return JsonOutput.toJson([returns: returns, returnsCount: returns.size(), hasMore: hasMore, pageIndex: 0,
-                pageSize: 500, excludedNoShopifyRefCount: 0])
-    }
-
-    private static int queryInt(String url, String key) {
-        String query = new URI(url).rawQuery ?: ""
-        return Integer.parseInt(query.split("&").collect { it.split("=", 2) }.find { it[0] == key }?.getAt(1))
     }
 
     private Map stepRow(String runId, String stage) {

@@ -1,8 +1,6 @@
 package darpan.hotwax.oms
 
 import groovy.json.JsonSlurper
-import org.junit.jupiter.api.AfterEach
-import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
@@ -11,22 +9,13 @@ import static org.junit.jupiter.api.Assertions.assertNull
 import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
- * DAR-BE-040 fix 3. The returns extractor takes an optional page fetcher (the GraphQL transport) and runs
- * its records through EXACTLY the REST pipeline: client filters, the join-key fallback, projection,
- * the sink and the metadata. Nothing downstream may tell the transports apart except `transport`.
+ * DAR-BE-040 fix 3. The returns extractor runs its page source's records (the GraphQL transport) through one
+ * pipeline: client filters, the join-key fallback, projection, the sink and the metadata.
  */
 class OmsReturnsPageFetcherSeamTests {
 
     private static final Map CONFIG = [omsRestSourceConfigId: "TEST_CFG", baseUrl: "https://oms.example.com",
                                        apiKey: "test-key", isActive: "Y"]
-
-    @BeforeEach
-    void restMustNotBeCalled() {
-        OmsReturnsSourceSupport.setHttpClient { Map request -> throw new AssertionError("REST called on the GraphQL path: ${request.url}") }
-    }
-
-    @AfterEach
-    void reset() { OmsReturnsSourceSupport.resetHttpClient() }
 
     private static Map pending(String id, String shopifyReturnId, Map o = [:]) {
         return [returnId: id, shopifyReturnId: shopifyReturnId, externalId: null, orderExternalId: "7186636636291",
@@ -48,11 +37,11 @@ class OmsReturnsPageFetcherSeamTests {
                 null, null, null, [pageFetcher: fetcher([[pending("M1", "37447008387")]])])
         assertEquals([], result.errors)
         assertEquals("37447008387", ((List<Map>) result.records)[0].externalId,
-                "the same fallback REST records get: blank externalId takes shopifyReturnId")
+                "blank externalId takes shopifyReturnId")
     }
 
     @Test
-    void projectionAndFiltersApplyAsOnRest() {
+    void projectionAndFiltersApply() {
         List filters = [[sequenceNum: 1, fieldExpression: "returnChannelEnumId", operator: "EXCLUDE_IN", values: ["POS_RTN_CHANNEL"]]]
         Map result = OmsReturnsSourceSupport.extractReturns(CONFIG, "2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z",
                 ["returnId", "externalId"], null, filters,
@@ -93,15 +82,20 @@ class OmsReturnsPageFetcherSeamTests {
     }
 
     @Test
-    void theRestPathCarriesNoTransportOrCancelledKey() {
-        // Regression guard: REST metadata is unchanged by the seam.
-        OmsReturnsSourceSupport.setHttpClient { Map request ->
-            [statusCode: 200, body: '{"returns":[],"returnsCount":0,"hasMore":false,"excludedNoShopifyRefCount":0}']
-        }
-        Map meta = (Map) OmsReturnsSourceSupport.extractReturns(CONFIG, "2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z",
-                null, null, null, [:]).requestMetadata
-        assertFalse(meta.containsKey("transport"))
-        assertFalse(((Map) meta.filters).containsKey("excludedCancelledCount"))
+    void anExtractWithoutAPageSourceIsRefused() {
+        Map result = OmsReturnsSourceSupport.extractReturns(CONFIG, "2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z",
+                null, null, null, [:])
+        assertTrue((result.errors as List).any { (it as String).contains("GraphQL page source") }, result.errors.toString())
+    }
+
+    @Test
+    void aRealExternalIdIsNeverOverwrittenAndNeitherIdIsInvented() {
+        Map refunded = [externalId: "REFUND_1", shopifyReturnId: "RETURN_1"]
+        OmsReturnsSourceSupport.applyJoinKeyFallback(refunded)
+        assertEquals("REFUND_1", refunded.externalId)
+        Map neither = [externalId: null, shopifyReturnId: null]
+        OmsReturnsSourceSupport.applyJoinKeyFallback(neither)
+        assertNull(neither.externalId)
     }
 
     @Test

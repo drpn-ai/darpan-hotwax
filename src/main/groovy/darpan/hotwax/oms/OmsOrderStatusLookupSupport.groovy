@@ -37,7 +37,7 @@ class OmsOrderStatusLookupSupport {
             // The search string is `orderId:a,b`; an id carrying a separator would corrupt it.
             return [ok: false, statusByOrderId: [:], missingIds: [], errors: ["OMS order ids must be plain identifiers."]]
         }
-        Map<String, Object> config = OmsRestSourceSupport.toPlainMap(rawConfig)
+        Map<String, Object> config = OmsExtractSupport.toPlainMap(rawConfig)
         if (!config) return [ok: false, statusByOrderId: [:], missingIds: [], errors: ["OMS source config could not be read."]]
         try {
             OmsGqlClient client = (OmsGqlClient) clientFactory.call(config)

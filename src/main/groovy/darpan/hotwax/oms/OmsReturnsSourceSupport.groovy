@@ -1,62 +1,23 @@
 package darpan.hotwax.oms
 
 import groovy.json.JsonOutput
-import groovy.json.JsonSlurper
 
 import darpan.reconciliation.source.SourceFilterSupport
 
 import static darpan.common.ValueSupport.normalize
-import static darpan.common.ValueSupport.normalizeBool
 import static darpan.common.ValueSupport.normalizeInt
 
 /**
- * Extraction for OMS `/rest/s1/oms/reconciliationReturns` (DAR-BE-018, design §7).
+ * The OMS returns extract pipeline (DAR-BE-018, DAR-BE-040 fix 3) and the by-id returns lookup, both over GraphQL.
  *
- * A separate class from OmsRestSourceSupport on purpose: that file is already ~1,900 lines and
- * carries the sales-order contract (SALES_ORDER/EXCHANGE filtering, exchange manifest sidecar,
- * pagination-strategy fallbacks) that returns do not share. Config parsing, auth header building,
- * URL building, window parsing, and the actual HTTP call are reused from it as statics rather than
- * re-implemented.
- *
- * The endpoint terminates cleanly on hasMore, honours pageSize, and pre-excludes returns with no
- * Shopify reference server-side (excludedNoShopifyRefCount) — so none of the legacy orders-path
- * heuristics (shrinking-page probes, repeated-page detection) apply here.
+ * A page source (OmsGqlReturnsPageSource) fetches and builds the return records; this class runs the configured
+ * filters, the join-key fallback, the projection and the streaming sink over them, and writes the metadata.
  */
 class OmsReturnsSourceSupport {
 
-    static final String DEFAULT_RETURNS_PATH = "/rest/s1/oms/reconciliationReturns"
-    static final String RETURNS_WINDOW_FROM_PARAM = "returnDateFrom"
-    static final String RETURNS_WINDOW_THRU_PARAM = "returnDateThru"
     static final String DEFAULT_FILE_NAME_PREFIX = "oms-returns"
     static final String RETURN_CHANNEL_FIELD = "returnChannelEnumId"
-    static final int DEFAULT_RETURNS_PAGE_SIZE = 500
-    /** Same 1..1000 envelope resolveOrdersPageSize clamps to, for the same reason. */
-    static final int MIN_RETURNS_PAGE_SIZE = 1
-    static final int MAX_RETURNS_PAGE_SIZE = 1000
     static final int MAX_RETURNS_PAGE_COUNT = 20000
-    /** Attempts per page, inclusive of the first. 3 covers a gateway blip without hammering a sick host. */
-    static final int DEFAULT_MAX_PAGE_ATTEMPTS = 3
-    /** Linear backoff step: attempt N waits N x this before re-requesting. */
-    static final int DEFAULT_RETRY_BACKOFF_MILLIS = 2000
-    /** Shared with the orders read; see OmsRestSourceSupport.RETRYABLE_STATUS_CODES for why 500 is absent. */
-    static final Set<Integer> RETRYABLE_STATUS_CODES = OmsRestSourceSupport.RETRYABLE_STATUS_CODES
-
-    private static final JsonSlurper JSON_SLURPER = new JsonSlurper()
-
-    /**
-     * No client field of its own. callOmsEndpoint (reused below, not reimplemented — see class doc)
-     * dispatches through OmsRestSourceSupport's own private `httpClient`, so a second seam here
-     * would be dead code the real request path never reads. Delegating keeps the single transport
-     * seam and leaves the brief's test API (`OmsReturnsSourceSupport.setHttpClient { ... }`) working
-     * unchanged for callers.
-     */
-    static void setHttpClient(Closure client) {
-        OmsRestSourceSupport.setHttpClient(client)
-    }
-
-    static void resetHttpClient() {
-        OmsRestSourceSupport.resetHttpClient()
-    }
 
     private static final Closure DEFAULT_GQL_CLIENT_FACTORY = { Map config -> new OmsGqlClient(config) }
     private static Closure gqlClientFactory = DEFAULT_GQL_CLIENT_FACTORY
@@ -71,13 +32,12 @@ class OmsReturnsSourceSupport {
     }
 
     /**
-     * Delegates to OmsRestSourceSupport.safeFileName for the same reason setHttpClient does above:
-     * one sanitization seam, not a reimplementation. The fallback is returns-specific
+     * Delegates to OmsExtractSupport.safeFileName: one sanitization seam. The fallback is returns-specific
      * ("oms-returns.json") so a caller-supplied blank fileName still lands on a returns-shaped
      * default rather than the orders extractor's "oms-orders.json".
      */
     static String safeReturnsFileName(Object rawName) {
-        return OmsRestSourceSupport.safeFileName(rawName, "${DEFAULT_FILE_NAME_PREFIX}.json")
+        return OmsExtractSupport.safeFileName(rawName, "${DEFAULT_FILE_NAME_PREFIX}.json")
     }
 
     static Map<String, Object> extractReturns(Object rawConfig, Object windowStart, Object windowEnd,
@@ -103,31 +63,20 @@ class OmsReturnsSourceSupport {
         List<String> errors = []
         List<String> warnings = []
 
-        // toPlainMap, NOT safeConfigMap: safeConfigMap redacts auth secrets into hasUsername/
-        // hasPassword/hasApiToken booleans for UI-safe listing responses (see
-        // listOmsRestSourceConfigs.groovy / saveOmsRestSourceConfig.groovy, its only other callers).
-        // buildHeaders below needs the real username/password/apiToken. toPlainMap(null) is an empty
-        // (falsy) Map, so the null-config guard below still works.
-        Map<String, Object> config = OmsRestSourceSupport.toPlainMap(rawConfig)
+        // toPlainMap, NOT safeConfigMap: the page source's client needs the real credentials, which safeConfigMap
+        // redacts. toPlainMap(null) is an empty (falsy) Map, so the null-config guard below still works.
+        Map<String, Object> config = OmsExtractSupport.toPlainMap(rawConfig)
         if (!config) {
-            return failure(["OMS REST source config could not be read."], [], retainRecords)
+            return failure(["OMS source config could not be read."], [], retainRecords)
         }
+        Closure pageFetcher = (options?.pageFetcher instanceof Closure) ? (Closure) options.pageFetcher : null
+        if (pageFetcher == null) return failure(["An OMS returns extract needs its GraphQL page source."], [], retainRecords)
 
-        Long fromMillis = OmsRestSourceSupport.parseWindowMillis(windowStart, "windowStart", errors)
-        Long thruMillis = OmsRestSourceSupport.parseWindowMillis(windowEnd, "windowEnd", errors)
+        Long fromMillis = OmsExtractSupport.parseWindowMillis(windowStart, "windowStart", errors)
+        Long thruMillis = OmsExtractSupport.parseWindowMillis(windowEnd, "windowEnd", errors)
         if (errors) return failure(errors, [], retainRecords)
 
-        String endpointUrl = OmsRestSourceSupport.buildOrdersEndpointUrl(
-                normalize(config.baseUrl), DEFAULT_RETURNS_PATH)
-
-        Map<String, String> headers
-        try {
-            headers = OmsRestSourceSupport.buildHeaders(config)
-        } catch (IllegalArgumentException e) {
-            return failure([normalize(e.message) ?: "OMS auth configuration is invalid."], [], retainRecords)
-        }
-
-        // Parsed once, before any HTTP call, so a malformed rule fails pre-flight rather than
+        // Parsed once, before any page is fetched, so a malformed rule fails pre-flight rather than
         // mid-window on some later page (matches the orders contract). parseRules returns the rule
         // list directly (List<Map<String,Object>>), not a wrapping Map.
         List<Map<String, Object>> parsedFilters
@@ -137,9 +86,6 @@ class OmsReturnsSourceSupport {
             return failure([normalize(e.message) ?: "Configured exclusion rules are invalid."], [], retainRecords)
         }
 
-        int pageSize = resolveReturnsPageSize(config, options)
-        int maxPageAttempts = Math.max(1, normalizeInt(options?.maxPageAttempts, DEFAULT_MAX_PAGE_ATTEMPTS))
-        int retryBackoffMillis = Math.max(0, normalizeInt(options?.retryBackoffMillis, DEFAULT_RETRY_BACKOFF_MILLIS))
         List<Map<String, Object>> collected = []
         OutputSink sink = new OutputSink(targetFile)
         Map<String, Object> serverCounts = [:]
@@ -147,16 +93,13 @@ class OmsReturnsSourceSupport {
         Map<String, Object> fieldAbsentCounts = [:]
         long cumulativeRaw = 0L
 
-        // One record pipeline for both transports: client filters, the join-key fallback, projection,
-        // the sink. The REST loop below and an optional page fetcher (DAR-BE-040 fix 3, the GraphQL
-        // transport) both feed it, so nothing downstream can tell them apart except `transport`.
+        // One record pipeline: client filters, the join-key fallback, projection, the sink.
         Closure consumePage = { List pageReturns ->
             pageReturns.each { Object raw ->
                 if (!(raw instanceof Map)) return
                 Map<String, Object> record = (Map<String, Object>) raw
-                // Configured exclusions run CLIENT-side: the endpoint has no knowledge of tenant
-                // rules. They cannot double-count against excludedNoShopifyRefCount because that
-                // filter is server-side — those returns never arrive here at all (design §9.5).
+                // Configured exclusions run here, after the page source's own exclusions: a return it
+                // excluded (excludedNoShopifyRefCount) never arrives, so nothing is counted twice.
                 Map<String, Object> verdict = SourceFilterSupport.evaluate(record, parsedFilters)
                 if (verdict != null) {
                     String key = String.valueOf(((Map) verdict.get("rule")).get("sequenceNum"))
@@ -175,116 +118,22 @@ class OmsReturnsSourceSupport {
             }
         }
 
-        Closure pageFetcher = (options?.pageFetcher instanceof Closure) ? (Closure) options.pageFetcher : null
-        if (pageFetcher != null) {
-            String transport = null
-            try {
-                Map fetched = (Map) pageFetcher.call([config: config, fromMillis: fromMillis, thruMillis: thruMillis,
-                        pageConsumer: { List pageReturns ->
-                            cumulativeRaw += pageReturns.size()
-                            consumePage(pageReturns)
-                            if (pageProgressListener != null) pageProgressListener.call(cumulativeRaw)
-                        }])
-                errors.addAll((List<String>) (fetched?.errors ?: []))
-                warnings.addAll((List<String>) (fetched?.warnings ?: []))
-                serverCounts.putAll((Map) (fetched?.serverCounts ?: [:]))
-                transport = fetched?.transport as String
-                if (errors) {
-                    sink.abort()
-                } else {
-                    sink.finish(withTransport(buildMetadata(serverCounts, exclusionCounts, fieldAbsentCounts, parsedFilters), transport))
-                }
-            } catch (Exception e) {
-                sink.abort()
-                errors.add("OMS returns extraction failed: ${e.message}".toString())
-            } finally {
-                sink.close()
-            }
-            if (errors) {
-                if (targetFile != null) targetFile.delete()
-                return failure(errors, warnings, retainRecords)
-            }
-            int fetchedCount = sink.writtenCount
-            Map<String, Object> fetchedResult = [
-                    recordCount    : fetchedCount,
-                    dataAvailable  : fetchedCount > 0,
-                    requestMetadata: withTransport(buildMetadata(serverCounts, exclusionCounts, fieldAbsentCounts, parsedFilters), transport),
-                    warnings       : warnings,
-                    errors         : [],
-                    fileName       : OmsRestSourceSupport.buildDefaultFileName(fromMillis, thruMillis, DEFAULT_FILE_NAME_PREFIX),
-            ]
-            if (retainRecords) fetchedResult.put("records", collected)
-            return fetchedResult
-        }
-
+        String transport = null
         try {
-            int pageIndex = 0
-            boolean hasMore = true
-            while (hasMore) {
-                if (pageIndex >= MAX_RETURNS_PAGE_COUNT) {
-                    warnings.add("Returns extraction stopped at the ${MAX_RETURNS_PAGE_COUNT}-page ceiling; the window may be incomplete.".toString())
-                    break
-                }
-                String url = buildReturnsUrl(endpointUrl, fromMillis, thruMillis, pageIndex, pageSize)
-                Map<String, Object> attempt = requestReturnsPage(url, headers, config, pageIndex,
-                        maxPageAttempts, retryBackoffMillis, warnings)
-                if (!attempt.get("ok")) {
-                    errors.add((String) attempt.get("error"))
-                    break
-                }
-                Map response = (Map) attempt.get("response")
-
-                Map body
-                try {
-                    body = (Map) JSON_SLURPER.parseText(normalize(response?.body) ?: "{}")
-                } catch (Exception e) {
-                    errors.add("OMS returns response was not valid JSON: ${e.message}".toString())
-                    break
-                }
-
-                List pageReturns = (body.get("returns") instanceof List) ? (List) body.get("returns") : []
-                cumulativeRaw += pageReturns.size()
-
-                consumePage(pageReturns)
-
-                // M1: window-wide totals repeat on every page; the first page's copy is the
-                // authoritative one and is the only one guaranteed to exist (a window with no
-                // returns yields no other page) — mirrors OmsRestSourceSupport.extractOrdersInternal
-                // (:1169-1171), whose own comment states this explicitly. The endpoint's actual
-                // per-page repetition semantics are unobserved (no live response captured yet, per
-                // this class's own doc); first-page-wins is the same conservative assumption the
-                // orders sibling makes, not a verified contract.
-                if (pageIndex == 0) {
-                    serverCounts.put("returnsCount", normalizeInt(body.get("returnsCount"), 0))
-                    serverCounts.put("excludedNoShopifyRefCount", normalizeInt(body.get("excludedNoShopifyRefCount"), 0))
-                }
-
-                if (pageProgressListener != null) pageProgressListener.call(cumulativeRaw)
-
-                // C4: hasMore is the ONLY termination signal here (this endpoint has none of the
-                // legacy orders-path shrinking-page/repeated-page heuristics — see class doc).
-                // Absence therefore cannot be read as "false": that would end the window after this
-                // page and report SUCCESS on a partial extract, indistinguishable from a window that
-                // genuinely held one page. Fail instead, mirroring OmsRestSourceSupport's own
-                // recon-endpoint handling (:1361-1372) exactly, including using normalizeBool (not a
-                // strict `== true`) for a present-but-stringly-typed value such as "true".
-                Object rawHasMore = body.get("hasMore")
-                if (rawHasMore == null) {
-                    errors.add("OMS returns response carried no hasMore flag, so the end of the window cannot be determined; refusing to report a possibly-partial extract as complete.".toString())
-                    break
-                }
-                hasMore = normalizeBool(rawHasMore)
-                pageIndex++
-            }
-            // finish() must never run on an error-triggered break out of the loop above — it would
-            // write a well-formed closing `],"metadata":{...}}` onto a file that only holds the
-            // pages fetched before the failure, producing a valid-looking but silently partial
-            // document. Mirrors OmsRestSourceSupport.extractOrdersInternal, which calls
-            // sink.abort() (not finish()) on every one of its own error returns.
+            Map fetched = (Map) pageFetcher.call([config: config, fromMillis: fromMillis, thruMillis: thruMillis,
+                    pageConsumer: { List pageReturns ->
+                        cumulativeRaw += pageReturns.size()
+                        consumePage(pageReturns)
+                        if (pageProgressListener != null) pageProgressListener.call(cumulativeRaw)
+                    }])
+            errors.addAll((List<String>) (fetched?.errors ?: []))
+            warnings.addAll((List<String>) (fetched?.warnings ?: []))
+            serverCounts.putAll((Map) (fetched?.serverCounts ?: [:]))
+            transport = fetched?.transport as String
             if (errors) {
                 sink.abort()
             } else {
-                sink.finish(buildMetadata(serverCounts, exclusionCounts, fieldAbsentCounts, parsedFilters))
+                sink.finish(withTransport(buildMetadata(serverCounts, exclusionCounts, fieldAbsentCounts, parsedFilters), transport))
             }
         } catch (Exception e) {
             sink.abort()
@@ -292,101 +141,21 @@ class OmsReturnsSourceSupport {
         } finally {
             sink.close()
         }
-
         if (errors) {
-            // Mirrors OmsRestSourceSupport.extractOrdersToFile's `sink.abort(); targetFile.delete()`
-            // on any error: abort() above already closed the writer without the closing bracket, so
-            // whatever partial bytes it wrote must not be left on disk looking like a real file.
-            // No-op for the in-memory extractReturns path (targetFile is null there).
             if (targetFile != null) targetFile.delete()
             return failure(errors, warnings, retainRecords)
         }
-
-        int recordCount = sink.writtenCount
-        Map<String, Object> result = [
-                recordCount    : recordCount,
-                dataAvailable  : recordCount > 0,
-                requestMetadata: buildMetadata(serverCounts, exclusionCounts, fieldAbsentCounts, parsedFilters),
+        int fetchedCount = sink.writtenCount
+        Map<String, Object> fetchedResult = [
+                recordCount    : fetchedCount,
+                dataAvailable  : fetchedCount > 0,
+                requestMetadata: withTransport(buildMetadata(serverCounts, exclusionCounts, fieldAbsentCounts, parsedFilters), transport),
                 warnings       : warnings,
                 errors         : [],
-                fileName       : OmsRestSourceSupport.buildDefaultFileName(fromMillis, thruMillis, DEFAULT_FILE_NAME_PREFIX),
+                fileName       : OmsExtractSupport.buildDefaultFileName(fromMillis, thruMillis, DEFAULT_FILE_NAME_PREFIX),
         ]
-        // extractReturnsToFile's contract is "same Map minus records" — omit the key entirely
-        // (matching OmsRestSourceSupport.extractOrdersToFile's `result.remove("records")`), not just
-        // set it null.
-        if (retainRecords) result.put("records", collected)
-        return result
-    }
-
-    /**
-     * One page, retried a bounded number of times for the statuses a retry can fix.
-     *
-     * Retry lives HERE rather than only at the automation layer on purpose. A failure that escapes
-     * this method aborts the sink and deletes the part-written file, so the automation's own retry
-     * (AutomationExecutionSupport.buildFailureFields, transient -> PENDING on a 5-minute backoff)
-     * re-fetches the window from page 0 and re-pays for every page that had already succeeded. A
-     * page-level attempt costs one request and a few seconds instead.
-     *
-     * On failure it returns a message naming the page, the attempts spent, and the server's own
-     * error detail. That page number is the whole diagnostic: page 0 says the window is too wide
-     * for the endpoint, while a deep page says offset decay, and the two want opposite remedies.
-     */
-    protected static Map<String, Object> requestReturnsPage(String url, Map<String, String> headers, Map config,
-                                                            int pageIndex, int maxAttempts, int backoffMillis,
-                                                            List<String> warnings) {
-        int lastStatus = 0
-        String lastDetail = null
-        int attemptsUsed = 0
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            attemptsUsed = attempt
-            // Reused, not hand-rolled: callOmsEndpoint already handles gzip, status extraction,
-            // and dispatches through the injected test client (see setHttpClient above).
-            Map response = OmsRestSourceSupport.callOmsEndpoint(url, headers, config)
-            int statusCode = normalizeInt(response?.statusCode, 0)
-            if (statusCode >= 200 && statusCode < 300) return [ok: true, response: response]
-
-            lastStatus = statusCode
-            // Read on EVERY attempt, not just the last: a gateway's 504 body is usually empty while
-            // the app's own 503 carries a real code, and whichever attempt saw detail is worth
-            // keeping over a later blank one.
-            lastDetail = OmsRestSourceSupport.describeEndpointError(response?.body) ?: lastDetail
-            if (!RETRYABLE_STATUS_CODES.contains(statusCode)) break
-            if (attempt >= maxAttempts) break
-            warnings.add(("OMS returns page ${pageIndex} failed with status ${statusCode}; " +
-                    "retrying (attempt ${attempt + 1} of ${maxAttempts}).").toString())
-            OmsRestSourceSupport.sleepQuietly((long) backoffMillis * attempt)
-        }
-
-        String attemptsNote = attemptsUsed > 1 ? " after ${attemptsUsed} attempts" : ""
-        String detailNote = lastDetail ? ": ${lastDetail}" : ""
-        return [ok: false, error: ("OMS returns request for page ${pageIndex} failed with " +
-                "status ${lastStatus}${attemptsNote}${detailNote}.").toString()]
-    }
-
-    /**
-     * Page size, in precedence order: an explicit caller option, then the operator's per-source
-     * setting, then the shipped default. Clamped to MIN..MAX for the reason the orders sibling
-     * clamps — a mistyped 99999 must not become a request that is certain to time the gateway out.
-     *
-     * This is the lever the 504 on prod run 100616 had no answer for: when OMS cannot build a
-     * 500-row page inside its gateway deadline, retrying cannot help and only a smaller page can.
-     */
-    protected static int resolveReturnsPageSize(Map config, Map options) {
-        Integer requested = normalizeInt(options?.pageSize)
-        if (requested == null) requested = normalizeInt(config?.returnsPageSize)
-        if (requested == null) return DEFAULT_RETURNS_PAGE_SIZE
-        return Math.min(MAX_RETURNS_PAGE_SIZE, Math.max(MIN_RETURNS_PAGE_SIZE, requested))
-    }
-
-    protected static String buildReturnsUrl(String endpointUrl, Long fromMillis, Long thruMillis,
-                                            int pageIndex, int pageSize) {
-        StringBuilder url = new StringBuilder(endpointUrl)
-        url.append(endpointUrl.contains("?") ? "&" : "?")
-        url.append(RETURNS_WINDOW_FROM_PARAM).append("=").append(fromMillis)
-        url.append("&").append(RETURNS_WINDOW_THRU_PARAM).append("=").append(thruMillis)
-        url.append("&pageIndex=").append(pageIndex)
-        url.append("&pageSize=").append(pageSize)
-        return url.toString()
+        if (retainRecords) fetchedResult.put("records", collected)
+        return fetchedResult
     }
 
     /**
@@ -426,7 +195,7 @@ class OmsReturnsSourceSupport {
         List<String> ids = (externalIds ?: []).collect { normalize(it) }.findAll { it }.unique()
         if (!ids) return [ok: false, foundIds: [], missingIds: [], errors: ["No externalIds provided for OMS returns lookup."]]
 
-        Map<String, Object> config = OmsRestSourceSupport.toPlainMap(rawConfig)
+        Map<String, Object> config = OmsExtractSupport.toPlainMap(rawConfig)
         if (!config) return [ok: false, foundIds: [], missingIds: [], errors: ["OMS REST source config could not be read."]]
 
         // DAR-BE-116 (2026-10-23): GraphQL only. Every OMS read goes through GraphQL (Aditi); the REST passes
@@ -582,7 +351,6 @@ class OmsReturnsSourceSupport {
         Map<String, Object> filters = [:]
         filters.put("excludedNoShopifyRefCount", normalizeInt(serverCounts.get("excludedNoShopifyRefCount"), 0))
         filters.put("serverReportedReturnsCount", normalizeInt(serverCounts.get("returnsCount"), 0))
-        // Only the GraphQL transport reports it: REST never served a cancelled return to count.
         if (serverCounts.containsKey("excludedCancelledCount")) {
             filters.put("excludedCancelledCount", normalizeInt(serverCounts.get("excludedCancelledCount"), 0))
         }
@@ -609,7 +377,7 @@ class OmsReturnsSourceSupport {
         return [filters: filters]
     }
 
-    /** REST metadata carries no transport key; a page fetcher's does. */
+    /** The page source names its transport. */
     private static Map<String, Object> withTransport(Map<String, Object> metadata, String transport) {
         if (transport) metadata.put("transport", transport)
         return metadata
@@ -630,7 +398,7 @@ class OmsReturnsSourceSupport {
     /**
      * Streams {records:[...],metadata:{...}} so a month-scale window never holds more than a page.
      *
-     * Mirrors OmsRestSourceSupport.OrdersDocumentSink's cleanup contract exactly: the writer opens
+     * Mirrors OmsExtractSupport.OrdersDocumentSink's cleanup contract exactly: the writer opens
      * LAZILY on the first actual write (never in advance), so a request that fails before a single
      * record is known good never creates a file at all; and abort() closes without writing the
      * closing bracket/metadata, so a mid-window failure leaves either no file (nothing was ever

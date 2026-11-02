@@ -2,7 +2,7 @@ import darpan.facade.common.FacadeSupport
 import darpan.facade.common.PaginationSupport
 import darpan.facade.common.SharedConfigAccessSupport
 import darpan.facade.common.TenantAccessSupport
-import darpan.hotwax.oms.OmsRestSourceSupport
+import darpan.hotwax.oms.OmsExtractSupport
 
 import static darpan.common.ValueSupport.boundedInt
 import static darpan.common.ValueSupport.normalize
@@ -21,14 +21,14 @@ if (!activeTenantUserGroupId) {
     List configs = SharedConfigAccessSupport.listAccessibleConfigRows(ec,
             SharedConfigAccessSupport.CONFIG_TYPE_HOTWAX_OMS)
     rows = configs.collect { cfg ->
-        OmsRestSourceSupport.safeConfigMap(cfg) +
+        OmsExtractSupport.safeConfigMap(cfg) +
                 [isShared: cfg.companyUserGroupId != activeTenantUserGroupId]
     }
 }
 
 String search = normalize(query)?.toLowerCase()
 List<Map<String, Object>> filtered = search ? rows.findAll { row ->
-    [row.omsRestSourceConfigId, row.description, row.baseUrl, row.ordersPath, row.timeZone, row.authType].any {
+    [row.omsRestSourceConfigId, row.description, row.baseUrl, row.timeZone, row.authType].any {
         it?.toString()?.toLowerCase()?.contains(search)
     }
 } : rows

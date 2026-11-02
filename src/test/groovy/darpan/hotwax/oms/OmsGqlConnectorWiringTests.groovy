@@ -42,17 +42,20 @@ class OmsGqlConnectorWiringTests {
     }
 
     @Test
-    void itKeepsTheRestProjectionBaseSoBothExtractsEmitTheSameShape() {
-        String seed = read(SEED)
-        String base = 'keepFieldsBase="orderId,orderName,externalId,grandTotal,orderDate,statusId'
-        assertTrue(row(seed, 'systemEnumId="OMS"').contains(base + '"'))
-        // DAR-UI-081: GraphQL keeps REST's base and adds the order basics a finding shows.
-        assertTrue(row(seed, 'systemEnumId="OMS_GQL"').contains(base + ',currencyUomId,billToCustomer,shipGroups"'))
+    void itKeepsTheOrderProjectionBase() {
+        // DAR-UI-081: the order basics a finding shows ride beside the compare fields.
+        assertTrue(row(read(SEED), 'systemEnumId="OMS_GQL"').contains(
+                'keepFieldsBase="orderId,orderName,externalId,grandTotal,orderDate,statusId,currencyUomId,billToCustomer,shipGroups"'))
     }
 
     @Test
-    void theRestRowStaysEnabledUntilTheDiffGatePasses() {
-        assertTrue(row(read(SEED), 'systemEnumId="OMS"').contains('enabled="Y"'))
+    void noHotwaxRestConnectorRowIsSeeded() {
+        // DAR-BE-052: HotWax OMS is GraphQL only. No seeded row may name a REST extract or a REST config type.
+        String seed = read(SEED)
+        ["OMS", "OMS_RECON_ORDERS", "OMS_ORDER_ITEMS", "OMS_ORDER_LINE_UNITS", "OMS_TRANSFER_ORDERS", "OMS_RETURNS"].each {
+            assertTrue(!seed.contains("systemEnumId=\"${it}\"".toString()), "a REST connector row is seeded: ${it}")
+        }
+        assertTrue(!(seed =~ /expectedSourceConfigType="HOTWAX_OMS_REST/).find(), "a REST config type is seeded")
     }
 
     @Test
@@ -116,7 +119,6 @@ class OmsGqlConnectorWiringTests {
         // systemMessageRemoteId and save validates it against SystemMessageRemote rows (or the virtual
         // HOTWAX_ORDERS_API remote). An invented remote id made "Save run" fail outright.
         String seed = read(SEED)
-        assertTrue(row(seed, 'systemEnumId="OMS"').contains('remoteId="HOTWAX_ORDERS_API"'))
         assertTrue(row(seed, 'systemEnumId="OMS_GQL"').contains('remoteId="HOTWAX_ORDERS_API"'),
                 "OMS_GQL must use the same remote as every other HotWax connector row")
     }

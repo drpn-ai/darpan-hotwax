@@ -3,7 +3,6 @@ package darpan.hotwax.oms
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import org.junit.jupiter.api.AfterEach
-import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
@@ -26,15 +25,8 @@ class OmsReturnsGqlLookupTests {
 
     private List<Map> gqlRequests = []
 
-    @BeforeEach
-    void restAnswersNothing() {
-        // The REST endpoint as it now behaves for a pending return: both id filters find nothing.
-        OmsReturnsSourceSupport.setHttpClient { Map request -> [statusCode: 200, body: restBody([])] }
-    }
-
     @AfterEach
     void reset() {
-        OmsReturnsSourceSupport.resetHttpClient()
         OmsReturnsSourceSupport.resetGqlClientFactory()
     }
 
@@ -132,16 +124,6 @@ class OmsReturnsGqlLookupTests {
         assertEquals(1, returnsRequests.size(), "no externalId pass once returnId resolved everything")
         assertEquals("returnId:M246772", ((Map) returnsRequests[0].variables).q)
         assertEquals(0, gqlRequests.size())
-    }
-
-    @Test
-    void theLookupNeverCallsRest() {
-        OmsReturnsSourceSupport.setHttpClient { Map request -> throw new AssertionError("REST must not be called: ${request.url}") }
-        gqlAnswers { List<String> ids -> [] }
-
-        Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(CONFIG, ["aaa"])
-
-        assertEquals(["aaa"], result.missingIds)
     }
 
     @Test
@@ -273,8 +255,4 @@ class OmsReturnsGqlLookupTests {
         assertEquals(["bbb"], result.unresolvedIds)
     }
 
-    private static String restBody(List returns) {
-        return JsonOutput.toJson([returns: returns, returnsCount: returns.size(), hasMore: false,
-                                  pageIndex: 0, pageSize: 50, excludedNoShopifyRefCount: 0])
-    }
 }

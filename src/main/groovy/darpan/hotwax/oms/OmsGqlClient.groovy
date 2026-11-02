@@ -15,10 +15,9 @@ import java.time.Duration
 /**
  * One POST to {baseUrl}/rest/s1/graphql, with the cost bucket honoured.
  *
- * Headers are OmsRestSourceSupport.buildHeaders(config) — the same auth handling as the REST
- * connector (BEARER, BASIC, API_KEY with its configured header, headersJson), so a config that works
- * for REST works here. The `sender` is injected for tests; the default re-validates the URL against
- * OutboundHttpPolicy at request time exactly as the REST path does (audit 2026-06-11 #15).
+ * Headers are OmsExtractSupport.buildHeaders(config) (BEARER, BASIC, API_KEY with its configured header,
+ * headersJson). The `sender` is injected for tests; the default re-validates the URL against
+ * OutboundHttpPolicy at request time (audit 2026-06-11 #15).
  */
 class OmsGqlClient {
 
@@ -34,12 +33,16 @@ class OmsGqlClient {
      */
     static final long MIN_THROTTLE_BACKOFF_MILLIS = 1_000L
     /**
-     * DAR-BE-142, GraphQL path (2026-10-28): a page that times out, cannot connect, or answers 429/502/503/504 is asked
-     * again, like the REST read (same config keys maxPageAttempts / retryBackoffMillis and defaults, linear backoff), so
-     * one slow HotWax answer does not fail a month's read. Every document is a read-only query, so asking again is safe.
-     * The last failure fails closed (TRANSIENT).
+     * DAR-BE-142 (2026-10-28): a page that times out, cannot connect, or answers 429/502/503/504 is asked again (config
+     * keys maxPageAttempts / retryBackoffMillis, linear backoff), so one slow HotWax answer does not fail a month's read.
+     * Every document is a read-only query, so asking again is safe. The last failure fails closed (TRANSIENT).
+     *
+     * 500 is deliberately absent: it signals a deterministic server-side fault, so retrying only multiplies the load.
      */
-    static final Set<String> TRANSIENT_CODES = OmsRestSourceSupport.RETRYABLE_STATUS_CODES.collect { "HTTP_${it}".toString() } as Set<String>
+    static final Set<Integer> RETRYABLE_STATUS_CODES = [429, 502, 503, 504] as Set
+    static final int DEFAULT_MAX_PAGE_ATTEMPTS = 5
+    static final int DEFAULT_PAGE_RETRY_BACKOFF_MILLIS = 5000
+    static final Set<String> TRANSIENT_CODES = RETRYABLE_STATUS_CODES.collect { "HTTP_${it}".toString() } as Set<String>
 
     private static final Logger logger = LoggerFactory.getLogger(OmsGqlClient.class)
 
@@ -52,9 +55,9 @@ class OmsGqlClient {
 
     OmsGqlClient(Map config, Closure sender = null) {
         this.config = config ?: [:]
-        this.headers = new LinkedHashMap<String, String>(OmsRestSourceSupport.buildHeaders(this.config))
+        this.headers = new LinkedHashMap<String, String>(OmsExtractSupport.buildHeaders(this.config))
         this.headers.put("Content-Type", "application/json")
-        this.sender = sender ?: defaultSender(this.config)
+        this.sender = sender ?: httpSender(this.config)
         // A real sender spends the endpoint's one shared bucket (DAR-BE-116); an injected one (tests) keeps its own.
         this.governor = sender == null ? OmsGqlThrottleGovernor.forUrl(getUrl()) : new OmsGqlThrottleGovernor()
         this.realEndpoint = sender == null
@@ -91,8 +94,8 @@ class OmsGqlClient {
         String operation = (document =~ /query\s+(\w+)/).with { it.find() ? it.group(1) : "query" }
 
         long throttledWait = 0L
-        int maxAttempts = Math.max(1, intConfig("maxPageAttempts", OmsRestSourceSupport.DEFAULT_MAX_PAGE_ATTEMPTS))
-        long retryBackoff = Math.max(0, intConfig("retryBackoffMillis", OmsRestSourceSupport.DEFAULT_PAGE_RETRY_BACKOFF_MILLIS))
+        int maxAttempts = Math.max(1, intConfig("maxPageAttempts", DEFAULT_MAX_PAGE_ATTEMPTS))
+        long retryBackoff = Math.max(0, intConfig("retryBackoffMillis", DEFAULT_PAGE_RETRY_BACKOFF_MILLIS))
         int transientFailures = 0
         for (int attempt = 0; ; attempt++) {
             long wait = governor.sleepMillisFor(reservation)
@@ -158,7 +161,7 @@ class OmsGqlClient {
         if (!(parsed instanceof Map)) {
             // A gateway or overload answer often has no JSON body: transient, not unparseable. A JSON THROTTLED answer
             // still reaches the governor below, whatever its status.
-            if (OmsRestSourceSupport.RETRYABLE_STATUS_CODES.contains(status)) {
+            if (RETRYABLE_STATUS_CODES.contains(status)) {
                 throw new OmsGqlException("HTTP_${status}".toString(), "HTTP ${status}: ${raw?.take(200)}".toString())
             }
             throw new OmsGqlException("UNPARSEABLE", "HTTP ${status}: body was not JSON: ${raw?.take(200)}")
@@ -183,7 +186,19 @@ class OmsGqlClient {
         return [data: body.data, errors: [], extensions: body.extensions]
     }
 
-    private static Closure defaultSender(Map config) {
+    /**
+     * One call, no governor and no retry: the connection probe, where an operator is watching and a retry or a
+     * throttle wait would only hide the answer.
+     */
+    Map executeOnce(String document, Map variables = null) {
+        Map payload = [query: document]
+        if (variables) payload.variables = variables
+        calls.incrementAndGet()
+        return send(JsonOutput.toJson(payload))
+    }
+
+    /** The real HTTP sender: (url, headers, body) -> [statusCode, body]. */
+    static Closure httpSender(Map config) {
         HttpClient http = HttpClient.newBuilder().connectTimeout(
                 Duration.ofSeconds(((config?.connectTimeoutSeconds ?: 30) as Number).intValue())).build()
         int readTimeout = ((config?.readTimeoutSeconds ?: 120) as Number).intValue()

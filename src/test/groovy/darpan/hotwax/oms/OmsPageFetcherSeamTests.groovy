@@ -26,7 +26,7 @@ class OmsPageFetcherSeamTests {
         return { Map ctx ->
             seenCtx?.add(ctx)
             pages.each { List<Map> page ->
-                Map bundle = OmsRestSourceSupport.shapePageRecords(page, (Map) ctx.extractOptions,
+                Map bundle = OmsExtractSupport.shapePageRecords(page, (Map) ctx.extractOptions,
                         (List) ctx.excludeRules, (Set) ctx.keepFieldSet) + [rawCount: page.size()]
                 ((Closure) ctx.pageConsumer).call(bundle)
             }
@@ -39,7 +39,7 @@ class OmsPageFetcherSeamTests {
     void fetchedPagesFlowThroughTheRestCountersSinkAndMetadata() {
         File out = File.createTempFile("seam-", ".json")
         try {
-            Map result = OmsRestSourceSupport.extractOrdersToFile(CONFIG, "2026-09-24T16:00:00Z", "2026-09-24T20:00:00Z",
+            Map result = OmsExtractSupport.extractOrdersToFile(CONFIG, "2026-09-24T16:00:00Z", "2026-09-24T20:00:00Z",
                     out, ["orderId", "externalId"], null, null, null, fetcherOf([
                     [raw("M1"), raw("M2", [orderItemAssocs: [[orderItemAssocTypeId: "EXCHANGE", toOrderId: "M0"]]])],
                     [raw("M3", [orderTypeId: "TRANSFER_ORDER"]), raw("M4")]]))
@@ -61,7 +61,7 @@ class OmsPageFetcherSeamTests {
         List seen = []
         File out = File.createTempFile("seam-", ".json")
         try {
-            OmsRestSourceSupport.extractOrdersToFile(CONFIG, "2026-09-24T16:00:00Z", "2026-09-24T20:00:00Z", out,
+            OmsExtractSupport.extractOrdersToFile(CONFIG, "2026-09-24T16:00:00Z", "2026-09-24T20:00:00Z", out,
                     ["orderId"], null, [[fieldExpression: "productStoreId", operator: "EXCLUDE_IN", filterValues: "X", sequenceNum: 1]],
                     null, fetcherOf([], seen))
             Map ctx = (Map) seen[0]
@@ -76,11 +76,11 @@ class OmsPageFetcherSeamTests {
         File out = File.createTempFile("seam-", ".json")
         out.delete()
         Closure failing = { Map ctx ->
-            ((Closure) ctx.pageConsumer).call(OmsRestSourceSupport.shapePageRecords([raw("M1")], null, null, null) + [rawCount: 1])
+            ((Closure) ctx.pageConsumer).call(OmsExtractSupport.shapePageRecords([raw("M1")], null, null, null) + [rawCount: 1])
             return [errors: ["OMS GraphQL extract failed [THROTTLED]: throttled"], statusCode: 200, attemptCount: 4,
                     pagination: [:], transport: "GRAPHQL"]
         }
-        Map result = OmsRestSourceSupport.extractOrdersToFile(CONFIG, "2026-09-24T16:00:00Z", "2026-09-24T20:00:00Z",
+        Map result = OmsExtractSupport.extractOrdersToFile(CONFIG, "2026-09-24T16:00:00Z", "2026-09-24T20:00:00Z",
                 out, null, null, null, null, failing)
         assertTrue(((List) result.errors)[0].toString().contains("THROTTLED"))
         assertEquals(false, result.dataAvailable)

@@ -1,6 +1,7 @@
 package darpan.hotwax.oms
 
 import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 
@@ -11,24 +12,23 @@ import static org.junit.jupiter.api.Assertions.assertNull
 import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
- * OMS connection diagnostics must separate "we cannot read our own stored secret" from "the remote
- * system rejected it" from "the orders path is wrong". The first case is the live production
- * failure — an apiToken that will not decrypt — and it must be caught before a socket is opened,
- * because a probe that starts at reachability reports it as a network problem.
+ * OMS connection diagnostics must separate "we cannot read our own stored secret" from "the remote system rejected it"
+ * from "the orders read is wrong". The first case is the live production failure — an apiToken that will not
+ * decrypt — and it must be caught before a socket is opened, because a probe that starts at reachability reports it as
+ * a network problem. The probe is one GraphQL `orders(first: 1)` query (DAR-BE-052: OMS is GraphQL only).
  */
 class OmsConnectionProbeTests {
 
     @AfterEach
-    void restoreHttpClient() {
-        OmsRestSourceSupport.resetHttpClient()
+    void restoreSender() {
+        OmsExtractSupport.probeSender = null
     }
 
     private static Map<String, Object> config(Map overrides = [:]) {
         return ([
-                baseUrl   : "https://oms.example.com",
-                ordersPath: "/rest/s1/oms/orders",
-                authType  : "BEARER",
-                apiToken  : "oms_secret_token",
+                baseUrl : "https://oms.example.com",
+                authType: "BEARER",
+                apiToken: "oms_secret_token",
         ] + overrides) as Map<String, Object>
     }
 
@@ -37,7 +37,8 @@ class OmsConnectionProbeTests {
     }
 
     private static String ordersBody(int count) {
-        return JsonOutput.toJson([orders: (1..<(count + 1)).collect { [orderId: "M${it}".toString()] }])
+        return JsonOutput.toJson([data: [orders: [edges: (1..<(count + 1)).collect { [node: [orderId: "M${it}".toString()]] }]],
+                                  errors: []])
     }
 
     private static Map<String, Object> checkFor(Map<String, Object> result, String key) {
@@ -47,44 +48,35 @@ class OmsConnectionProbeTests {
     }
 
     private static void assertStatus(Map<String, Object> result, String key, String expected) {
-        assertEquals(expected, checkFor(result, key).status,
-                "check '${key}' detail=${checkFor(result, key).detail}")
+        assertEquals(expected, checkFor(result, key).status, "check '${key}' detail=${checkFor(result, key).detail}")
     }
 
     @Test
     void healthyConnectionPassesEveryCheck() {
         List<Map> requests = []
-        OmsRestSourceSupport.setHttpClient { Map request ->
-            requests.add(request)
+        OmsExtractSupport.probeSender = { String url, Map headers, String body ->
+            requests.add([url: url, headers: headers, body: body])
             return response(200, ordersBody(1))
         }
 
-        Map<String, Object> result = OmsRestSourceSupport.probeConnection(config())
+        Map<String, Object> result = OmsExtractSupport.probeConnection(config())
 
         assertStatus(result, "credential", "PASS")
         assertStatus(result, "reachable", "PASS")
         assertStatus(result, "auth", "PASS")
         assertStatus(result, "ordersRead", "PASS")
-
         assertEquals(1, requests.size(), "the probe must issue exactly one request")
-        String url = requests[0].url as String
-        // Reuses the extractor's own URL construction, and asks for a single record.
-        assertTrue(url.startsWith("https://oms.example.com/rest/s1/oms/orders?"), url)
-        assertTrue(url.contains("pageSize=1"), url)
+        assertEquals("https://oms.example.com/rest/s1/graphql", requests[0].url)
         assertEquals("Bearer oms_secret_token", ((Map) requests[0].headers)["Authorization"])
-        // Operator-facing timeouts, not the extractor's bulk defaults.
-        assertEquals(OmsRestSourceSupport.PROBE_CONNECT_TIMEOUT_SECONDS, requests[0].connectTimeoutSeconds)
-        assertEquals(OmsRestSourceSupport.PROBE_READ_TIMEOUT_SECONDS, requests[0].readTimeoutSeconds)
+        assertEquals(OmsExtractSupport.PROBE_DOCUMENT, new JsonSlurper().parseText((String) requests[0].body).query)
     }
 
     @Test
     void undecryptableTokenFailsBeforeAnyNetworkCall() {
-        // The live production failure: entity_ds_crypt_pass cannot decrypt the stored apiToken, so
-        // buildHeaders never produces an Authorization header and no socket is ever opened.
         boolean called = false
-        OmsRestSourceSupport.setHttpClient { Map request -> called = true; return response(200, ordersBody(1)) }
+        OmsExtractSupport.probeSender = { String url, Map headers, String body -> called = true; response(200, ordersBody(1)) }
 
-        Map<String, Object> result = OmsRestSourceSupport.probeConnection(
+        Map<String, Object> result = OmsExtractSupport.probeConnection(
                 config([apiToken: null, credentialError: "The stored credentials could not be decrypted."]))
 
         assertFalse(called, "an unreadable credential must not produce an HTTP call")
@@ -99,9 +91,9 @@ class OmsConnectionProbeTests {
     @Test
     void missingTokenForBearerAuthIsACredentialFailure() {
         boolean called = false
-        OmsRestSourceSupport.setHttpClient { Map request -> called = true; return response(200, ordersBody(1)) }
+        OmsExtractSupport.probeSender = { String url, Map headers, String body -> called = true; response(200, ordersBody(1)) }
 
-        Map<String, Object> result = OmsRestSourceSupport.probeConnection(config([apiToken: null]))
+        Map<String, Object> result = OmsExtractSupport.probeConnection(config([apiToken: null]))
 
         assertFalse(called)
         assertStatus(result, "credential", "FAIL")
@@ -110,11 +102,12 @@ class OmsConnectionProbeTests {
 
     @Test
     void rejectedCredentialsKeepReachabilityPassing() {
-        OmsRestSourceSupport.setHttpClient { Map request -> response(401) }
+        OmsExtractSupport.probeSender = { String url, Map headers, String body ->
+            response(401, JsonOutput.toJson([errorCode: 401, errors: "User [No User] is not authorized"]))
+        }
 
-        Map<String, Object> result = OmsRestSourceSupport.probeConnection(config())
+        Map<String, Object> result = OmsExtractSupport.probeConnection(config())
 
-        // The host answered, so it is reachable — the credential is what failed.
         assertStatus(result, "reachable", "PASS")
         assertStatus(result, "auth", "FAIL")
         assertStatus(result, "ordersRead", "SKIP")
@@ -122,23 +115,36 @@ class OmsConnectionProbeTests {
     }
 
     @Test
-    void wrongOrdersPathFailsOnlyTheOrdersCheck() {
-        OmsRestSourceSupport.setHttpClient { Map request -> response(404) }
+    void aMissingGraphQlEndpointFailsOnlyTheOrdersCheck() {
+        OmsExtractSupport.probeSender = { String url, Map headers, String body -> response(404) }
 
-        Map<String, Object> result = OmsRestSourceSupport.probeConnection(config([ordersPath: "/rest/s1/oms/nope"]))
+        Map<String, Object> result = OmsExtractSupport.probeConnection(config())
 
         assertStatus(result, "reachable", "PASS")
         assertStatus(result, "auth", "PASS")
         assertStatus(result, "ordersRead", "FAIL")
-        assertTrue((checkFor(result, "ordersRead").detail as String).contains("orders path"))
+        assertTrue((checkFor(result, "ordersRead").detail as String).contains("GraphQL endpoint"))
+    }
+
+    @Test
+    void aGraphQlRefusalFailsTheOrdersCheckWithItsCode() {
+        OmsExtractSupport.probeSender = { String url, Map headers, String body ->
+            response(200, JsonOutput.toJson([data: null, errors: [[message: "nope", extensions: [code: "FORBIDDEN"]]]]))
+        }
+
+        Map<String, Object> result = OmsExtractSupport.probeConnection(config())
+
+        assertStatus(result, "auth", "PASS")
+        assertStatus(result, "ordersRead", "FAIL")
+        assertTrue((checkFor(result, "ordersRead").detail as String).contains("FORBIDDEN"))
     }
 
     @Test
     void htmlErrorPageWithHttp200IsNotHealthy() {
         // A login page or proxy interstitial answering 200 is the classic false-green.
-        OmsRestSourceSupport.setHttpClient { Map request -> response(200, "<html><body>Sign in</body></html>") }
+        OmsExtractSupport.probeSender = { String url, Map headers, String body -> response(200, "<html><body>Sign in</body></html>") }
 
-        Map<String, Object> result = OmsRestSourceSupport.probeConnection(config())
+        Map<String, Object> result = OmsExtractSupport.probeConnection(config())
 
         assertStatus(result, "auth", "PASS")
         assertStatus(result, "ordersRead", "FAIL")
@@ -147,9 +153,9 @@ class OmsConnectionProbeTests {
 
     @Test
     void unreachableHostSkipsAuthAndOrders() {
-        OmsRestSourceSupport.setHttpClient { Map request -> throw new java.net.UnknownHostException("oms.example.com") }
+        OmsExtractSupport.probeSender = { String url, Map headers, String body -> throw new java.net.UnknownHostException("oms.example.com") }
 
-        Map<String, Object> result = OmsRestSourceSupport.probeConnection(config())
+        Map<String, Object> result = OmsExtractSupport.probeConnection(config())
 
         assertStatus(result, "credential", "PASS")
         assertStatus(result, "reachable", "FAIL")
@@ -160,24 +166,22 @@ class OmsConnectionProbeTests {
     @Test
     void missingBaseUrlNeverReachesTheNetwork() {
         boolean called = false
-        OmsRestSourceSupport.setHttpClient { Map request -> called = true; return response(200, ordersBody(1)) }
+        OmsExtractSupport.probeSender = { String url, Map headers, String body -> called = true; response(200, ordersBody(1)) }
 
-        Map<String, Object> result = OmsRestSourceSupport.probeConnection(
-                config([baseUrl: null, authType: "NONE", apiToken: null]))
+        Map<String, Object> result = OmsExtractSupport.probeConnection(config([baseUrl: null, authType: "NONE", apiToken: null]))
 
         assertFalse(called)
         assertStatus(result, "reachable", "FAIL")
     }
 
     @Test
-    void emptyResultSetStillPasses() {
-        // An empty window is a healthy connection, not a broken one.
-        OmsRestSourceSupport.setHttpClient { Map request -> response(200, JsonOutput.toJson([orders: []])) }
+    void noOrdersYetStillPasses() {
+        OmsExtractSupport.probeSender = { String url, Map headers, String body -> response(200, ordersBody(0)) }
 
-        Map<String, Object> result = OmsRestSourceSupport.probeConnection(config())
+        Map<String, Object> result = OmsExtractSupport.probeConnection(config())
 
         assertStatus(result, "ordersRead", "PASS")
-        assertEquals("no orders in range", checkFor(result, "ordersRead").detail)
+        assertEquals("no orders yet", checkFor(result, "ordersRead").detail)
     }
 
     @Test
@@ -185,31 +189,43 @@ class OmsConnectionProbeTests {
         String secret = "oms_super_secret_token"
         List<Map<String, Object>> results = []
         [401, 404, 500].each { int statusCode ->
-            OmsRestSourceSupport.setHttpClient { Map request -> response(statusCode, "token ${secret} rejected") }
-            results.add(OmsRestSourceSupport.probeConnection(config([apiToken: secret])))
+            OmsExtractSupport.probeSender = { String url, Map headers, String body -> response(statusCode, "token ${secret} rejected") }
+            results.add(OmsExtractSupport.probeConnection(config([apiToken: secret])))
         }
-        OmsRestSourceSupport.setHttpClient { Map request -> response(200, "not json ${secret}") }
-        results.add(OmsRestSourceSupport.probeConnection(config([apiToken: secret])))
+        OmsExtractSupport.probeSender = { String url, Map headers, String body -> response(200, "not json ${secret}") }
+        results.add(OmsExtractSupport.probeConnection(config([apiToken: secret])))
 
         results.each { Map<String, Object> result ->
             String rendered = ((List<Map<String, Object>>) result.checks)*.detail.join(" | ")
             assertFalse(rendered.contains(secret), "a check detail leaked the stored token: ${rendered}")
         }
     }
+
+    @Test
+    void aThrottledAnswerIsNeverWaitedOnOrRetried() {
+        int calls = 0
+        OmsExtractSupport.probeSender = { String url, Map headers, String body ->
+            calls++
+            response(200, JsonOutput.toJson([data: null, errors: [[message: "throttled", extensions: [code: "THROTTLED"]]]]))
+        }
+
+        Map<String, Object> result = OmsExtractSupport.probeConnection(config())
+
+        assertEquals(1, calls, "an operator is watching: one call, no throttle wait")
+        assertStatus(result, "ordersRead", "FAIL")
+    }
+
     @Test
     void stagesRunOneAtATimeAndChainViaNextStage() {
         int calls = 0
-        OmsRestSourceSupport.setHttpClient { Map request -> calls++; return response(200, ordersBody(1)) }
+        OmsExtractSupport.probeSender = { String url, Map headers, String body -> calls++; response(200, ordersBody(1)) }
 
-        Map<String, Object> one = OmsRestSourceSupport.probeConnectionStage(config(),
-                OmsRestSourceSupport.PROBE_STAGE_FIRST)
+        Map<String, Object> one = OmsExtractSupport.probeConnectionStage(config(), OmsExtractSupport.PROBE_STAGE_FIRST)
         assertEquals(["credential"], ((List<Map>) one.checks)*.key)
         assertEquals("connect", one.nextStage)
         assertEquals(0, calls, "the credential stage must not touch the network")
 
-        // OMS has only two stages: one orders GET decides reachability, auth and the orders read
-        // together, and splitting it would mean issuing the same request twice for the same facts.
-        Map<String, Object> two = OmsRestSourceSupport.probeConnectionStage(config(), (String) one.nextStage)
+        Map<String, Object> two = OmsExtractSupport.probeConnectionStage(config(), (String) one.nextStage)
         assertEquals(["reachable", "auth", "ordersRead"], ((List<Map>) two.checks)*.key)
         assertNull(two.nextStage)
         assertEquals(1, calls)
@@ -218,11 +234,11 @@ class OmsConnectionProbeTests {
     @Test
     void anUnreadableCredentialEndsTheWalkAtStageOne() {
         boolean called = false
-        OmsRestSourceSupport.setHttpClient { Map request -> called = true; return response(200, ordersBody(1)) }
+        OmsExtractSupport.probeSender = { String url, Map headers, String body -> called = true; response(200, ordersBody(1)) }
 
-        Map<String, Object> result = OmsRestSourceSupport.probeConnectionStage(
+        Map<String, Object> result = OmsExtractSupport.probeConnectionStage(
                 config([apiToken: null, credentialError: "The stored credentials could not be decrypted."]),
-                OmsRestSourceSupport.PROBE_STAGE_FIRST)
+                OmsExtractSupport.PROBE_STAGE_FIRST)
 
         assertFalse(called)
         assertNull(result.nextStage, "no further stage can be meaningful")
@@ -232,13 +248,13 @@ class OmsConnectionProbeTests {
 
     @Test
     void walkingTheStagesMatchesRunningThemAllAtOnce() {
-        OmsRestSourceSupport.setHttpClient { Map request -> response(200, ordersBody(1)) }
-        Map<String, Object> oneShot = OmsRestSourceSupport.probeConnection(config())
+        OmsExtractSupport.probeSender = { String url, Map headers, String body -> response(200, ordersBody(1)) }
+        Map<String, Object> oneShot = OmsExtractSupport.probeConnection(config())
 
         List<Map> walked = []
-        String stage = OmsRestSourceSupport.PROBE_STAGE_FIRST
+        String stage = OmsExtractSupport.PROBE_STAGE_FIRST
         while (stage) {
-            Map<String, Object> step = OmsRestSourceSupport.probeConnectionStage(config(), stage)
+            Map<String, Object> step = OmsExtractSupport.probeConnectionStage(config(), stage)
             walked.addAll((List<Map>) step.checks)
             stage = (String) step.nextStage
         }

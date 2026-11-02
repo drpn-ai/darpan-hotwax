@@ -17,11 +17,11 @@ import groovy.json.JsonOutput
  *
  * What still varies per script, and is passed in: the endpoint the gate checks, the work-file prefix,
  * the extraction call itself, the file-name sanitiser, a post-extraction warning, and which sidecars to
- * write. Everything connector-specific stays in OmsRestSourceSupport / OmsReturnsSourceSupport.
+ * write. Everything connector-specific stays in OmsExtractSupport / OmsReturnsSourceSupport.
  */
 class OmsScriptServiceSupport {
     static final String CONFIG_ENTITY_NAME = "darpan.hotwax.HotWaxOmsRestSourceConfig"
-    static final String CONFIG_ID_REQUIRED = "OMS REST Source Config ID is required."
+    static final String CONFIG_ID_REQUIRED = "OMS source config ID is required."
     static final long PROGRESS_MIN_INTERVAL_MS = 2000L
 
     /**
@@ -45,10 +45,10 @@ class OmsScriptServiceSupport {
                 .useCache(false)
                 .one()
 
-        OmsRestSourceSupport.requireUsableOmsConfig(ec, sourceConfig, configIdValue, companyUserGroupIdValue, requiredSystemEnumId)
+        OmsExtractSupport.requireUsableOmsConfig(ec, sourceConfig, configIdValue, companyUserGroupIdValue, requiredSystemEnumId)
 
         if (sourceConfig && (sourceConfig.isActive ?: "Y").toString().equalsIgnoreCase("N")) {
-            ec.message.addError("OMS REST source config ${configIdValue} is inactive.")
+            ec.message.addError("OMS source config ${configIdValue} is inactive.")
         }
 
         if (ec.message.hasError()) {
@@ -112,7 +112,7 @@ class OmsScriptServiceSupport {
      *   extract (Closure, Map -> Map) — receives [sourceConfig, workFile, keepRecordFields,
      *       pageProgressListener, sourceFilters] (the two lists already narrowed to List-or-null) and
      *       returns the support class's extraction result;
-     *   safeFileName (Closure, optional) — defaults to OmsRestSourceSupport.safeFileName;
+     *   safeFileName (Closure, optional) — defaults to OmsExtractSupport.safeFileName;
      *   afterExtract (Closure, optional) — runs after the extraction outputs are set and before the
      *       error check, for a script's own warning (it reads and writes the script binding directly);
      *   excludedRecordsSidecar (boolean) — write what the source filters dropped beside the extract;
@@ -178,7 +178,7 @@ class OmsScriptServiceSupport {
             }
 
             Closure safeFileName = (spec.safeFileName instanceof Closure) ? (Closure) spec.safeFileName
-                    : { Object name -> OmsRestSourceSupport.safeFileName(name) }
+                    : { Object name -> OmsExtractSupport.safeFileName(name) }
             String outputFileName = safeFileName.call(context.get("fileName") ?: extraction.fileName)
             context.put("fileName", outputFileName)
             String fileLocation = DataManagerSupport.childLocation(outputBaseLocation, outputFileName)
@@ -222,7 +222,7 @@ class OmsScriptServiceSupport {
 
         File manifestWorkFile = null
         try {
-            String manifestFileName = OmsRestSourceSupport.exchangeManifestFileName(outputFileName)
+            String manifestFileName = OmsExtractSupport.exchangeManifestFileName(outputFileName)
             manifestWorkFile = outputDirectory != null
                     ? File.createTempFile("oms-exchange-manifest-", ".partial", outputDirectory)
                     : File.createTempFile("oms-exchange-manifest-", ".partial")

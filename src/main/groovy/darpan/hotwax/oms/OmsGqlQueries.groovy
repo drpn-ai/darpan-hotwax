@@ -94,7 +94,7 @@ class OmsGqlQueries {
                     "A filter or projection on a field the document does not carry would silently not apply " +
                     "(an exclusion filter on a missing field excludes nothing). Known fields: " +
                     "${(HEADER_FIELDS + DERIVED_FIELDS + NESTED_FIELDS.keySet()).sort()}. " +
-                    "Add the field to OmsGqlQueries or keep this rule set on the REST connector.")
+                    "Add the field to OmsGqlQueries.")
         }
         LinkedHashSet<String> scalars = new LinkedHashSet<String>(ALWAYS_FIELDS)
         wanted.findAll { HEADER_FIELDS.contains(it) }.each { scalars.add(it) }

@@ -12,14 +12,13 @@ import java.util.concurrent.atomic.AtomicInteger
  * The GraphQL page source for the ORDER-grain OMS extract (DAR-BE-064 spec D1-D4).
  *
  * Orders pages are buffered; every ASSOC_BATCH_ORDER_IDS orders (and at the end of a slice) one (paged)
- * orderItemAssocs EXCHANGE query covers the buffer, then the assembler, then the REST shaper — and the
- * bundle goes to REST's pageConsumer. A multi-day window runs as parallel day slices (DAR-BE-116: one call
+ * orderItemAssocs EXCHANGE query covers the buffer, then the assembler, then OmsExtractSupport's shaper — and the
+ * bundle goes to its pageConsumer. A multi-day window runs as parallel day slices (DAR-BE-116: one call
  * at a time, ~350 ms each, was the whole cost of a month-to-date audit read). Nothing about counting,
  * manifests, filters, projection or writing is re-implemented here.
  *
  * Non-sales orders are filtered SERVER-side (orderTypeId:SALES_ORDER in the search string), so
- * excludedNonSalesOrderCount reads 0 where REST counts them client-side; pagination records
- * orderTypeFilteredServerSide so the diff gate compares like with like.
+ * excludedNonSalesOrderCount reads 0; pagination records orderTypeFilteredServerSide.
  */
 class OmsGqlOrderPageSource {
 
@@ -47,7 +46,7 @@ class OmsGqlOrderPageSource {
         // Refuse what this transport cannot honour; silently ignoring any of these widens the extract.
         List<String> keys = (List<String>) ctx.lookupKeys
         if (!keys && (ctx.fromMillis == null || ctx.thruMillis == null)) {
-            return failed("The OMS GraphQL order extract requires a date window; status-only extracts stay on REST.")
+            return failed("The OMS order extract requires a date window.")
         }
         // DAR-BE-156: or by the Shopify order id (externalId), the key a Shopify-paired audit check compares HotWax by.
         String keyFilterField = ctx.lookupKeyField in [null, "orderId", "omsOrderId"] ? "orderId" : ctx.lookupKeyField == "externalId" ? "externalId" : null
@@ -55,7 +54,7 @@ class OmsGqlOrderPageSource {
             return failed("The OMS GraphQL order extract reads by orderId or externalId only, not '${ctx.lookupKeyField}'.")
         }
         if (extractOptions.orderStatusIds) {
-            return failed("orderStatusIds is not supported by the OMS GraphQL order extract; keep this rule set on REST.")
+            return failed("The OMS order extract cannot filter by order status (orderStatusIds); remove it from this rule set.")
         }
         String windowField = (extractOptions.windowFieldName as String)?.trim()
         if (windowField && windowField != "orderDate") {
@@ -63,8 +62,8 @@ class OmsGqlOrderPageSource {
         }
 
         // DAR-BE-116: ORDER_LINE_UNIT grain (the order-items extract) reads the order header and its ship groups,
-        // then the items in batches, and hands REST's flattener the same
-        // order shape REST does. Filters there are on UNIT fields, checked against what a unit carries.
+        // then the items in batches, and hands the unit flattener the assembled
+        // order shape. Filters there are on UNIT fields, checked against what a unit carries.
         boolean unitGrain = "ORDER_LINE_UNIT".equalsIgnoreCase((extractOptions.emitGrain as String)?.trim() ?: "")
         Object exclusionFlag = extractOptions.applyExchangeExclusion
         boolean exchangePass = !(exclusionFlag == false || (exclusionFlag as String)?.trim()?.toLowerCase() in ["false", "n"])
@@ -76,7 +75,7 @@ class OmsGqlOrderPageSource {
                 if (unknown) {
                     return failed("The OMS GraphQL order-items extract cannot filter on ${unknown}: its units do not carry " +
                             "them (the shared orders read selects neither salesChannelEnumId nor netsuiteOrderId, to keep the page " +
-                            "lean). Keep this rule set on REST.")
+                            "lean).")
                 }
                 // DAR-BE-129: the shared orders read's document, so a unit read and an order read share one read.
                 plan = OmsGqlQueries.sharedOrdersPlan()
@@ -90,7 +89,7 @@ class OmsGqlOrderPageSource {
         Closure consumer = (Closure) ctx.pageConsumer
         Closure pageConsumer = { Map bundle -> synchronized (pagination) { consumer.call(bundle) } }
         Map shared = [plan: plan, pageSize: new AtomicInteger((int) plan.pageSize), pages: new AtomicInteger(0),
-                      maxPages: OmsRestSourceSupport.MAX_ORDERS_PAGE_COUNT, pagination: pagination, pageConsumer: pageConsumer,
+                      maxPages: OmsExtractSupport.MAX_ORDERS_PAGE_COUNT, pagination: pagination, pageConsumer: pageConsumer,
                       ctx: ctx, extractOptions: extractOptions, unitGrain: unitGrain, exchangePass: exchangePass]
         try {
             if (keys) {
@@ -208,7 +207,7 @@ class OmsGqlOrderPageSource {
         int slotsFull = 0
         List<Map> batch = []
         Closure shapeBatch = {
-            Map bundle = OmsRestSourceSupport.shapePageRecords(batch, (Map) shared.extractOptions,
+            Map bundle = OmsExtractSupport.shapePageRecords(batch, (Map) shared.extractOptions,
                     (List<Map<String, Object>>) ctx.excludeRules, (Set<String>) ctx.keepFieldSet) + [rawCount: batch.size()]
             fetched += batch.size()
             slotsFull += batch.count { it.paymentPreferenceSlotsFull == true }
@@ -340,7 +339,7 @@ class OmsGqlOrderPageSource {
             ((Closure) shared.sink).call(assembled)
             return
         }
-        Map bundle = OmsRestSourceSupport.shapePageRecords(assembled, (Map) shared.extractOptions,
+        Map bundle = OmsExtractSupport.shapePageRecords(assembled, (Map) shared.extractOptions,
                 (List<Map<String, Object>>) ctx.excludeRules, (Set<String>) ctx.keepFieldSet) +
                 [rawCount: assembled.size()]
         synchronized (pagination) {

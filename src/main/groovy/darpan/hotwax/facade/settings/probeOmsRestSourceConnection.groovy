@@ -1,4 +1,4 @@
-import darpan.hotwax.oms.OmsRestSourceSupport
+import darpan.hotwax.oms.OmsExtractSupport
 
 /**
  * Connection diagnostics for a saved OMS REST source config.
@@ -20,7 +20,7 @@ nextStage = null
 
 String configIdValue = omsRestSourceConfigId?.toString()?.trim()
 if (!configIdValue) {
-    checks = [OmsRestSourceSupport.diagnosticsCheck("credential", "Configuration found", "FAIL",
+    checks = [OmsExtractSupport.diagnosticsCheck("credential", "Configuration found", "FAIL",
             "OMS REST Source Config ID is required.")]
     return
 }
@@ -32,20 +32,19 @@ def sourceConfig = ec.entity.find("darpan.hotwax.HotWaxOmsRestSourceConfig")
         .one()
 
 if (!sourceConfig) {
-    checks = [OmsRestSourceSupport.diagnosticsCheck("credential", "Configuration found", "FAIL",
+    checks = [OmsExtractSupport.diagnosticsCheck("credential", "Configuration found", "FAIL",
             "The configuration could not be loaded.")]
     return
 }
 
 if ((sourceConfig.isActive ?: "Y").toString().equalsIgnoreCase("N")) {
-    checks = [OmsRestSourceSupport.diagnosticsCheck("credential", "Configuration active", "FAIL",
+    checks = [OmsExtractSupport.diagnosticsCheck("credential", "Configuration active", "FAIL",
             "This configuration is marked inactive.")]
     return
 }
 
 Map probeConfig = [
         baseUrl              : sourceConfig.baseUrl,
-        ordersPath           : sourceConfig.ordersPath,
         authType             : sourceConfig.authType,
         headersJson          : sourceConfig.headersJson,
         connectTimeoutSeconds: sourceConfig.connectTimeoutSeconds,
@@ -61,7 +60,7 @@ try {
 
 String requestedStage = stage?.toString()?.trim()
 Map probeResult = requestedStage
-        ? OmsRestSourceSupport.probeConnectionStage(probeConfig, requestedStage)
-        : OmsRestSourceSupport.probeConnection(probeConfig)
+        ? OmsExtractSupport.probeConnectionStage(probeConfig, requestedStage)
+        : OmsExtractSupport.probeConnection(probeConfig)
 checks = probeResult.checks
 nextStage = probeResult.nextStage

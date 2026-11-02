@@ -1,7 +1,7 @@
 package darpan.hotwax.facade.settings
 
 import darpan.facade.common.TenantAccessSupport
-import darpan.hotwax.oms.OmsRestSourceSupport
+import darpan.hotwax.oms.OmsGqlClient
 import darpan.reconciliation.support.ReconciliationSmokeTestSupport
 import groovy.json.JsonSlurper
 import org.junit.jupiter.api.AfterAll
@@ -42,7 +42,7 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
         // SourceSystemConnector rows (SourceEndpointAccessSupport.listEndpointsForConfig), not just
         // from SourceConfigEndpointAccess decisions. Without this load the catalog is empty, so
         // isEndpointEnabled("OMS") is false for every config — not the "absent decision means
-        // enabled" default — and every extract#HotWaxOmsOrders call below is wrongly refused.
+        // enabled" default — and every extract#HotWaxOmsGqlOrders call below is wrongly refused.
         ReconciliationSmokeTestSupport.loadSeedData(ec, "component://darpan/data/SourceSystemConnectorSeedData.xml")
         ReconciliationSmokeTestSupport.seedCompanyScope(ec)
         seedPermissionGroup(TenantAccessSupport.DARPAN_COMPANY_VIEW_ONLY_GROUP_ID, "Can view tenant-scoped Darpan data but cannot mutate it")
@@ -70,7 +70,6 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
             omsRestSourceConfigId: "GORJANA_DELETE_HOTWAX",
             description          : "Delete HotWax",
             baseUrl              : "https://delete.hotwax.io",
-            ordersPath           : "/rest/s1/oms/orders",
             authType             : "NONE",
             timeZone             : "America/Chicago",
             connectTimeoutSeconds: 30,
@@ -105,13 +104,12 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
     @Test
     void automationExtractionUsesAutomationTenantWhenActiveTenantDiffers() {
         ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
-        OmsRestSourceSupport.setHttpClient { Map ignored ->
-            [statusCode: 200, body: '{"orders":[{"orderId":"O100","orderTypeId":"SALES_ORDER"}]}']
-        }
+        serveGqlOrders([[orderId: "O100", externalId: "E100", orderTypeId: "SALES_ORDER", statusId: "ORDER_APPROVED",
+                         orderDate: "2026-05-01T10:00:00Z", grandTotal: 10]], [])
 
         try {
             Map<String, Object> result = (Map<String, Object>) ec.service.sync()
-                .name("reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrders")
+                .name("reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsGqlOrders")
                 .parameters([
                     omsRestSourceConfigId: "KREWE_HOTWAX",
                     companyUserGroupId   : KREWE,
@@ -128,26 +126,23 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
             assertEquals(1, result.recordCount)
             assertTrue((result.fileLocation as String).contains("hotwax-automation-extraction-test"))
         } finally {
-            OmsRestSourceSupport.resetHttpClient()
+            GroovySystem.metaClassRegistry.removeMetaClass(OmsGqlClient)
         }
     }
 
     @Test
     void automationExtractionWritesExchangeManifestSidecarWhenWindowHasExchangeOrders() {
         ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
-        OmsRestSourceSupport.setHttpClient { Map ignored ->
-            [statusCode: 200, body: groovy.json.JsonOutput.toJson([orders: [
-                    [orderId: "O100", externalId: "E100", orderTypeId: "SALES_ORDER"],
-                    [orderId: "M750653", externalId: "6941645013123", orderName: "EXC-#GOR196990495-1",
-                            orderTypeId: "SALES_ORDER", statusId: "ORDER_COMPLETED", grandTotal: 50.0,
-                            orderDate: 1785260782199L,
-                            itemAssocs: [[orderItemAssocTypeId: "EXCHANGE", toOrderId: "M686331"]]],
-            ]])]
-        }
+        serveGqlOrders([
+                [orderId: "O100", externalId: "E100", orderTypeId: "SALES_ORDER", statusId: "ORDER_APPROVED",
+                 orderDate: "2026-05-01T10:00:00Z", grandTotal: 10],
+                [orderId: "M750653", externalId: "6941645013123", orderName: "EXC-#GOR196990495-1",
+                 orderTypeId: "SALES_ORDER", statusId: "ORDER_COMPLETED", grandTotal: 50.0, orderDate: "2026-05-01T11:00:00Z"],
+        ], [[orderId: "M750653", orderItemSeqId: "01", toOrderId: "M686331", toOrderItemSeqId: "01", orderItemAssocTypeId: "EXCHANGE"]])
 
         try {
             Map<String, Object> result = (Map<String, Object>) ec.service.sync()
-                .name("reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrders")
+                .name("reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsGqlOrders")
                 .parameters([
                     omsRestSourceConfigId: "KREWE_HOTWAX",
                     companyUserGroupId   : KREWE,
@@ -186,7 +181,7 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
             assertFalse(manifestDoc.truncated as boolean)
             assertEquals(result.fileName, manifestDoc.sourceFileName)
         } finally {
-            OmsRestSourceSupport.resetHttpClient()
+            GroovySystem.metaClassRegistry.removeMetaClass(OmsGqlClient)
         }
     }
 
@@ -217,7 +212,6 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
         Map<String, Object> plaintext = saveFacade([
             omsRestSourceConfigId: "GORJANA_SSRF_HTTP",
             baseUrl              : "http://oms.example.com",
-            ordersPath           : "/rest/s1/oms/orders",
             authType             : "NONE",
             timeZone             : "America/Chicago",
             connectTimeoutSeconds: 30,
@@ -233,7 +227,6 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
         Map<String, Object> metadataIp = saveFacade([
             omsRestSourceConfigId: "GORJANA_SSRF_METADATA",
             baseUrl              : "https://169.254.169.254/latest/meta-data",
-            ordersPath           : "/rest/s1/oms/orders",
             authType             : "NONE",
             timeZone             : "America/Chicago",
             connectTimeoutSeconds: 30,
@@ -253,7 +246,6 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
             description          : "Gorjana List",
             companyUserGroupId   : GORJANA,
             baseUrl              : "https://gorjana-list.hotwax.io",
-            ordersPath           : "/rest/s1/oms/orders",
             authType             : "NONE",
             isActive             : "Y",
             canReadOrders        : "Y",
@@ -265,7 +257,6 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
             description          : "Krewe Second",
             companyUserGroupId   : KREWE,
             baseUrl              : "https://krewe2.hotwax.io",
-            ordersPath           : "/rest/s1/oms/orders",
             authType             : "NONE",
             isActive             : "Y",
             canReadOrders        : "Y",
@@ -317,7 +308,6 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
             omsRestSourceConfigId: "GORJANA_BEARER_HOTWAX",
             description          : "Bearer One",
             baseUrl              : "https://bearer.hotwax.io",
-            ordersPath           : "/rest/s1/oms/orders",
             authType             : "BEARER",
             apiToken             : "tok-12345",
             timeZone             : "America/Chicago",
@@ -333,7 +323,6 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
             omsRestSourceConfigId: "GORJANA_BEARER_HOTWAX",
             description          : "Bearer One Updated",
             baseUrl              : "https://bearer.hotwax.io",
-            ordersPath           : "/rest/s1/oms/orders",
             authType             : "BEARER",
             timeZone             : "America/Chicago",
             connectTimeoutSeconds: 30,
@@ -350,7 +339,6 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
         Map<String, Object> rejected = saveFacade([
             omsRestSourceConfigId: "GORJANA_BEARER_MISSING",
             baseUrl              : "https://bearer2.hotwax.io",
-            ordersPath           : "/rest/s1/oms/orders",
             authType             : "BEARER",
             timeZone             : "America/Chicago",
             connectTimeoutSeconds: 30,
@@ -361,51 +349,6 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
         assertFalse((Boolean) rejected.ok)
         assertTrue((rejected.errors ?: []).join(" ").contains("API token is required for BEARER auth."))
         assertNull(findOne("GORJANA_BEARER_MISSING"))
-    }
-
-    @Test
-    void aSavedReturnsPageSizeSurvivesAnUpdateThatOmitsIt() {
-        // The OMS config form carries connectTimeoutSeconds/readTimeoutSeconds in its model but
-        // renders no input for them, so every client sends whatever it last loaded — and any client
-        // that does not know about returnsPageSize omits it entirely. Since save#HotWaxOmsRestSourceConfig
-        // writes a full row, an omitted value would silently reset the operator's page size to 500,
-        // which is precisely the setting they lowered to get past a gateway timeout.
-        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
-
-        Map<String, Object> created = saveFacade([
-            omsRestSourceConfigId: "GORJANA_PAGESIZE_HOTWAX",
-            description          : "Page Size One",
-            baseUrl              : "https://pagesize.hotwax.io",
-            ordersPath           : "/rest/s1/oms/orders",
-            authType             : "NONE",
-            timeZone             : "America/Chicago",
-            connectTimeoutSeconds: 30,
-            readTimeoutSeconds   : 60,
-            returnsPageSize      : 100,
-            isActive             : true,
-            canReadOrders        : true,
-        ])
-        assertTrue((Boolean) created.ok, created.errors?.toString())
-        assertEquals(100, findOne("GORJANA_PAGESIZE_HOTWAX").returnsPageSize as Integer)
-
-        ec.message.clearErrors()
-        Map<String, Object> updated = saveFacade([
-            omsRestSourceConfigId: "GORJANA_PAGESIZE_HOTWAX",
-            description          : "Page Size One Updated",
-            baseUrl              : "https://pagesize.hotwax.io",
-            ordersPath           : "/rest/s1/oms/orders",
-            authType             : "NONE",
-            timeZone             : "America/Chicago",
-            connectTimeoutSeconds: 30,
-            readTimeoutSeconds   : 60,
-            isActive             : true,
-            canReadOrders        : true,
-        ])
-        assertTrue((Boolean) updated.ok, updated.errors?.toString())
-        def stored = findOne("GORJANA_PAGESIZE_HOTWAX")
-        assertEquals("Page Size One Updated", stored.description)
-        assertEquals(100, stored.returnsPageSize as Integer,
-            "an update that omits returnsPageSize must keep the stored value, not reset it to the default")
     }
 
     @Test
@@ -420,7 +363,7 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
     @Test
     void extractionBlocksInactiveConfigAndAutomationTenantMismatch() {
         Map<String, Object> mismatch = (Map<String, Object>) ec.service.sync()
-            .name("reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrders")
+            .name("reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsGqlOrders")
             .parameters([
                 omsRestSourceConfigId: "KREWE_HOTWAX",
                 companyUserGroupId   : GORJANA,
@@ -431,7 +374,7 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
             .call()
         // DAR-BE-005 B1: a foreign automation tenant with no standing (not owner, not a peer) now
         // gets the same collapsed "not found" text as a nonexistent config id — see
-        // OmsRestSourceSupport.requireUsableOmsConfig's Javadoc for why the two messages merged.
+        // OmsExtractSupport.requireUsableOmsConfig's Javadoc for why the two messages merged.
         assertTrue((mismatch.errors ?: []).join(" ").contains("not found"))
         assertFalse(mismatch.dataAvailable as boolean)
         assertEquals(0, mismatch.recordCount)
@@ -445,7 +388,6 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
             description          : "Krewe Inactive",
             companyUserGroupId   : KREWE,
             baseUrl              : "https://krewe-inactive.hotwax.io",
-            ordersPath           : "/rest/s1/oms/orders",
             authType             : "NONE",
             isActive             : "N",
             canReadOrders        : "Y",
@@ -453,7 +395,7 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
             lastUpdatedDate      : TEST_FROM_DATE,
         ])
         Map<String, Object> inactive = (Map<String, Object>) ec.service.sync()
-            .name("reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrders")
+            .name("reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsGqlOrders")
             .parameters([
                 omsRestSourceConfigId: "KREWE_INACTIVE_HOTWAX",
                 companyUserGroupId   : KREWE,
@@ -465,6 +407,22 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
         assertTrue((inactive.errors ?: []).join(" ").contains("is inactive"))
         assertFalse(inactive.dataAvailable as boolean)
         assertEquals(0, inactive.recordCount)
+    }
+
+    /** Swaps OmsGqlClient's one-arg constructor (the one the scripts call) for a scripted sender: orders and their EXCHANGE assocs. */
+    private static void serveGqlOrders(List<Map> orders, List<Map> exchangeAssocs) {
+        Closure sender = { String url, Map headers, String body ->
+            String root = (JSON_SLURPER.parseText(body).query =~ /\{\s*(\w+)\(/)[0][1]
+            List nodes = root == "orders" ? orders : root == "orderItemAssocs" ? exchangeAssocs : []
+            return [statusCode: 200, body: groovy.json.JsonOutput.toJson([data: [(root): [edges: nodes.collect { [node: it] },
+                    pageInfo: [hasNextPage: false]]], errors: []])]
+        }
+        java.lang.reflect.Constructor ctor = OmsGqlClient.getConstructor(Map, Closure)
+        OmsGqlClient.metaClass.constructor = { Map config ->
+            OmsGqlClient c = (OmsGqlClient) ctor.newInstance(config, sender)
+            c.sleeper = { long ms -> }
+            return c
+        }
     }
 
     private Map<String, Object> listFacade(Map<String, Object> parameters) {
@@ -582,7 +540,6 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
             companyUserGroupId    : KREWE,
             createdByUserId       : TEST_USER_ID,
             baseUrl               : "https://krewe.hotwax.io",
-            ordersPath            : "/rest/s1/oms/orders",
             authType              : "NONE",
             connectTimeoutSeconds : 30,
             readTimeoutSeconds    : 60,

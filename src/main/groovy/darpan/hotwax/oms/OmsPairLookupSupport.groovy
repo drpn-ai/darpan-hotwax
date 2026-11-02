@@ -34,7 +34,7 @@ class OmsPairLookupSupport {
         if (ids.size() > PAIR_LOOKUP_MAX_IDS) return failure("OMS pair lookup requested ${ids.size()} ids, above the ${PAIR_LOOKUP_MAX_IDS}-id cap.")
         // The search string is `externalId:a,b`; an id carrying a separator would corrupt it.
         if (!ids.every { ASKABLE_ID.matcher(it).matches() }) return failure("Shopify order ids must be plain identifiers.")
-        Map<String, Object> config = OmsRestSourceSupport.toPlainMap(rawConfig)
+        Map<String, Object> config = OmsExtractSupport.toPlainMap(rawConfig)
         if (!config) return failure("OMS source config could not be read.")
         try {
             OmsGqlClient client = (OmsGqlClient) clientFactory.call(config)

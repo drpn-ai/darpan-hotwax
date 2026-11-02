@@ -1,7 +1,7 @@
 package darpan.hotwax.facade.settings
 
 import darpan.facade.common.TenantAccessSupport
-import darpan.hotwax.oms.OmsRestSourceSupport
+import darpan.hotwax.oms.OmsGqlClient
 import darpan.reconciliation.support.ReconciliationSmokeTestSupport
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.AfterEach
@@ -25,9 +25,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue
  * (the settings-list/save/delete facade). It never proved a peer tenant could actually RUN a
  * reconciliation against it — the extract/lookup scripts stayed strict owner-only, so a shared
  * config was visible and editable but every run against it from a peer tenant failed. This class
- * proves the fix ({@code OmsRestSourceSupport.requireUsableOmsConfig}, wired into
- * {@code extractOmsOrders.groovy} and its four siblings) by driving the real
- * {@code extract#HotWaxOmsOrders} service end to end through a fake HTTP client, for both standing
+ * proves the fix ({@code OmsExtractSupport.requireUsableOmsConfig}, wired into
+ * every OMS extract and lookup script) by driving the real
+ * {@code extract#HotWaxOmsGqlOrders} service end to end through a scripted GraphQL sender, for both standing
  * paths that script supports:
  *
  * <ul>
@@ -53,7 +53,16 @@ class OmsSharedConfigRuntimeAccessTests {
     private static final String MEMBER = "OMS_RUNTIME_MEMBER"
     private static final String STRANGER = "OMS_RUNTIME_STRANGER"
     private static final Timestamp TEST_FROM_DATE = Timestamp.valueOf("2026-05-01 00:00:00")
-    private static final String FAKE_ORDERS_BODY = '{"orders":[{"orderId":"O1","orderTypeId":"SALES_ORDER"}]}'
+    /** One sales order per orders page; no exchange associations. */
+    private static final Closure FAKE_GQL_SENDER = { String url, Map headers, String body ->
+        String root = (new groovy.json.JsonSlurper().parseText(body).query =~ /\{\s*(\w+)\(/)[0][1]
+        List nodes = root == "orders"
+                ? [[orderId: "O1", externalId: "SH-O1", orderTypeId: "SALES_ORDER", statusId: "ORDER_APPROVED",
+                    orderDate: "2026-05-01T10:00:00Z", grandTotal: 10]]
+                : []
+        return [statusCode: 200, body: groovy.json.JsonOutput.toJson([data: [(root): [edges: nodes.collect { [node: it] },
+                pageInfo: [hasNextPage: false]]], errors: []])]
+    }
 
     private ExecutionContext ec
 
@@ -65,7 +74,7 @@ class OmsSharedConfigRuntimeAccessTests {
         // SourceSystemConnector rows (SourceEndpointAccessSupport.listEndpointsForConfig), not just
         // from SourceConfigEndpointAccess decisions. Without this load the catalog is empty, so
         // isEndpointEnabled("OMS") is false for every config — not the "absent decision means
-        // enabled" default — and every extract#HotWaxOmsOrders call below is wrongly refused.
+        // enabled" default — and every extract#HotWaxOmsGqlOrders call below is wrongly refused.
         ReconciliationSmokeTestSupport.loadSeedData(ec, "component://darpan/data/SourceSystemConnectorSeedData.xml")
         ReconciliationSmokeTestSupport.seedCompanyScope(ec)
         seedTenant(OWNER, "Runtime Owner")
@@ -83,12 +92,17 @@ class OmsSharedConfigRuntimeAccessTests {
     void resetState() {
         ec.message.clearErrors()
         ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, OWNER)
-        OmsRestSourceSupport.setHttpClient { Map ignored -> [statusCode: 200, body: FAKE_ORDERS_BODY] }
+        java.lang.reflect.Constructor ctor = OmsGqlClient.getConstructor(Map, Closure)
+        OmsGqlClient.metaClass.constructor = { Map config ->
+            OmsGqlClient c = (OmsGqlClient) ctor.newInstance(config, FAKE_GQL_SENDER)
+            c.sleeper = { long ms -> }
+            return c
+        }
     }
 
     @AfterEach
-    void resetHttpClient() {
-        OmsRestSourceSupport.resetHttpClient()
+    void resetGqlClient() {
+        GroovySystem.metaClassRegistry.removeMetaClass(OmsGqlClient)
     }
 
     // --- automation path (explicit companyUserGroupId) -------------------
@@ -226,7 +240,7 @@ class OmsSharedConfigRuntimeAccessTests {
                 outputLocation: "runtime://tmp/oms-shared-config-runtime-access-test",
         ]
         return (Map<String, Object>) ec.service.sync()
-                .name("reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrders")
+                .name("reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsGqlOrders")
                 .parameters(base + parameters)
                 .disableAuthz()
                 .call()
@@ -256,7 +270,6 @@ class OmsSharedConfigRuntimeAccessTests {
                 companyUserGroupId   : OWNER,
                 createdByUserId      : TEST_USER_ID,
                 baseUrl              : "https://${configId.toLowerCase()}.hotwax.io".toString(),
-                ordersPath           : "/rest/s1/oms/orders",
                 authType             : "NONE",
                 connectTimeoutSeconds: 30,
                 readTimeoutSeconds   : 60,

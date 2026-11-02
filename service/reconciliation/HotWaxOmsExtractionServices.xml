@@ -2,9 +2,8 @@
 <services xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
         xsi:noNamespaceSchemaLocation="http://moqui.org/xsd/service-definition-3.xsd">
 
-    <service verb="extract" noun="HotWaxOmsOrders" type="script" transaction="ignore" allow-remote="false" authenticate="true"
-            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsOrders.groovy">
-        <description>Extract HotWax OMS orders for an automation window and write normalized JSON output to the automation data-manager folder.</description>
+    <service verb="extract" noun="HotWaxOmsOrdersContract" type="interface">
+        <description>The parameters every OMS order-grain extract takes (an interface: extract#HotWaxOmsGqlOrders, extract#HotWaxOmsGqlProducts implement it). Writes normalized JSON output to the automation data-manager folder.</description>
         <in-parameters>
             <parameter name="omsRestSourceConfigId" required="true">
                 <description>Tenant-owned HotWaxOmsRestSourceConfig identifier.</description>
@@ -80,12 +79,10 @@
 
     <service verb="extract" noun="HotWaxOmsGqlOrders" type="script" transaction="ignore" allow-remote="false" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsGqlOrders.groovy">
-        <description>Extract HotWax OMS sales orders at ORDER grain over the GraphQL endpoint (/rest/s1/graphql) instead
-            of /rest/s1/oms/orders. Same parameters, same output document, same exclusions, filters and
-            projection as extract#HotWaxOmsOrders: the REST pipeline runs unchanged over GraphQL pages
-            (OmsGqlOrderPageSource). Adds hasPaymentPreference / paymentMethodTypeIds for the presence OPP rule
+        <description>Extract HotWax OMS sales orders at ORDER grain over the GraphQL endpoint (/rest/s1/graphql), pages
+            from OmsGqlOrderPageSource shaped by OmsExtractSupport (exclusions, filters, projection). Adds hasPaymentPreference / paymentMethodTypeIds for the presence OPP rule
             (DAR-BE-064). A DISTINCT service name is required: the connector registry resolves rows by it.</description>
-        <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrders"/>
+        <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrdersContract"/>
         <in-parameters>
             <parameter name="lookupKeys" type="List">
                 <description>DAR-BE-120. Read only these orders by orderId, whatever their date, instead of the window: a
@@ -105,97 +102,15 @@
             NetSuite item internal id), HOTWAX-ONLY:productId when it has none, DUPLICATE:id:productId for every product after
             the first sharing one. Not windowed: windowStart/windowEnd are accepted and ignored (requestMetadata.windowIgnored).
             A DISTINCT service name is required: the connector registry resolves rows by it.</description>
-        <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrders"/>
+        <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrdersContract"/>
     </service>
 
-    <service verb="extract" noun="HotWaxOmsReconciliationOrders" type="script" transaction="ignore" allow-remote="false" authenticate="true"
-            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsReconciliationOrders.groovy">
-        <description>Extract HotWax OMS orders for an automation window from the purpose-built
-            /rest/s1/oms/reconciliationOrders endpoint, writing normalized JSON output to the
-            automation data-manager folder. Same in/out contract and same on-disk file shape as
-            extract#HotWaxOmsOrders, so the automation edge and the Spark compare stage are unchanged;
-            the endpoint differs in that it filters to comparison-eligible sales orders server-side,
-            projects to a fixed field set, honours pageSize, and reports hasMore/ordersCount instead
-            of leaving termination to be inferred.
-
-            A distinct service name from extract#HotWaxOmsOrders is required because the connector
-            registry resolves a connector row by its extract service name. Adoption is opt-in: a rule
-            set moves to this connector by pointing its source at sourceConfigType
-            HOTWAX_OMS_REST_RECON, against the same HotWaxOmsRestSourceConfig row.
-
-            GATING: the endpoint returns a fixed field set, so before enabling this connector for a
-            rule set, verify that rule set's join key and every field-comparison field fall inside
-            {orderId, externalId, orderName, grandTotal, orderDate, statusId}. A rule set needing any
-            other field must stay on extract#HotWaxOmsOrders.</description>
-        <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrders"/>
-        <!-- Same parameters as extract#HotWaxOmsOrders; only the descriptions restated below differ. -->
-        <in-parameters>
-            <parameter name="omsRestSourceConfigId">
-                <description>Tenant-owned HotWaxOmsRestSourceConfig identifier. Reuses the same OMS
-                    credentials and baseUrl as sales-order extraction; only the path differs, and the
-                    path is fixed by the extractor rather than read from the config's ordersPath.</description>
-            </parameter>
-            <parameter name="windowStart">
-                <description>Start of the automation window; accepts Timestamp, Date, ISO-8601 text, SQL timestamp text, or epoch milliseconds. Sent as the half-open lower bound orderDateFrom.</description>
-            </parameter>
-            <parameter name="windowEnd">
-                <description>End of the automation window, same accepted formats as windowStart. Sent
-                    as orderDateThru, which the endpoint treats as EXCLUSIVE — an order timestamped
-                    exactly at the bound belongs to the next window, so consecutive chunks do not
-                    double-count their boundary.</description>
-            </parameter>
-            <parameter name="fileName">
-                <description>Optional output file name. Defaults to oms-orders-{fromMillis}-{thruMillis}.json, matching the legacy extractor so saved-run file-side matching is unaffected.</description>
-            </parameter>
-            <parameter name="keepRecordFields">
-                <description>Optional projection: top-level record fields to keep in the output file.
-                    Normally a no-op here because the endpoint already projects server-side; retained
-                    so the parameter contract matches extract#HotWaxOmsOrders and so a caller asking
-                    for a narrower set than the endpoint's still gets it.</description>
-            </parameter>
-            <parameter name="sourceFilters">
-                <description>Optional record-exclusion rules, same semantics as extract#HotWaxOmsOrders.
-                    These stay client-side on this connector too: the endpoint has no knowledge of
-                    tenant exclusion rules, so matching runs in the extractor before output.</description>
-            </parameter>
-            <parameter name="reconciliationRunResultId">
-                <description>Optional observability run id for progress heartbeats. Advisory only.</description>
-            </parameter>
-            <parameter name="progressStageCode">
-                <description>Which extract stage this run is: EXTRACT_FILE1 or EXTRACT_FILE2. Defaults to EXTRACT_FILE2.</description>
-            </parameter>
-            <parameter name="expectedRecordCount">
-                <description>Optional expected total, which adds a progress percent alongside the count.</description>
-            </parameter>
-        </in-parameters>
-        <out-parameters>
-            <parameter name="exchangeManifestFileLocation">
-                <description>Location of the exchange-manifest sidecar written when the window
-                    contained exchange orders; null otherwise. Same shape and same 500-entry cap as
-                    the legacy extractor, but built from the endpoint's inline originalOrderId /
-                    originalExternalId fields, so it costs no pair-lookup round-trips.</description>
-            </parameter>
-        </out-parameters>
-    </service>
-
-    <service verb="extract" noun="HotWaxOmsReturns" type="script" transaction="ignore" allow-remote="false" authenticate="true"
-            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsReturns.groovy">
-        <description>Extract HotWax OMS returns for an automation window from /rest/s1/oms/reconciliationReturns,
-            writing normalized JSON output to the automation data-manager folder (DAR-BE-018).
-
-            New capability — Darpan did not reconcile returns before this service, so there is no legacy
-            path to preserve. Same {records, metadata} on-disk contract and the same automation-edge
-            in/out parameters as the orders extractors, so the automation executor, progress heartbeat
-            and Spark compare stage are unchanged.
-
-            Lines arrive nested inside their header as items[] and are written through nested (RQ-21);
-            do not flatten. The endpoint pre-excludes returns with no Shopify reference server-side and
-            reports that as excludedNoShopifyRefCount; tenant-configured exclusions (typically on
-            returnChannelEnumId) still run client-side here, on the population that survives.</description>
+    <service verb="extract" noun="HotWaxOmsReturnsContract" type="interface">
+        <description>The parameters every OMS returns extract takes (an interface: extract#HotWaxOmsGqlReturns implements it). Writes normalized JSON output to the automation data-manager folder.</description>
         <in-parameters>
             <parameter name="omsRestSourceConfigId" required="true">
-                <description>Tenant-owned HotWaxOmsRestSourceConfig identifier. Reuses the same OMS credentials
-                    and baseUrl as order extraction; the returns path is pinned by the extractor.</description>
+                <description>Tenant-owned HotWaxOmsRestSourceConfig identifier: the same OMS credentials and baseUrl
+                    as order extraction.</description>
             </parameter>
             <parameter name="automationExecutionId">
                 <description>Automation execution id used to choose the default data-manager output folder.</description>
@@ -204,10 +119,10 @@
                 <description>Trusted automation owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
             </parameter>
             <parameter name="windowStart" required="true">
-                <description>Start of the automation window; accepts Timestamp, Date, ISO-8601 text, SQL timestamp text, or epoch milliseconds. Sent as the half-open lower bound returnDateFrom, which filters on ReturnHeader.entryDate (RQ-22).</description>
+                <description>Start of the automation window; accepts Timestamp, Date, ISO-8601 text, SQL timestamp text, or epoch milliseconds. The half-open lower bound on entryDate.</description>
             </parameter>
             <parameter name="windowEnd" required="true">
-                <description>End of the automation window, same accepted formats. Sent as returnDateThru, which the endpoint treats as EXCLUSIVE, so consecutive chunks do not double-count their boundary.</description>
+                <description>End of the automation window, same accepted formats. Exclusive upper bound on entryDate, so consecutive chunks do not double-count their boundary.</description>
             </parameter>
             <parameter name="outputLocation">
                 <description>Optional output directory. Defaults to runtime://datamanager/reconciliation-runs/{automationExecutionId}/{timestamp}/.</description>
@@ -256,21 +171,12 @@
     <service verb="extract" noun="HotWaxOmsGqlReturns" type="script" transaction="ignore" allow-remote="false" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsGqlReturns.groovy">
         <description>Extract HotWax OMS returns for an automation window over the OMS GraphQL API (connector
-            OMS_RETURNS_GQL, DAR-BE-040 fix 3), writing the same {records, metadata} file as
-            extract#HotWaxOmsReturns.
-
-            Why it exists: /rest/s1/oms/reconciliationReturns serves REFUNDED returns only. Live on gorjana
-            2026-10-03 it returned none of the 268 RETURN_REQUESTED returns since Oct 1, so every pending
-            return Shopify reported read as missing in HotWax. GraphQL `returns` carries them.
-
-            Records are built to the REST record exactly — 110 settled returns matched REST on every field,
-            items included (tools/live-probes/OmsReturnsGqlParityProbe) — so a rule set moves between the two
-            connectors with no rule change. Like REST it excludes returns with no Shopify reference (counted
+            OMS_RETURNS_GQL, DAR-BE-040 fix 3), writing a {records, metadata} file. GraphQL `returns` carries every
+            return, pending ones included. It excludes returns with no Shopify reference (counted
             as excludedNoShopifyRefCount) and, by default, RETURN_CANCELLED (excludedCancelledCount), which
             the Shopify side suppresses (DAR-BE-027). Needs the OMS GraphQL upgrade (gorjana 2026-09-30); on an
             OMS without it the extract FAILS rather than returning an empty file.</description>
-        <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsReturns"/>
-        <!-- Same parameters as extract#HotWaxOmsReturns; only the descriptions restated below differ. -->
+        <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsReturnsContract"/>
         <in-parameters>
             <parameter name="lookupKeys" type="List">
                 <description>DAR-BE-119. Read only these records by key (returnId), whatever their date, instead of the
@@ -286,7 +192,7 @@
                 <description>End of the automation window, same accepted formats. Exclusive upper bound on entryDate, so consecutive chunks do not double-count their boundary.</description>
             </parameter>
             <parameter name="fileName">
-                <description>Optional output file name. Defaults to oms-returns-{fromMillis}-{thruMillis}.json, the REST extract's name, because the file is the same contract.</description>
+                <description>Optional output file name. Defaults to oms-returns-{fromMillis}-{thruMillis}.json.</description>
             </parameter>
             <parameter name="sourceFilters">
                 <description>Optional record-exclusion rules, same semantics as the order extractors. These
@@ -307,114 +213,22 @@
         </in-parameters>
     </service>
 
-    <service verb="extract" noun="HotWaxOmsTransferOrders" type="script" transaction="ignore" allow-remote="false" authenticate="true"
-            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsTransferOrders.groovy">
-        <description>Extract HotWax OMS transfer orders (orderTypeId=TRANSFER_ORDER) by date window and/or
-            status, writing normalized JSON output to the automation data-manager folder. Served by the same
-            /rest/s1/oms/orders endpoint as sales orders; the order type is a server-side query filter.
-            A distinct service name from extract#HotWaxOmsOrders is required because the connector registry
-            resolves a connector row by its extract service name.</description>
-        <in-parameters>
-            <parameter name="omsRestSourceConfigId" required="true">
-                <description>Tenant-owned HotWaxOmsRestSourceConfig identifier. Transfer-order extraction
-                    reuses the same OMS credentials as sales-order extraction.</description>
-            </parameter>
-            <parameter name="automationExecutionId">
-                <description>Automation execution id used to choose the default data-manager output folder.</description>
-            </parameter>
-            <parameter name="companyUserGroupId">
-                <description>Trusted automation owner tenant. When present, config access is checked against this tenant instead of a user-session active tenant.</description>
-            </parameter>
-            <parameter name="windowStart">
-                <description>Optional start of the extract window; accepts Timestamp, Date, ISO-8601 text,
-                    SQL timestamp text, or epoch milliseconds. Omit both bounds for a status-only extract;
-                    supplying one bound without the other is an error.</description>
-            </parameter>
-            <parameter name="windowEnd">
-                <description>Optional end of the extract window, same accepted formats as windowStart.</description>
-            </parameter>
-            <parameter name="windowFieldName">
-                <description>OrderHeader date field the window filters on. Defaults to orderDate. A transfer
-                    order's life spans create to receive, so a deployment that needs long-lived transfers to
-                    stay visible can point this at lastUpdatedTxStamp instead.</description>
-            </parameter>
-            <parameter name="orderStatusIds" type="List">
-                <parameter name="statusId"/>
-                <description>Optional statuses to include, sent to the OMS as a server-side IN filter.
-                    Required when no date window is supplied.</description>
-            </parameter>
-            <parameter name="outputLocation">
-                <description>Optional output directory. Defaults to runtime://datamanager/reconciliation-runs/{automationExecutionId}/{timestamp}/.</description>
-            </parameter>
-            <parameter name="fileName">
-                <description>Optional output file name.</description>
-            </parameter>
-            <parameter name="keepRecordFields" type="List">
-                <parameter name="fieldName"/>
-                <description>Optional projection: top-level record fields to keep in the output file.</description>
-            </parameter>
-            <parameter name="sourceFilters" type="List">
-                <parameter name="filterRule" type="Map">
-                    <parameter name="sequenceNum" type="Integer"/>
-                    <parameter name="fieldExpression"/>
-                    <parameter name="operator"/>
-                    <parameter name="filterValues"/>
-                </parameter>
-                <description>Optional record-exclusion rules, same semantics as extract#HotWaxOmsOrders.</description>
-            </parameter>
-            <parameter name="reconciliationRunResultId">
-                <description>Optional observability run id for progress heartbeats. Advisory only.</description>
-            </parameter>
-            <parameter name="progressStageCode">
-                <description>Which extract stage this run is: EXTRACT_FILE1 or EXTRACT_FILE2.</description>
-            </parameter>
-            <parameter name="expectedRecordCount" type="Integer">
-                <description>Optional expected total, which adds a progress percent alongside the count.</description>
-            </parameter>
-        </in-parameters>
-        <out-parameters>
-            <parameter name="dataAvailable" type="Boolean"/>
-            <parameter name="fileLocation"/>
-            <parameter name="fileName"/>
-            <parameter name="recordCount" type="Integer"/>
-            <parameter name="requestMetadata" type="Map"/>
-            <parameter name="warnings" type="List"/>
-            <parameter name="errors" type="List"/>
-        </out-parameters>
-    </service>
-
-    <service verb="extract" noun="HotWaxOmsOrderLineUnits" type="script" transaction="ignore" allow-remote="false" authenticate="true"
-            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsOrderLineUnits.groovy">
-        <description>Extract HotWax OMS order lines as ONE RECORD PER UNIT for the DAR-BE-050
-            Shopify-to-OMS unit presence pair, writing normalized JSON output to the automation
-            data-manager folder. Served by the same /rest/s1/oms/orders endpoint as sales orders;
-            the grain, not the endpoint, is what differs. A distinct service name from
-            extract#HotWaxOmsOrders is required because the connector registry resolves a connector
-            row by its extract service name.
+    <service verb="extract" noun="HotWaxOmsOrderUnitsContract" type="interface">
+        <description>The parameters every OMS unit-grain order extract takes (an interface: extract#HotWaxOmsGqlOrderItems implements it):
+            ONE RECORD PER UNIT, written as normalized JSON to the automation data-manager folder.
 
             WHY UNITS AND NOT LINES: OMS explodes a Shopify line of quantity N into N single-unit
             OrderItems for routing, and the Spark compare core is a left_anti join followed by
             .distinct() - set semantics. At line grain a line OMS imported SHORT still matches a
             complete Shopify line, so the pair reports clean on exactly the defect it exists to
-            find. Each record therefore carries a unitOrdinal, and the compare key is
-            (shopifyOrderId, shopifyLineId, unitOrdinal).
+            find. Each record therefore carries a unitOrdinal.
 
             NO keepRecordFields: the unit record IS the projection. Passing an order-shaped field
-            list would strip every field a unit record has and still report a successful extract.
-
-            THE EXCHANGE EXCLUSION IS KEPT, NOT INVERTED, and this is the thing most likely to be
-            "fixed" wrongly. It looks like an order-grain artefact - two OMS orders colliding on one
-            compare_id - and therefore looks safe to drop at item grain. Measured against gorjana
-            production: an OMS EXC- order's externalId names the ORIGINAL Shopify order (15 of 15
-            resolved), and Shopify adds the exchange line to that original's lineItems (12 of 12, by
-            set difference). That original may be months old, so a creation-windowed Shopify sweep
-            never includes it while OMS lands a new EXC- order inside the window. Inverting the
-            exclusion makes every exchange a false missing-in-Shopify, roughly 1 order in 9.
-            Exchange-line presence is a separate pair (DAR-BE-004).</description>
+            list would strip every field a unit record has and still report a successful extract.</description>
         <in-parameters>
             <parameter name="omsRestSourceConfigId" required="true">
-                <description>Tenant-owned HotWaxOmsRestSourceConfig identifier. Unit extraction reuses
-                    the same OMS credentials and baseUrl as sales-order extraction.</description>
+                <description>Tenant-owned HotWaxOmsRestSourceConfig identifier: the same OMS credentials and
+                    baseUrl as sales-order extraction.</description>
             </parameter>
             <parameter name="automationExecutionId">
                 <description>Automation execution id used to choose the default data-manager output folder.</description>
@@ -430,13 +244,13 @@
                 <description>End of the automation window, same accepted formats as windowStart.</description>
             </parameter>
             <parameter name="windowFieldName">
-                <description>OrderHeader date field the window filters on. Defaults to orderDate, which is
-                    what the Shopify side's created_at window matches. Changing one side only produces the
-                    DAR-BE-038 skew: structurally guaranteed false positives on every run.</description>
+                <description>Only orderDate (or empty), what the Shopify side's created_at window matches. Any
+                    other field is refused rather than ignored (DAR-BE-038 skew).</description>
             </parameter>
             <parameter name="orderStatusIds" type="List">
                 <parameter name="statusId"/>
-                <description>Optional statuses to include, sent to the OMS as a server-side IN filter.</description>
+                <description>Declared so a caller passing it is refused (the GraphQL order read cannot filter by
+                    status) rather than silently widened.</description>
             </parameter>
             <parameter name="outputLocation">
                 <description>Optional output directory. Defaults to runtime://datamanager/reconciliation-runs/{automationExecutionId}/{timestamp}/.</description>
@@ -481,69 +295,18 @@
         </out-parameters>
     </service>
 
-    <service verb="extract" noun="HotWaxOmsOrderItems" type="script" transaction="ignore" allow-remote="false" authenticate="true"
-            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsOrderItems.groovy">
-        <description>Tri-system order runs (spec 2026-09-30, D4). Extract HotWax OMS order items as ONE
-            RECORD PER UNIT for the OMS-to-NetSuite hops, writing normalized JSON output to the
-            automation data-manager folder. Same /rest/s1/oms/orders endpoint and the same flattener
-            as extract#HotWaxOmsOrderLineUnits; a distinct service name is required because the
-            connector registry resolves a connector row by its extract service name, and this one is
-            gated on the OMS_ORDER_ITEMS endpoint.
-
-            Each unit carries unitState (OPEN, COMPLETED, CANCELLED, OTHER) and stateOrdinal (1..k
-            within order, line and state), netsuiteOrderId (the NETSUITE_ORDER_ID identification, or
-            the literal NONE, because composite keys refuse a blank part), omsOrderStatusId and the
-            ship group's facilityId.
-
-            TWO DELIBERATE DIFFERENCES from extract#HotWaxOmsOrderLineUnits, which is why this is a
-            connector and not a filter (changing that service's defaults would change a shipped pair):
-            the exchange exclusion is OFF, because an EXC- order is a real OMS order that syncs to
-            NetSuite the same day and the exclusion exists only for Shopify's creation-window
-            asymmetry; and items with no Shopify order or line id are KEPT with that id null (counted
-            as keptNullShopifyIdCount), because the NetSuite hops key on the OMS order.
-
-            Source filters run per UNIT (D3), against the order's top-level fields overlaid by the
-            unit row, so unitState and item statusId can be filtered on.</description>
-        <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrderLineUnits"/>
-        <!-- Same parameters as extract#HotWaxOmsOrderLineUnits; only the descriptions restated below differ. -->
-        <in-parameters>
-            <parameter name="omsRestSourceConfigId">
-                <description>Tenant-owned HotWaxOmsRestSourceConfig identifier. Item extraction reuses
-                    the same OMS credentials and baseUrl as sales-order extraction.</description>
-            </parameter>
-            <parameter name="windowFieldName">
-                <description>OrderHeader date field the window filters on. Defaults to orderDate. Changing one
-                    side of a pair only produces the DAR-BE-038 skew: structurally guaranteed false
-                    positives on every run.</description>
-            </parameter>
-            <parameter name="sourceFilters">
-                <description>Optional include/exclude rules, same operators as extract#HotWaxOmsOrders,
-                    evaluated per UNIT against the order's top-level fields overlaid by the unit row (the
-                    unit wins on a shared name such as statusId). Per-rule counts are units.</description>
-            </parameter>
-        </in-parameters>
-        <out-parameters>
-            <parameter name="requestMetadata">
-                <description>Carries keptNullShopifyIdCount (items emitted with a null Shopify id),
-                    droppedNullLineIdCount (structurally zero here) and nonUnitQuantityCount beside the
-                    usual filter counts.</description>
-            </parameter>
-        </out-parameters>
-    </service>
-
     <service verb="extract" noun="HotWaxOmsGqlOrderItems" type="script" transaction="ignore" allow-remote="false" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsGqlOrderItems.groovy">
-        <description>DAR-BE-116. extract#HotWaxOmsOrderItems over GraphQL (every OMS read goes through GraphQL): the same
-            ONE RECORD PER UNIT, the same flattener, the same two deliberate differences from the Shopify-side line units
+        <description>DAR-BE-116. OMS order items over GraphQL (every OMS read goes through GraphQL): ONE RECORD PER
+            UNIT through OmsOrderLineUnitSupport's flattener, with two deliberate differences from the Shopify-side line units
             (exchange exclusion OFF, items without a Shopify id KEPT). Orders are read with their ship groups,
             the items by orderId in batches, each placed under its ship group; a multi-day window runs as
             parallel day slices on the endpoint's one cost bucket. A distinct service name because the connector registry
             resolves a connector row by its extract service name; this one is gated on the OMS_ORDER_ITEMS_GQL endpoint.
 
             NOT carried: salesChannelEnumId, which gorjana's GraphQL Order type does not have (SDL 2026-10-23). A source
-            filter on it is refused rather than ignored, so a run that concludes on the sales channel stays on
-            extract#HotWaxOmsOrderItems.</description>
-        <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrderLineUnits"/>
+            filter on it is refused rather than ignored.</description>
+        <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrderUnitsContract"/>
         <in-parameters>
             <parameter name="lookupKeys" type="List">
                 <description>DAR-BE-119. Read only these records by key (omsOrderId (the OMS orderId)), whatever their date, instead of the
@@ -648,8 +411,7 @@
 
     <service verb="lookup" noun="HotWaxOmsReturnsByExternalId" type="script" transaction="ignore" allow-remote="false" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/lookup/lookupOmsReturnsByExternalId.groovy">
-        <description>Point-existence check for OMS return ids against the reconciliation returns endpoint,
-            the missing-in-OMS mirror of Shopify's lookup#ShopifyRefundOrReturnIds. The saved-run verification
+        <description>Point-existence check for OMS return ids over GraphQL, the missing-in-OMS mirror of Shopify's lookup#ShopifyRefundOrReturnIds. The saved-run verification
             pass calls this to confirm or refute "missing in OMS" differences.
 
             Escapes the run window by construction: OMS windows on entryDate (when a return was CREATED)
@@ -657,14 +419,10 @@
             weeks before its refund sits inside one window and far outside the other. Measured 2026-08-20,
             that mismatch explained 45 of 59 remaining differences, median age 11 days.
 
-            The endpoint honours a CSV externalId filter, so ids are checked in batches, and every returned
-            record is echo-checked against the ids actually requested — a sibling filter (orderExternalId)
-            was proven to be silently ignored while still answering HTTP 200 with an unfiltered corpus.
-            A failed lookup returns ok=false with both id lists empty — it never classifies an id as missing.
-
-            Ids neither REST pass resolves get a GraphQL returnIdentifications(idValue:) pass (DAR-BE-040):
-            the REST endpoint serves refunded returns only, so a pending return is invisible to it. Ids the
-            GraphQL pass cannot check come back in unresolvedIds — unchecked, never confirmed missing.</description>
+            Three passes: returns by returnId, by externalId (the Shopify refund id), then
+            returnIdentifications(idValue:) for the Shopify return id. Ids are checked in batches and every
+            returned record is echo-checked against the ids actually requested. Ids a pass cannot check come back
+            in unresolvedIds — unchecked, never confirmed missing.</description>
         <in-parameters>
             <parameter name="omsRestSourceConfigId" required="true">
                 <description>Tenant-owned HotWaxOmsRestSourceConfig identifier.</description>

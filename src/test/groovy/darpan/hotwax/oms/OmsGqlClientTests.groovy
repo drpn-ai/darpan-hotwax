@@ -173,7 +173,7 @@ class OmsGqlClientTests {
         Map result = c.execute("query { orders { edges { node { orderId } } } }", null, 400)
         assertEquals([edges: []], ((Map) result.data).orders)
         assertEquals(2, c.callCount)
-        assertTrue(slept.contains((long) OmsRestSourceSupport.DEFAULT_PAGE_RETRY_BACKOFF_MILLIS), "backs off like the REST read: ${slept}")
+        assertTrue(slept.contains((long) OmsGqlClient.DEFAULT_PAGE_RETRY_BACKOFF_MILLIS), "backs off like the REST read: ${slept}")
     }
 
     @Test

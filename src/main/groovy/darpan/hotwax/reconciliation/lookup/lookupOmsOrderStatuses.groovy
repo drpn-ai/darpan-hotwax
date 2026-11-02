@@ -6,7 +6,7 @@ statusByOrderId = [:]
 missingIds = []
 errors = []
 
-Map gate = OmsScriptServiceSupport.gateConfig(ec, omsRestSourceConfigId, companyUserGroupId, "OMS")
+Map gate = OmsScriptServiceSupport.gateConfig(ec, omsRestSourceConfigId, companyUserGroupId, "OMS_GQL")
 if (!gate.usable) { errors = gate.errors; return }
 
 Map result = OmsOrderStatusLookupSupport.lookupOrderStatuses(gate.sourceConfig, (List) orderIds)

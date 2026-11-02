@@ -9,7 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertNull
 import static org.junit.jupiter.api.Assertions.assertThrows
 import static org.junit.jupiter.api.Assertions.assertTrue
 
-/** DAR-BE-064 Task 6. Driven end to end through OmsRestSourceSupport.extractOrdersToFile with a scripted client. */
+/** DAR-BE-064 Task 6. Driven end to end through OmsExtractSupport.extractOrdersToFile with a scripted client. */
 class OmsGqlOrderPageSourceTests {
 
     private static final Map CONFIG = [baseUrl: "https://x.test", authType: "NONE", omsRestSourceConfigId: "T1"]
@@ -48,7 +48,7 @@ class OmsGqlOrderPageSourceTests {
     }
 
     private static Map run(ScriptedClient client, File out, List keep = KEEP, List filters = null, Map options = null) {
-        return OmsRestSourceSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, keep, null, filters, options,
+        return OmsExtractSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, keep, null, filters, options,
                 OmsGqlOrderPageSource.fetcher(client))
     }
 
@@ -126,7 +126,7 @@ class OmsGqlOrderPageSourceTests {
         }
         File out = File.createTempFile("gql-", ".json")
         try {
-            Map result = OmsRestSourceSupport.extractOrdersToFile(CONFIG, "2026-09-21T07:00:00Z", "2026-09-24T07:00:00Z",
+            Map result = OmsExtractSupport.extractOrdersToFile(CONFIG, "2026-09-21T07:00:00Z", "2026-09-24T07:00:00Z",
                     out, KEEP, null, null, null, OmsGqlOrderPageSource.fetcher(client))
             assertEquals([], result.errors)
             List<Map> recs = (List<Map>) (new JsonSlurper().parse(out) as Map).records
@@ -155,7 +155,7 @@ class OmsGqlOrderPageSourceTests {
                 facilitiesPage(["STORE_1", "WH"])])
         File out = File.createTempFile("gql-", ".json")
         try {
-            Map result = OmsRestSourceSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, null, null, null, UNIT_OPTIONS,
+            Map result = OmsExtractSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, null, null, null, UNIT_OPTIONS,
                     OmsGqlOrderPageSource.fetcher(client, [lookupKeys: ["M1"]]))
             assertEquals([], result.errors)
             assertEquals(["M1"], ((List<Map>) (new JsonSlurper().parse(out) as Map).records)*.omsOrderId)
@@ -173,7 +173,7 @@ class OmsGqlOrderPageSourceTests {
         ScriptedClient client = new ScriptedClient([ordersPage([order("M1088731") + [externalId: "6678597828739"]], false)])
         File out = File.createTempFile("gql-", ".json")
         try {
-            Map result = OmsRestSourceSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, ["orderId", "externalId"], null, null,
+            Map result = OmsExtractSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, ["orderId", "externalId"], null, null,
                     [applyExchangeExclusion: false],
                     OmsGqlOrderPageSource.fetcher(client, [lookupKeys: ["6678597828739"], lookupKeyField: "externalId"]))
             assertEquals([], result.errors)
@@ -190,7 +190,7 @@ class OmsGqlOrderPageSourceTests {
         ScriptedClient client = new ScriptedClient([ordersPage([order("M1088731", opps) + [grandTotal: "371.54"]], false)])
         File out = File.createTempFile("gql-", ".json")
         try {
-            Map result = OmsRestSourceSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, ["orderId", "grandTotal", "paymentPreferences"],
+            Map result = OmsExtractSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, ["orderId", "grandTotal", "paymentPreferences"],
                     null, null, [applyExchangeExclusion: false], OmsGqlOrderPageSource.fetcher(client, [lookupKeys: ["M1088731"]]))
             assertEquals([], result.errors)
             Map record = ((List<Map>) (new JsonSlurper().parse(out) as Map).records)[0]
@@ -336,7 +336,7 @@ class OmsGqlOrderPageSourceTests {
             List futures = (0..1).collect { int i ->
                 pool.submit({ ->
                     both.countDown()
-                    OmsRestSourceSupport.extractOrdersToFile(config, FROM, THRU, outs[i], null, null, filters[i], UNIT_OPTIONS,
+                    OmsExtractSupport.extractOrdersToFile(config, FROM, THRU, outs[i], null, null, filters[i], UNIT_OPTIONS,
                             OmsGqlOrderPageSource.fetcher(client))
                 } as java.util.concurrent.Callable)
             }
@@ -381,10 +381,10 @@ class OmsGqlOrderPageSourceTests {
             List<String> keep = KEEP
             List futures = [
                     pool.submit({ -> both.countDown()
-                        OmsRestSourceSupport.extractOrdersToFile(CONFIG, FROM, THRU, outs[0], keep, null, null, null, OmsGqlOrderPageSource.fetcher(client))
+                        OmsExtractSupport.extractOrdersToFile(CONFIG, FROM, THRU, outs[0], keep, null, null, null, OmsGqlOrderPageSource.fetcher(client))
                     } as java.util.concurrent.Callable),
                     pool.submit({ -> both.countDown()
-                        OmsRestSourceSupport.extractOrdersToFile(CONFIG, FROM, THRU, outs[1], null, null, null, UNIT_OPTIONS, OmsGqlOrderPageSource.fetcher(client))
+                        OmsExtractSupport.extractOrdersToFile(CONFIG, FROM, THRU, outs[1], null, null, null, UNIT_OPTIONS, OmsGqlOrderPageSource.fetcher(client))
                     } as java.util.concurrent.Callable)]
             futures.each { assertEquals([], ((Map) it.get(10, java.util.concurrent.TimeUnit.SECONDS)).errors) }
             assertEquals(["exchange", "facilities", "items", "orders", "products"], asked.sort(), "the orders page is asked once for both")
@@ -563,7 +563,7 @@ class OmsGqlOrderPageSourceTests {
     private static void assertFailsClosed(List<Map> queued, String expected, Map config = CONFIG) {
         ScriptedClient client = new ScriptedClient(queued)
         File out = File.createTempFile("gql-", ".json"); out.delete()
-        Map result = OmsRestSourceSupport.extractOrdersToFile(config, FROM, THRU, out, KEEP, null, null, null,
+        Map result = OmsExtractSupport.extractOrdersToFile(config, FROM, THRU, out, KEEP, null, null, null,
                 OmsGqlOrderPageSource.fetcher(client))
         assertTrue(((List) result.errors).size() > 0, "expected an error, got a clean extract")
         assertTrue(((List) result.errors)[0].toString().contains(expected), ((List) result.errors)[0].toString())

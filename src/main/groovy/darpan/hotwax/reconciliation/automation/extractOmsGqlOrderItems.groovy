@@ -1,6 +1,6 @@
 import darpan.hotwax.oms.OmsGqlClient
 import darpan.hotwax.oms.OmsGqlOrderPageSource
-import darpan.hotwax.oms.OmsRestSourceSupport
+import darpan.hotwax.oms.OmsExtractSupport
 import darpan.hotwax.oms.OmsScriptServiceSupport
 
 // Service edge for OMS order items at UNIT grain over GraphQL (DAR-BE-116): the GraphQL twin of
@@ -23,9 +23,9 @@ OmsScriptServiceSupport.runExtract(ec, context, [
                     requireShopifyLineId  : false,
                     orderStatusIds        : (orderStatusIds instanceof List) ? (List) orderStatusIds : null,
             ]
-            OmsRestSourceSupport.extractOrdersToFile(a.sourceConfig, windowStart, windowEnd, a.workFile,
+            OmsExtractSupport.extractOrdersToFile(a.sourceConfig, windowStart, windowEnd, a.workFile,
                     null, a.pageProgressListener, a.sourceFilters, extractOptions,
-                    OmsGqlOrderPageSource.fetcher(new OmsGqlClient(OmsRestSourceSupport.toPlainMap(a.sourceConfig)),
+                    OmsGqlOrderPageSource.fetcher(new OmsGqlClient(OmsExtractSupport.toPlainMap(a.sourceConfig)),
                             // DAR-BE-119: an audit re-checking older open findings reads their orders by orderId.
                             [lookupKeys: (lookupKeys instanceof List) ? (List) lookupKeys : null, lookupKeyField: lookupKeyField]))
         },
