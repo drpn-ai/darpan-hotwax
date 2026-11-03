@@ -22,7 +22,7 @@ class OmsGqlReturnsConnectorWiringTests {
     }
 
     private static final String SEED = "../darpan/data/SourceSystemConnectorSeedData.xml"
-    private static final String FIELDS = "../darpan/data/SourceSystemConnectorFieldSeedData.xml"
+    private static final String FIELDS = "../darpan/data/SourceSystemConnectorSeedDataFields.xml"
     private static final String ENUMS = "../darpan/data/DarpanSystemSourceSeedData.xml"
     private static final String UPGRADE = "../darpan/data/upgrade-data.xml"
     private static final String SERVICES = "service/reconciliation/HotWaxOmsExtractionServices.xml"

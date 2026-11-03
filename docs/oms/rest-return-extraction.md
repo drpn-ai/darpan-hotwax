@@ -127,7 +127,7 @@ Semantics match the orders contract:
   with no request sent.
 
 **Which fields are offered.** The rules-board pills for `OMS_RETURNS` are its
-`SourceSystemConnectorField` rows (`darpan/data/SourceSystemConnectorFieldSeedData.xml`):
+`SourceSystemConnectorField` rows (`darpan/data/SourceSystemConnectorSeedDataFields.xml`):
 `returnId`, `shopifyReturnId`, `externalId`, `orderExternalId`, `statusId`, `entryDate`,
 `returnTotal`, `currencyUomId`, `returnChannelEnumId`. `returnChannelEnumId` is offered because
 the endpoint's server-side projection includes it, so a rule drawn on it sees a value. `items[]`

@@ -149,7 +149,7 @@ because a filter on a field the document never selected would exclude nothing.
 Registry row (`darpan/data/SourceSystemConnectorSeedData.xml`): `keepFieldsBase` and
 `pairLookupServiceName` are the same as `OMS`, so the pair lookup still uses REST
 (`lookup#HotWaxOmsOrdersByExternalId`). Rules-board pills
-(`SourceSystemConnectorFieldSeedData.xml`): Order ID, Order name, Shopify order ID, Order total,
+(`SourceSystemConnectorSeedDataFields.xml`): Order ID, Order name, Shopify order ID, Order total,
 Order date, Order status, Store (`productStoreId`), Has payment, Payment methods. There is no
 `salesChannelEnumId` pill: the deployed Order type does not expose it.
 
@@ -219,7 +219,7 @@ All in component `darpan`, `data/`:
 |---|---|
 | `DarpanSystemSourceSeedData.xml` | Enumerations `OMS_GQL` (code `HOTWAX_GQL`) and `OMS_RETURNS_GQL` (code `HOTWAX_GQL_RETURNS`), both under parent `OMS`. Required for the endpoint gate and the automation-source foreign key. |
 | `SourceSystemConnectorSeedData.xml` | The two `SourceSystemConnector` rows (`sendUrlTemplate={baseUrl}/rest/s1/graphql`). |
-| `SourceSystemConnectorFieldSeedData.xml` | Nine pills for `OMS_GQL`, ten for `OMS_RETURNS_GQL`. |
+| `SourceSystemConnectorSeedDataFields.xml` | Nine pills for `OMS_GQL`, ten for `OMS_RETURNS_GQL`. |
 | `upgrade-data.xml` | The same rows, copied verbatim, in the 2.0.0 delta. Loading them is inert until a rule set points at one of the new source types. |
 
 ## Tests

@@ -85,7 +85,7 @@ class OmsGqlConnectorWiringTests {
         assertTrue(read("src/main/groovy/darpan/hotwax/oms/OmsScriptServiceSupport.groovy").contains("ExcludedRecordsSidecar.writeBeside("))
     }
 
-    private static final String FIELDS = "../darpan/data/SourceSystemConnectorFieldSeedData.xml"
+    private static final String FIELDS = "../darpan/data/SourceSystemConnectorSeedDataFields.xml"
 
     @Test
     void omsGqlFieldPillsOfferOnlyFieldsTheDocumentCarries() {

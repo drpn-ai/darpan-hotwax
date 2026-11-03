@@ -23,7 +23,7 @@ class OmsGqlProductsConnectorWiringTests {
     }
 
     private static final String SEED = "../darpan/data/SourceSystemConnectorSeedData.xml"
-    private static final String FIELDS = "../darpan/data/SourceSystemConnectorFieldSeedData.xml"
+    private static final String FIELDS = "../darpan/data/SourceSystemConnectorSeedDataFields.xml"
     private static final String ENUMS = "../darpan/data/DarpanSystemSourceSeedData.xml"
     private static final String SERVICES = "service/reconciliation/HotWaxOmsExtractionServices.xml"
     private static final String SCRIPT = "src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsGqlProducts.groovy"
