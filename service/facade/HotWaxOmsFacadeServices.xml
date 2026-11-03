@@ -152,7 +152,8 @@
             access. Every call is logged for the tenant.</description>
         <in-parameters>
             <parameter name="omsRestSourceConfigId" required="true"/>
-            <parameter name="document" required="true"/>
+            <!-- Final review B2: a GraphQL document may carry < and > (string filters); it is forwarded, never rendered. -->
+            <parameter name="document" required="true" allow-html="any"/>
             <parameter name="variables" type="Map"/>
         </in-parameters>
         <out-parameters>

@@ -197,8 +197,45 @@ class OmsGqlClient {
         return send(JsonOutput.toJson(payload))
     }
 
+    /** Final review B3: an answer longer than the bounded sender's cap; the read stopped there. */
+    static class BodyTooLargeException extends IllegalStateException {
+        final long maxBytes
+        BodyTooLargeException(long maxBytes) {
+            super("The OMS answer is larger than ${maxBytes} bytes; the read was stopped.".toString())
+            this.maxBytes = maxBytes
+        }
+    }
+
+    /**
+     * Final review B3: the body as UTF-8 text, read at most {@code maxBytes} bytes; one byte more closes the stream
+     * and throws {@link BodyTooLargeException}, so an over-size answer is never held whole in memory.
+     */
+    static String readBounded(InputStream input, long maxBytes) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream((int) Math.min(maxBytes + 1, 64L * 1024))
+        byte[] buffer = new byte[16 * 1024]
+        long total = 0
+        try {
+            while (true) {
+                int n = input.read(buffer, 0, (int) Math.min((long) buffer.length, maxBytes + 1 - total))
+                if (n < 0) break
+                total += n
+                if (total > maxBytes) throw new BodyTooLargeException(maxBytes)
+                out.write(buffer, 0, n)
+            }
+        } finally {
+            input.close()
+        }
+        return new String(out.toByteArray(), StandardCharsets.UTF_8)
+    }
+
     /** The real HTTP sender: (url, headers, body) -> [statusCode, body]. */
-    static Closure httpSender(Map config) {
+    static Closure httpSender(Map config) { return httpSender(config, 0L) }
+
+    /**
+     * The real HTTP sender; with {@code maxBodyBytes} above 0 the answer is read bounded ({@link #readBounded}). The
+     * agent's fresh-query path uses the bound; extraction paths keep the plain sender.
+     */
+    static Closure httpSender(Map config, long maxBodyBytes) {
         HttpClient http = HttpClient.newBuilder().connectTimeout(
                 Duration.ofSeconds(((config?.connectTimeoutSeconds ?: 30) as Number).intValue())).build()
         int readTimeout = ((config?.readTimeoutSeconds ?: 120) as Number).intValue()
@@ -209,6 +246,10 @@ class OmsGqlClient {
                     .timeout(Duration.ofSeconds(readTimeout))
                     .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
             headers.each { k, v -> b.header(k as String, v as String) }
+            if (maxBodyBytes > 0) {
+                HttpResponse<InputStream> streamed = http.send(b.build(), HttpResponse.BodyHandlers.ofInputStream())
+                return [statusCode: streamed.statusCode(), body: readBounded(streamed.body(), maxBodyBytes)]
+            }
             HttpResponse<String> resp = http.send(b.build(), HttpResponse.BodyHandlers.ofString())
             return [statusCode: resp.statusCode(), body: resp.body()]
         }

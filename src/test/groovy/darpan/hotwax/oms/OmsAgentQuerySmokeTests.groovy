@@ -1,6 +1,7 @@
 package darpan.hotwax.oms
 
 import darpan.agent.AgentQueryLane
+import darpan.agent.AgentQuerySupport
 import darpan.facade.common.TenantAccessSupport
 import darpan.reconciliation.support.ReconciliationSmokeTestSupport
 import groovy.json.JsonOutput
@@ -218,6 +219,74 @@ class OmsAgentQuerySmokeTests {
         Map r = run(TENANT_A, "OMS_A", "query Bad { orders { edges { node { id } } } }")
         assertEquals("ERROR", r.code)
         assertFalse("${r.error}".contains(HOST))
+    }
+
+    @Test
+    void "final review B2: a document with less-than and angle brackets is forwarded, not refused as HTML"() {
+        String doc = 'query Lt { orders(filter: "grandTotal < 10 && <b>x</b>") { edges { node { id } } } }'
+        Map r = run(TENANT_A, "OMS_A", doc)
+        assertTrue(r.ok as boolean, "${r.errors}")
+        assertEquals(1, sent.size())
+        assertTrue((sent[0].body as String).contains("grandTotal < 10"), sent[0].body as String)
+    }
+
+    @Test
+    void "final review B3: an answer the sender cuts at the cap is refused with advice"() {
+        OmsAgentQuerySupport.senderFactory = { { String url, Map headers, String body ->
+            sent << [url: url, headers: headers, body: body]
+            throw new OmsGqlClient.BodyTooLargeException(AgentQuerySupport.MAX_BODY_BYTES)
+        } }
+        Map r = run(TENANT_A, "OMS_A", "query Big { orders { edges { node { id } } } }")
+        assertFalse(r.ok as boolean)
+        assertEquals("REFUSED", r.code)
+        assertTrue("${r.errors}".contains("larger than 5 MB; ask for fewer fields or a smaller"), "${r.errors}")
+    }
+
+    @Test
+    void "final review B3: only the agent query path reads the body bounded"() {
+        assertEquals(AgentQuerySupport.MAX_BODY_BYTES + OmsAgentQuerySupport.RAW_BODY_MARGIN_BYTES, OmsAgentQuerySupport.QUERY_MAX_RAW_BODY_BYTES)
+        assertEquals(0L, OmsAgentQuerySupport.SCHEMA_MAX_RAW_BODY_BYTES)
+    }
+
+    @Test
+    void "final review B8: the schema cache key carries the config stamp and a caller cannot poison the cached copy"() {
+        answer = { String body -> [statusCode: 200, body: JsonOutput.toJson([data: INTROSPECTION, errors: []])] }
+        Map first = schema(TENANT_A, "OMS_A")
+        assertTrue(first.ok as boolean, "${first.errors}")
+        (first.schema as Map).types.clear()                 // a caller scribbles on what it was given
+        Map second = schema(TENANT_A, "OMS_A")
+        assertEquals(1, sent.size(), "served from the cache")
+        assertFalse((second.schema as Map).types.isEmpty(), "the cached schema must be a copy")
+        (second.schema as Map).queryType = "Poisoned"
+        assertEquals("Query", (schema(TENANT_A, "OMS_A").schema as Map).queryType)
+        // an edited connection (new stamp) reads the schema again
+        def cfg = ec.entity.find("darpan.hotwax.HotWaxOmsRestSourceConfig").condition("omsRestSourceConfigId", "OMS_A")
+                .disableAuthz().useCache(false).one()
+        cfg.set("description", "OMS_A edited ${System.nanoTime()}".toString())
+        cfg.update()
+        assertTrue(schema(TENANT_A, "OMS_A").ok as boolean)
+        assertEquals(2, sent.size(), "an edited connection must not serve the old schema")
+    }
+
+    @Test
+    void "final review R25: a connection another tenant granted is refused for run and schema, the owner still works"() {
+        ec.entity.makeValue("darpan.auth.ConfigTenantAccess").setAll([configTypeEnumId: "SCFG_HOTWAX_OMS", configId: "OMS_B",
+                tenantUserGroupId: TENANT_A, fromDate: FROM]).createOrUpdate()
+        try {
+            Map r = run(TENANT_A, "OMS_B", "query Q { orders { edges { node { id } } } }")
+            assertFalse(r.ok as boolean)
+            assertEquals("REFUSED", r.code)
+            assertTrue("${r.errors}".contains(AgentQuerySupport.SHARED_CONNECTION_REFUSAL), "${r.errors}")
+            Map s = schema(TENANT_A, "OMS_B")
+            assertFalse(s.ok as boolean)
+            assertTrue("${s.errors}".contains(AgentQuerySupport.SHARED_CONNECTION_REFUSAL), "${s.errors}")
+            assertTrue(sent.isEmpty(), "nothing is sent on a granted connection")
+            assertTrue(run(TENANT_B, "OMS_B", "query Q { orders { edges { node { id } } } }").ok as boolean)
+            answer = { String body -> [statusCode: 200, body: JsonOutput.toJson([data: INTROSPECTION, errors: []])] }
+            assertTrue(schema(TENANT_B, "OMS_B").ok as boolean)
+        } finally {
+            ec.entity.find("darpan.auth.ConfigTenantAccess").condition("configId", "OMS_B").disableAuthz().deleteAll()
+        }
     }
 
     @Test

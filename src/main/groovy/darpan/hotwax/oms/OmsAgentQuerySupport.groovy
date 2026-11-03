@@ -5,6 +5,7 @@ import darpan.agent.GraphqlSchemaTrim
 import darpan.facade.common.TenantAccessSupport
 import darpan.datasource.GraphQlDocumentCheck
 import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
 
 import java.nio.charset.StandardCharsets
 
@@ -23,6 +24,13 @@ class OmsAgentQuerySupport {
     static final int CONNECT_TIMEOUT_SECONDS = 15
     static final int READ_TIMEOUT_SECONDS = 45
 
+    /** Final review B3: room for the {"data":...,"errors":[]} wrapper around a 5 MB answer. */
+    static final long RAW_BODY_MARGIN_BYTES = 64L * 1024
+    /** A fresh query's answer is read at most this far (an agent controls the document, e.g. orders(first: 50000)). */
+    static final long QUERY_MAX_RAW_BODY_BYTES = AgentQuerySupport.MAX_BODY_BYTES + RAW_BODY_MARGIN_BYTES
+    /** 0 = unbounded: the introspection document is Darpan's own, and a raw schema over 5 MB is trimmed, not refused. */
+    static final long SCHEMA_MAX_RAW_BODY_BYTES = 0L
+
     /** Test seam: () -> sender closure for OmsGqlClient (null = the real HTTP sender). */
     static Closure senderFactory = { null }
 
@@ -37,8 +45,9 @@ class OmsAgentQuerySupport {
             return null
         }
         Map variables = context.get("variables") instanceof Map ? new LinkedHashMap((Map) context.get("variables")) : null
-        Map gate = gateAndClient(ec, configId, meta)
+        Map gate = gateAndClient(ec, configId, meta, QUERY_MAX_RAW_BODY_BYTES)
         if (gate == null) return null
+        if (gate.refused) return (Map) gate.refused
         // The document check is last so a refusal is logged with the secrets already set on meta.
         String problem = AgentQuerySupport.checkGraphqlQuery(document)
         if (problem) return AgentQuerySupport.refuse(ec, meta, problem)
@@ -56,14 +65,18 @@ class OmsAgentQuerySupport {
     static Map getSchema(def ec, Map context) {
         String configId = context.get("omsRestSourceConfigId")?.toString()?.trim()
         Map meta = [systemEnumId: SYSTEM_ENUM_ID, connectionId: configId, queryText: "introspection (schema)"]
-        Map gate = gateAndClient(ec, configId, meta)
+        Map gate = gateAndClient(ec, configId, meta, SCHEMA_MAX_RAW_BODY_BYTES)
         if (gate == null) return null
+        if (gate.refused) return (Map) gate.refused
 
+        // The gate ran above, so a cache hit is never served to a caller who failed it. Final review B8 (as Shopify):
+        // the config's last-updated stamp is in the key, so an edited connection does not serve the old schema, and
+        // the cache holds its own copy, so a caller changing what it was given cannot change what the next one reads.
         def cache = ec.cache.getCache(CACHE_NAME)
-        String key = "OMS:${configId}".toString()
+        String key = "OMS:${configId}:${gate.stamp}".toString()
         Map cached = (Map) cache.get(key)
         if (cached != null && System.currentTimeMillis() - (cached.at as long) < SCHEMA_TTL_MILLIS) {
-            return unwrap([rows: [cached.schema], rowCount: 1, hasMore: false, truncated: false, durationMs: 0L])
+            return unwrap([rows: [copyOf((Map) cached.schema)], rowCount: 1, hasMore: false, truncated: false, durationMs: 0L])
         }
         // Introspection is allowed only here: the document check tells the only caller that wants it.
         List errors = (List) GraphQlDocumentCheck.check(GraphqlSchemaTrim.INTROSPECTION_QUERY, true).errors
@@ -76,27 +89,34 @@ class OmsAgentQuerySupport {
             return [rows: [trimmed], hasMore: false, offset: 0] as Map
         } as Closure<Map>)
         Map out = unwrap(answer)
-        if (out.rows) cache.put(key, [at: System.currentTimeMillis(), schema: ((List) out.rows)[0]])
+        if (out.rows) cache.put(key, [at: System.currentTimeMillis(), schema: copyOf((Map) ((List) out.rows)[0])])
         return out
     }
 
     // ---- shared plumbing ------------------------------------------------------------------------------------------
 
-    /** Gate, config and client: [client] or null with an error on ec. meta.secrets is set before anything that can fail. */
-    private static Map gateAndClient(def ec, String configId, Map meta) {
+    /**
+     * Gate, config and client: [client, stamp], [refused: the logged REFUSED answer], or null with an error on ec. meta.secrets is set before anything that
+     * can fail. maxRawBodyBytes above 0 reads the OMS answer bounded (final review B3); 0 reads it whole.
+     */
+    private static Map gateAndClient(def ec, String configId, Map meta, long maxRawBodyBytes) {
         String tenant = TenantAccessSupport.currentActiveTenantUserGroupId(ec)
         Map gate = OmsScriptServiceSupport.gateConfig(ec, configId, tenant, SYSTEM_ENUM_ID)
         if (!gate.usable) return null
         Map config = OmsExtractSupport.toPlainMap(gate.sourceConfig)
         meta.secrets = secretsOf(config)
+        // Final review R25: fresh queries and schema reads run only on the active tenant's own connection.
+        String notOwned = AgentQuerySupport.requireOwnedConnection(ec, config.companyUserGroupId)
+        if (notOwned) return [refused: AgentQuerySupport.refuse(ec, meta, notOwned)]
         config.connectTimeoutSeconds = Math.min(CONNECT_TIMEOUT_SECONDS, nonZero(config.connectTimeoutSeconds, CONNECT_TIMEOUT_SECONDS))
         config.readTimeoutSeconds = Math.min(READ_TIMEOUT_SECONDS, nonZero(config.readTimeoutSeconds, READ_TIMEOUT_SECONDS))
+        String stamp = gate.sourceConfig?.get("lastUpdatedStamp")?.toString() ?: ""
         try {
-            return [client: new OmsGqlClient(config, (Closure) senderFactory.call())]
+            Closure sender = (Closure) senderFactory.call()
+            if (sender == null && maxRawBodyBytes > 0) sender = OmsGqlClient.httpSender(config, maxRawBodyBytes)
+            return [client: new OmsGqlClient(config, sender), stamp: stamp]
         } catch (Exception e) {
-            AgentQuerySupport.refuse(ec, meta,
-                    AgentQuerySupport.strip("HotWax OMS connection '${configId}' cannot be used: ${e.message}".toString(), meta.secrets as List<String>))
-            return null
+            return [refused: AgentQuerySupport.refuse(ec, meta, "HotWax OMS connection '${configId}' cannot be used: ${e.message}".toString())]
         }
     }
 
@@ -106,14 +126,24 @@ class OmsAgentQuerySupport {
 
     /** One call, no retry or throttle wait: the 60 s wall clock bounds the whole thing. */
     private static Map singleAnswer(OmsGqlClient client, String document, Map variables, boolean capAnswer = true) {
-        Map result = client.executeOnce(document, variables)
+        Map result
+        try {
+            result = client.executeOnce(document, variables)
+        } catch (OmsGqlClient.BodyTooLargeException ignored) {
+            // Final review B3: the bounded sender stopped reading just past 5 MB.
+            throw new AgentQuerySupport.AgentQueryRefused(TOO_LARGE)
+        }
         Map data = result?.data instanceof Map ? (Map) result.data : [:]
         // A single 5 MB body cap; a JSON document cannot be cut partway, so an over-size answer is refused with advice.
         if (capAnswer && JsonOutput.toJson(data).getBytes(StandardCharsets.UTF_8).length > AgentQuerySupport.MAX_BODY_BYTES - 64) {
-            throw new AgentQuerySupport.AgentQueryRefused("The answer is larger than 5 MB; ask for fewer fields or a smaller 'first'.")
+            throw new AgentQuerySupport.AgentQueryRefused(TOO_LARGE)
         }
         return data
     }
+
+    static final String TOO_LARGE = "The answer is larger than 5 MB; ask for fewer fields or a smaller 'first'."
+
+    private static Map copyOf(Map m) { (Map) new JsonSlurper().parseText(JsonOutput.toJson(m)) }
 
     /** rows:[payload] becomes data/schema; rowCount is the edge count of the one top-level connection, else null. */
     private static Map unwrap(Map answer) {

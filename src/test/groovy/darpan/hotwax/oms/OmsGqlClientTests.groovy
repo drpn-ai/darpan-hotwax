@@ -205,4 +205,31 @@ class OmsGqlClientTests {
         assertEquals(1, c.callCount)
     }
 
+    /** Final review B3: an endless body, counting what was read from it. */
+    private static class EndlessStream extends InputStream {
+        long served = 0
+        boolean closed = false
+        @Override int read() { served++; return 'x' as char }
+        @Override int read(byte[] b, int off, int len) { Arrays.fill(b, off, off + len, (byte) 120); served += len; return len }
+        @Override void close() { closed = true }
+    }
+
+    @Test
+    void "final review B3: a bounded read stops just past the cap instead of holding the whole answer"() {
+        EndlessStream body = new EndlessStream()
+        long cap = 5L * 1024 * 1024
+        def e = assertThrows(OmsGqlClient.BodyTooLargeException) { OmsGqlClient.readBounded(body, cap) }
+        assertTrue(body.served <= cap + 64 * 1024, "read ${body.served} bytes for a ${cap}-byte cap")
+        assertTrue(body.closed, "the stream is closed so the connection stops")
+        assertEquals(cap, e.maxBytes)
+    }
+
+    @Test
+    void "final review B3: a bounded read under the cap returns the text"() {
+        String text = '{"data":{"orders":{"edges":[]}},"errors":[]}'
+        assertEquals(text, OmsGqlClient.readBounded(new ByteArrayInputStream(text.getBytes("UTF-8")), 1024))
+        assertThrows(OmsGqlClient.BodyTooLargeException) {
+            OmsGqlClient.readBounded(new ByteArrayInputStream(new byte[1025]), 1024)
+        }
+    }
 }
