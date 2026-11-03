@@ -71,8 +71,8 @@ class OmsAgentQuerySupport {
 
         final OmsGqlClient client = (OmsGqlClient) gate.client
         Map answer = AgentQuerySupport.run(ec, meta, {
-            Map data = singleAnswer(client, GraphqlSchemaTrim.INTROSPECTION_QUERY, null)
-            Map trimmed = GraphqlSchemaTrim.trim(data)
+            Map data = singleAnswer(client, GraphqlSchemaTrim.INTROSPECTION_QUERY, null, false)
+            Map trimmed = GraphqlSchemaTrim.trimWithinCap(data)
             return [rows: [trimmed], hasMore: false, offset: 0] as Map
         } as Closure<Map>)
         Map out = unwrap(answer)
@@ -105,11 +105,11 @@ class OmsAgentQuerySupport {
     }
 
     /** One call, no retry or throttle wait: the 60 s wall clock bounds the whole thing. */
-    private static Map singleAnswer(OmsGqlClient client, String document, Map variables) {
+    private static Map singleAnswer(OmsGqlClient client, String document, Map variables, boolean capAnswer = true) {
         Map result = client.executeOnce(document, variables)
         Map data = result?.data instanceof Map ? (Map) result.data : [:]
         // A single 5 MB body cap; a JSON document cannot be cut partway, so an over-size answer is refused with advice.
-        if (JsonOutput.toJson(data).getBytes(StandardCharsets.UTF_8).length > AgentQuerySupport.MAX_BODY_BYTES - 64) {
+        if (capAnswer && JsonOutput.toJson(data).getBytes(StandardCharsets.UTF_8).length > AgentQuerySupport.MAX_BODY_BYTES - 64) {
             throw new AgentQuerySupport.AgentQueryRefused("The answer is larger than 5 MB; ask for fewer fields or a smaller 'first'.")
         }
         return data
@@ -118,6 +118,7 @@ class OmsAgentQuerySupport {
     /** rows:[payload] becomes data/schema; rowCount is the edge count of the one top-level connection, else null. */
     private static Map unwrap(Map answer) {
         if (answer.error) return answer
+        if (!(answer.rows instanceof List) || ((List) answer.rows).isEmpty()) return [error: "The system returned no usable answer.", code: "ERROR"]
         Map payload = ((List) answer.rows)[0] as Map
         Map out = new LinkedHashMap(answer)
         out.schema = payload
