@@ -145,4 +145,67 @@
         </out-parameters>
     </service>
 
+    <service verb="run" noun="OmsGraphqlAgentQuery" allow-remote="true" authenticate="true">
+        <description>DAR-CLI-003. Runs one fresh, read-only GraphQL query a tenant user's agent wrote, through a HotWax OMS
+            connection the active tenant stores. One query only (no mutation, subscription or introspection); the answer
+            is returned as the OMS gave it, up to 5 MB; the connection's credentials are never returned. Needs run
+            access. Every call is logged for the tenant.</description>
+        <in-parameters>
+            <parameter name="omsRestSourceConfigId" required="true"/>
+            <parameter name="document" required="true"/>
+            <parameter name="variables" type="Map"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="errors" type="List"><parameter name="error"/></parameter>
+            <parameter name="data" type="Map"/>
+            <parameter name="rowCount" type="Integer"><description>The edge count when the answer is one connection, else blank.</description></parameter>
+            <parameter name="truncated" type="Boolean"/>
+            <parameter name="durationMs" type="Long"/>
+            <parameter name="code"/>
+            <parameter name="retryAfterSeconds" type="Integer"/>
+        </out-parameters>
+        <actions>
+            <set field="queryResult" from="darpan.hotwax.oms.OmsAgentQuerySupport.runAgentQuery(ec, context)"/>
+            <set field="data" from="queryResult?.data"/>
+            <set field="rowCount" from="queryResult?.rowCount"/>
+            <set field="truncated" from="queryResult?.truncated"/>
+            <set field="durationMs" from="queryResult?.durationMs"/>
+            <set field="code" from="queryResult?.code"/>
+            <set field="retryAfterSeconds" from="queryResult?.retryAfterSeconds"/>
+            <if condition="queryResult?.error">
+                <message error="true">${queryResult.error}</message>
+            </if>
+            <set field="ok" from="!ec.message.hasError()"/>
+            <set field="errors" from="ec.message.errors"/>
+        </actions>
+    </service>
+
+    <service verb="get" noun="OmsGraphqlSchema" authz-action="view" allow-remote="true" authenticate="true">
+        <description>DAR-CLI-003. The HotWax OMS GraphQL schema a tenant's agent can ask about, trimmed to the types reachable
+            from the Query root (names, kinds, fields, arguments, enum values and descriptions; mutations and subscriptions
+            left out). Read from the OMS once and kept 24 hours per connection. Needs view access.</description>
+        <in-parameters>
+            <parameter name="omsRestSourceConfigId" required="true"/>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="errors" type="List"><parameter name="error"/></parameter>
+            <parameter name="schema" type="Map"/>
+            <parameter name="code"/>
+            <parameter name="retryAfterSeconds" type="Integer"/>
+        </out-parameters>
+        <actions>
+            <set field="schemaResult" from="darpan.hotwax.oms.OmsAgentQuerySupport.getSchema(ec, context)"/>
+            <set field="schema" from="schemaResult?.schema"/>
+            <set field="code" from="schemaResult?.code"/>
+            <set field="retryAfterSeconds" from="schemaResult?.retryAfterSeconds"/>
+            <if condition="schemaResult?.error">
+                <message error="true">${schemaResult.error}</message>
+            </if>
+            <set field="ok" from="!ec.message.hasError()"/>
+            <set field="errors" from="ec.message.errors"/>
+        </actions>
+    </service>
+
 </services>
