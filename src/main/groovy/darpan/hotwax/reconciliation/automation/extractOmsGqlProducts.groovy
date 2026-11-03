@@ -11,7 +11,9 @@ OmsScriptServiceSupport.runExtract(ec, context, [
         workFilePrefix      : "oms-gql-products-extract-",
         excludedRecordsSidecar: true,
         extract             : { Map a ->
-            OmsGqlProductsPageSource.extractToFile(new OmsGqlClient(OmsExtractSupport.toPlainMap(a.sourceConfig)),
-                    (File) a.workFile, (List) a.sourceFilters)
+            OmsGqlClient client = new OmsGqlClient(OmsExtractSupport.toPlainMap(a.sourceConfig))
+            // DAR-BE-186: the conclusion brain asks for named products only (lookupKeys = productIds), never the catalogue.
+            (lookupKeys instanceof List) ? OmsGqlProductsPageSource.lookupToFile(client, (File) a.workFile, (List) lookupKeys)
+                    : OmsGqlProductsPageSource.extractToFile(client, (File) a.workFile, (List) a.sourceFilters)
         },
 ])

@@ -99,6 +99,44 @@ class OmsGqlProductsConnectorWiringTests {
         }
     }
 
+    // DAR-BE-186 (gorjana 2026-11-03): the brain asks whether an item's product is known to NetSuite. 10273 238-007-G-OLD has
+    // no NETSUITE_PRODUCT_ID; 10278 238-007-G carries 28792. A read by id asks for those ids only, never the catalogue.
+    @Test
+    void aLookupReadsTheNamedProductsAndTheirNetsuiteIdsOnly() {
+        List<String> queries = []
+        OmsGqlClient c = new OmsGqlClient([baseUrl: "https://gorjana-maarg.hotwax.io", authType: "BEARER", apiToken: "t"],
+                { String url, Map headers, String body ->
+                    queries << ((Map) new JsonSlurper().parseText(body)).variables.q
+                    String root = body.contains("goodIdentifications(") ? "goodIdentifications" : "products"
+                    List<Map> nodes = root == "products"
+                            ? [[productId: "10273", internalName: "238-007-G-OLD", productTypeId: "FINISHED_GOOD", isVirtual: "N"],
+                               [productId: "10278", internalName: "238-007-G", productTypeId: "FINISHED_GOOD", isVirtual: "N"]]
+                            : [[productId: "10278", idValue: "28792"]]
+                    return [statusCode: 200, body: JsonOutput.toJson([data: [(root): [edges: nodes.collect { [node: it] },
+                                                                                       pageInfo: [hasNextPage: false]]]])]
+                })
+        c.sleeper = { long ms -> }
+        File work = File.createTempFile("oms-gql-products-lookup-test-", ".json")
+        try {
+            Map extraction = OmsGqlProductsPageSource.lookupToFile(c, work, ["10273", "10278", "10273", " "])
+            assertEquals(["productId:10273,10278", "goodIdentificationTypeId:NETSUITE_PRODUCT_ID productId:10273,10278"], queries)
+            assertEquals(2, extraction.recordCount)
+            Map doc = (Map) new JsonSlurper().parse(work)
+            assertEquals([[productId: "10273", internalName: "238-007-G-OLD", productTypeId: "FINISHED_GOOD", netsuiteProductId: null],
+                          [productId: "10278", internalName: "238-007-G", productTypeId: "FINISHED_GOOD", netsuiteProductId: "28792"]], doc.records)
+            assertEquals(2, doc.metadata.lookupKeys)
+        } finally {
+            work.delete()
+        }
+    }
+
+    @Test
+    void theServiceDeclaresLookupKeysSoTheBrainMayAskIt() {
+        def svc = new XmlSlurper().parse(file(SERVICES)).'**'.find { it.name() == "service" && it.@noun == "HotWaxOmsGqlProducts" }
+        assertTrue(svc.'**'.any { it.name() == "parameter" && it.@name == "lookupKeys" },
+                "RunConclusionStep.fetchLookup refuses a connector whose extract does not declare lookupKeys")
+    }
+
     // Live run 2026-10-28: R22's FILE_2 rule (sellable EXCLUDE_IN N) never reached the extract, so a discontinued gift card
     // read as a finding. Exclusions are applied by the extractor, which reports every rule and keeps what it dropped.
     @Test

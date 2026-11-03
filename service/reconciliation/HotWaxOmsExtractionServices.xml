@@ -103,6 +103,15 @@
             the first sharing one. Not windowed: windowStart/windowEnd are accepted and ignored (requestMetadata.windowIgnored).
             A DISTINCT service name is required: the connector registry resolves rows by it.</description>
         <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrdersContract"/>
+        <in-parameters>
+            <parameter name="lookupKeys" type="List">
+                <description>DAR-BE-186. Read only these products by productId, whatever their state, each with its
+                    NETSUITE_PRODUCT_ID or none (the conclusion brain's productNetsuiteId question), instead of the catalogue.
+                    A product HotWax does not have is absent. Source filters do not apply.</description>
+                <parameter name="lookupKey"/>
+            </parameter>
+            <parameter name="lookupKeyField"><description>The record field lookupKeys are values of: productId.</description></parameter>
+        </in-parameters>
     </service>
 
     <service verb="extract" noun="HotWaxOmsReturnsContract" type="interface">
