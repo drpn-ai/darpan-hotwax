@@ -84,6 +84,73 @@ class OmsOrderStatusLookupTests {
         assertEquals(ids.size(), (result.missingIds as List).size())
     }
 
+    // DAR-BE-190. gorjana 2026-11-03 (live): M1160420 shipped from NetSuite (IF7451658, line 01) and item 01 is still
+    // ITEM_APPROVED in HotWax; GR1638399's shipped line 00101 is ITEM_COMPLETED while 00102 waits, so the ORDER reads
+    // ORDER_APPROVED although the fulfillment was imported. Only the item's status says which.
+    private static final List<Map> ITEMS = [
+            [orderId: "M1160420", orderItemSeqId: "01", statusId: "ITEM_APPROVED"],
+            [orderId: "GR1638399", orderItemSeqId: "00101", statusId: "ITEM_COMPLETED"],
+            [orderId: "GR1638399", orderItemSeqId: "00102", statusId: "ITEM_APPROVED"],
+            [orderId: "NOT_ASKED", orderItemSeqId: "01", statusId: "ITEM_COMPLETED"],
+    ]
+
+    private void omsItemsAnswer(int pageSize = 2) {
+        OmsOrderStatusLookupSupport.setClientFactory { Map config ->
+            OmsGqlClient c = new OmsGqlClient(config, { String url, Map headers, String body ->
+                Map payload = (Map) new JsonSlurper().parseText(body)
+                requests.add(payload)
+                Map vars = (Map) payload.variables
+                String q = vars.q as String
+                Set<String> ids = q.substring(q.indexOf(':') + 1).split(",") as Set
+                // An ignored filter would answer with every item; NOT_ASKED stands for that. Paged by cursor.
+                List<Map> all = ITEMS.findAll { ids.contains(it.orderId) || it.orderId == "NOT_ASKED" }
+                int from = vars.after ? (vars.after as int) : 0
+                List<Map> page = all.drop(from).take(pageSize)
+                boolean more = from + pageSize < all.size()
+                return [statusCode: 200, body: JsonOutput.toJson([data: [orderItems: [
+                        edges: page.collect { [node: it] }, pageInfo: [hasNextPage: more, endCursor: more ? "${from + pageSize}" : null]]],
+                        errors: []])]
+            })
+            c.sleeper = { long ms -> }
+            return c
+        }
+    }
+
+    @Test
+    void eachItemComesBackWithItsStatusKeyedByOrderAndSeqAndAnOrderWithNoItemsIsMissing() {
+        omsItemsAnswer()
+
+        Map result = OmsOrderStatusLookupSupport.lookupOrderItemStatuses(CONFIG, ["M1160420", "GR1638399", "M999999"])
+
+        assertTrue(result.ok as Boolean)
+        assertEquals(["M1160420|01": "ITEM_APPROVED", "GR1638399|00101": "ITEM_COMPLETED", "GR1638399|00102": "ITEM_APPROVED"],
+                result.itemStatusByKey, "every page is read, and an item of an order not asked for is dropped")
+        assertEquals(["M999999"], result.missingIds, "an order HotWax returns no item for is reported, never guessed")
+        assertTrue(requests[0].query.toString().contains("orderItems"))
+        assertTrue(requests[0].query.toString().contains("orderItemSeqId"))
+        assertTrue(((Map) requests[0].variables).q.toString().startsWith("orderId:"))
+    }
+
+    @Test
+    void itemsAreAskedInChunksOfOrdersAndAFailedCallClassifiesNothing() {
+        omsItemsAnswer(100)
+        List<String> ids = (1..(OmsOrderStatusLookupSupport.ITEMS_ID_CHUNK + 1)).collect { "M${100000 + it}".toString() }
+        Map result = OmsOrderStatusLookupSupport.lookupOrderItemStatuses(CONFIG, ids)
+        assertEquals(2, requests.size())
+        assertEquals(ids.size(), (result.missingIds as List).size())
+
+        OmsOrderStatusLookupSupport.setClientFactory { Map config ->
+            OmsGqlClient c = new OmsGqlClient(config, { String url, Map headers, String body -> [statusCode: 500, body: "boom"] })
+            c.sleeper = { long ms -> }
+            return c
+        }
+        Map failed = OmsOrderStatusLookupSupport.lookupOrderItemStatuses(CONFIG, ["M1160420"])
+        assertFalse(failed.ok as Boolean)
+        assertEquals([:], failed.itemStatusByKey)
+        assertEquals([], failed.missingIds)
+        assertFalse(OmsOrderStatusLookupSupport.lookupOrderItemStatuses(CONFIG, ["M1,M2"]).ok as Boolean)
+    }
+
     @Test
     void anIdThatWouldCorruptTheSearchIsRefusedAndAFailedCallClassifiesNothing() {
         Map refused = OmsOrderStatusLookupSupport.lookupOrderStatuses(CONFIG, ["145059,144314"])

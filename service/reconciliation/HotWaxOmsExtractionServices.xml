@@ -409,10 +409,16 @@
                 <description>Trusted run owner tenant; when present, config access is checked against it
                     instead of a user-session active tenant.</description>
             </parameter>
+            <parameter name="withItems" type="Boolean" default="false">
+                <description>DAR-BE-190. Ask each order's items instead of the order: itemStatusByKey is filled
+                    and statusByOrderId stays empty; missingIds are the orders HotWax returned no item for.</description>
+            </parameter>
         </in-parameters>
         <out-parameters>
             <parameter name="ok" type="Boolean"/>
             <parameter name="statusByOrderId" type="Map"><description>OMS order id -> statusId.</description></parameter>
+            <parameter name="itemStatusByKey" type="Map"><description>DAR-BE-190, withItems: "orderId|orderItemSeqId" ->
+                the item's statusId.</description></parameter>
             <parameter name="missingIds" type="List"><description>Ids HotWax has no order for.</description></parameter>
             <parameter name="errors" type="List"/>
         </out-parameters>

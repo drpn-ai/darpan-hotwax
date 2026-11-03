@@ -15,6 +15,7 @@ import static darpan.common.ValueSupport.normalize
 class OmsOrderStatusLookupSupport {
 
     static final int ID_CHUNK = OmsGqlQueries.ORDER_STATUSES_ID_CHUNK
+    static final int ITEMS_ID_CHUNK = OmsGqlQueries.ORDER_ITEMS_ID_CHUNK
     private static final Pattern ASKABLE_ID = Pattern.compile('^[A-Za-z0-9_\\-]+$')
 
     private static final Closure DEFAULT_CLIENT_FACTORY = { Map config -> new OmsGqlClient(config) }
@@ -52,6 +53,43 @@ class OmsOrderStatusLookupSupport {
             return [ok: true, statusByOrderId: statusByOrderId, missingIds: ids.findAll { !statusByOrderId.containsKey(it) }, errors: []]
         } catch (Exception e) {
             return [ok: false, statusByOrderId: [:], missingIds: [], errors: ["OMS order status lookup failed: ${e.message}".toString()]]
+        }
+    }
+
+    /** Key of one item in itemStatusByKey: the OMS order id and the item's seq id. */
+    static String itemKey(Object orderId, Object orderItemSeqId) {
+        return "${normalize(orderId)}|${normalize(orderItemSeqId)}".toString()
+    }
+
+    /**
+     * DAR-BE-190. Returns [ok, itemStatusByKey: itemKey(orderId, seq) -> statusId, missingIds (orders HotWax returned no
+     * item for), errors]. Same guarantees as lookupOrderStatuses: only asked orders count, and a failed call classifies
+     * nothing.
+     */
+    static Map<String, Object> lookupOrderItemStatuses(Object rawConfig, Collection orderIds) {
+        List<String> ids = (orderIds ?: []).collect { normalize(it) }.findAll { it }.unique()
+        if (!ids) return [ok: true, itemStatusByKey: [:], missingIds: [], errors: []]
+        if (!ids.every { ASKABLE_ID.matcher(it).matches() }) {
+            return [ok: false, itemStatusByKey: [:], missingIds: [], errors: ["OMS order ids must be plain identifiers."]]
+        }
+        Map<String, Object> config = OmsExtractSupport.toPlainMap(rawConfig)
+        if (!config) return [ok: false, itemStatusByKey: [:], missingIds: [], errors: ["OMS source config could not be read."]]
+        try {
+            OmsGqlClient client = (OmsGqlClient) clientFactory.call(config)
+            Set<String> requested = new HashSet<String>(ids)
+            Map<String, String> itemStatusByKey = [:]
+            Set<String> answered = new HashSet<String>()
+            OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.orderItemStatusesDocument(), "orderItems", "orderId", ids,
+                    ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.ORDER_ITEMS_RESERVATION, [lookupCalls: 0])
+                    .each { Map n ->
+                        String orderId = normalize(n.orderId)
+                        if (!orderId || !requested.contains(orderId) || !normalize(n.orderItemSeqId)) return
+                        answered.add(orderId)
+                        itemStatusByKey.put(itemKey(orderId, n.orderItemSeqId), normalize(n.statusId))
+                    }
+            return [ok: true, itemStatusByKey: itemStatusByKey, missingIds: ids.findAll { !answered.contains(it) }, errors: []]
+        } catch (Exception e) {
+            return [ok: false, itemStatusByKey: [:], missingIds: [], errors: ["OMS order item status lookup failed: ${e.message}".toString()]]
         }
     }
 }

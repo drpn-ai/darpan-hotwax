@@ -359,6 +359,20 @@ class OmsGqlQueries {
 }'''
     }
 
+    /**
+     * DAR-BE-190. Each item's status by OMS order id: the NetSuite sales order lines NetSuite shipped, asked of HotWax
+     * line by line (an order stays approved while another line waits, so the order's status cannot say a shipped
+     * line was imported). Three scalars, sized like ORDER_ITEMS.
+     */
+    static String orderItemStatusesDocument() {
+        return '''query OmsOrderItemStatuses($q: String, $first: Int, $after: String) {
+  orderItems(query: $q, first: $first, after: $after) {
+    edges { node { orderId orderItemSeqId statusId } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
     static String orderItemExternalIdsDocument() {
         return '''query OmsOrderItemExternalIds($q: String, $first: Int, $after: String) {
   orderItems(query: $q, first: $first, after: $after) {
