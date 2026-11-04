@@ -231,7 +231,14 @@ class OmsGqlReturnsDataDefinitionTests {
         Map returns = ((List<Map>) d.steps)[0]
         assertEquals(OmsGqlQueries.RETURNS_PAGE_SIZE, ((Map) returns.paging).pageSize)
         assertEquals(OmsGqlQueries.RETURNS_RESERVATION, returns.reservation)
-        assertEquals([], DataDefinedExtract.optionMismatch(d, connectorOptions()))
+        // DAR-BE-192: withReturnCredit (each refunded payment once, summed) is coded only; expressing it needs a distinct-by
+        // step the definition language lacks (DAR-BE-176 follow-up). optionMismatch is also the run-time guard, so a run
+        // switched to this DRAFT definition is refused rather than read without credits. Exactly that one gap, nothing else.
+        assertEquals(["The definition's options [includeReturnsWithoutShopifyRef, onlyCancelledReturns] are not the connector's " +
+                "[includeReturnsWithoutShopifyRef, onlyCancelledReturns, withReturnCredit] (each a boolean)."],
+                DataDefinedExtract.optionMismatch(d, connectorOptions()))
+        List codedBoth = ((List) new groovy.json.JsonSlurper().parseText(connectorOptions())).findAll { it.name != "withReturnCredit" }
+        assertEquals([], DataDefinedExtract.optionMismatch(d, groovy.json.JsonOutput.toJson(codedBoth)))
     }
 
     @Test

@@ -55,6 +55,8 @@ class OmsGqlReturnsPageSource {
         Map shared = [pageSize: new AtomicInteger(OmsGqlQueries.RETURNS_PAGE_SIZE), pages: new AtomicInteger(0),
                       maxPages: OmsReturnsSourceSupport.MAX_RETURNS_PAGE_COUNT, pagination: pagination, serverCounts: serverCounts,
                       onlyCancelled: onlyCancelled, keepNoShopifyRef: keepNoShopifyRef,
+                      // DAR-BE-192: the credit HotWax gives each return (returnCredit), only when a run asks for it.
+                      withReturnCredit: ctx.withReturnCredit == true,
                       pageConsumer: { List<Map> records -> synchronized (pagination) { consumer.call(records) } }]
         Closure<String> scoped = { String filter -> onlyCancelled ? "statusId:RETURN_CANCELLED ${filter}".toString() : filter }
         try {
@@ -92,7 +94,8 @@ class OmsGqlReturnsPageSource {
         Map pagination = (Map) shared.pagination
         Map serverCounts = (Map) shared.serverCounts
         boolean keepNoShopifyRef = shared.keepNoShopifyRef == true
-        String key = "returns|${client.readScope}|${slices.first()[0]}|${slices.last()[1]}".toString()
+        // DAR-BE-192: a read with credits builds different records, so it never shares a read without them.
+        String key = "returns|${client.readScope}|${slices.first()[0]}|${slices.last()[1]}${shared.withReturnCredit ? '|credit' : ''}".toString()
         List<Map> batch = []
         // DAR-BE-129: followed, so the returns reach the extract's consumer (and the run's progress) as they are read.
         Map read = OmsGqlSharedRead.follow(key, { Closure emit ->
@@ -164,14 +167,14 @@ class OmsGqlReturnsPageSource {
         }
         OmsGqlOrderPageSource.pageSlice(client, shared, OmsGqlQueries.returnsDocument(), OmsGqlQueries.RETURNS_RESERVATION, "returns",
                 filter, RETURNS_BATCH, keep) { List<Map> batch ->
-            List<Map> built = buildPage(client, batch, pagination)
+            List<Map> built = buildPage(client, batch, pagination, shared.withReturnCredit == true)
             if (sink != null) built.eachWithIndex { Map r, int i -> sink.call(r + [(SHARED_VERDICT): batch[i].get(SHARED_VERDICT)]) }
             else ((Closure) shared.pageConsumer).call(built)
         }
     }
 
     /** All lookups for one page, then the records. Throws on any lookup failure — the page is never half-built. */
-    private static List<Map> buildPage(OmsGqlClient client, List<Map> kept, Map pagination) {
+    private static List<Map> buildPage(OmsGqlClient client, List<Map> kept, Map pagination, boolean withReturnCredit = false) {
         List<String> returnIds = kept.collect { it.returnId as String }
         List<Map> items = fetchByIds(client, OmsGqlQueries.returnItemsDocument(), "returnItems", "returnId", returnIds,
                 OmsGqlQueries.RETURN_ITEMS_ID_CHUNK, OmsGqlQueries.RETURN_ITEMS_PAGE_SIZE, OmsGqlQueries.RETURN_ITEMS_RESERVATION, pagination)
@@ -216,6 +219,7 @@ class OmsGqlReturnsPageSource {
                        orderGrandTotals: orderGrandTotals, exchangeChains: exchangeChains(client, items, pagination),
                        orderItemExternalIds: orderItemExternalIds, productNames: productNames,
                        productNetsuiteIds: productNetsuiteIds]
+        if (withReturnCredit) lookups.returnCredits = returnCredits(client, returnIds, pagination)
         return kept.collect { Map n -> OmsGqlReturnAssembler.build(n, itemsByReturn[n.returnId as String] ?: [], lookups) }
     }
 
@@ -257,6 +261,14 @@ class OmsGqlReturnsPageSource {
             [(returnId): [exchangeOrderId: orderId, exchangeOrderName: o?.orderName, exchangeOrderNetsuiteId: netsuiteOrderId(o),
                           openReturnOnOrderId: open?.returnId, openReturnOnOrderStatus: open?.statusId]]
         }
+    }
+
+    /** DAR-BE-192: returnId -> the credit HotWax gives the return (OmsGqlReturnAssembler.creditOf its responses). */
+    private static Map<String, BigDecimal> returnCredits(OmsGqlClient client, List<String> returnIds, Map pagination) {
+        if (!returnIds) return [:]
+        return fetchByIds(client, OmsGqlQueries.returnCreditsDocument(), "returns", "returnId", returnIds,
+                OmsGqlQueries.RETURN_CREDITS_CHUNK, OmsGqlQueries.RETURN_CREDITS_CHUNK, OmsGqlQueries.RETURN_CREDITS_RESERVATION, pagination)
+                .collectEntries { Map n -> [(n.returnId as String): OmsGqlReturnAssembler.creditOf((List<Map>) n.responses)] }
     }
 
     /** DAR-BE-129: product id -> internalName (the SKU), cached per read scope. Shared with the order-items read. */

@@ -283,6 +283,23 @@ class OmsGqlQueries {
     static final int RETURN_RESPONSES_CHUNK = 50
     static final int RETURN_RESPONSES_RESERVATION = 400
 
+    /**
+     * DAR-BE-192 (Aditi 2026-11-04: "HotWax credit is the truth"): the payments a return's responses refund, so the read
+     * can say what credit HotWax gave the return. Asked only when a run sets withReturnCredit.
+     */
+    static String returnCreditsDocument() {
+        return '''query OmsReturnCredits($q: String, $first: Int, $after: String) {
+  returns(query: $q, first: $first, after: $after) {
+    edges { node { returnId responses(first: 6) { orderPaymentPreferenceId paymentPreference { statusId maxAmount } } } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
+    // Nested paymentPreference under six responses: kept to 20 returns a page; COST_EXCEEDED halves the page anyway.
+    static final int RETURN_CREDITS_CHUNK = 20
+    static final int RETURN_CREDITS_RESERVATION = 600
+
     static String returnItemsDocument() {
         return '''query OmsReturnItems($q: String, $first: Int, $after: String) {
   returnItems(query: $q, first: $first, after: $after) {

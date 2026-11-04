@@ -137,6 +137,11 @@ class OmsGqlReturnAssembler {
         String warrantyId = activeIdentification(node, "AFTSHIP_WTY_RMA_ID")
         if (warrantyId) record.warrantyId = warrantyId
         record.returnTotal = number(total)
+        // DAR-BE-192: the credit HotWax gave the return, which its NetSuite credit memo must carry (Aditi 2026-11-04: "HotWax
+        // credit is the truth"); 0 when nothing was refunded. Only when the run asked for credits (withReturnCredit).
+        if (lookups?.containsKey("returnCredits")) {
+            record.returnCredit = number(((Map) lookups.returnCredits).get(node.returnId as String) ?: BigDecimal.ZERO)
+        }
         record.currencyUomId = node.currencyUomId
         record.returnChannelEnumId = node.returnChannelEnumId
         // DAR-BE-094 R8: who the return is from (DISCONTINUED on gorjana's discontinued-stock returns). Filterable only,
@@ -144,6 +149,22 @@ class OmsGqlReturnAssembler {
         record.fromPartyId = normalize(node.fromPartyId)
         record.items = builtItems
         return record
+    }
+
+    /**
+     * DAR-BE-192. The credit HotWax gives a return: the payments its responses refund (PAYMENT_REFUNDED), each payment
+     * once however many responses name it (gorjana M246344: two responses, one 60.00 credit), summed. A response that
+     * points at the replacement's SETTLED credit (M249948) is the same credit spent, not more of it.
+     */
+    static BigDecimal creditOf(List<Map> responses) {
+        Map<String, BigDecimal> byPayment = [:]
+        (responses ?: []).findAll { it != null }.eachWithIndex { Map r, int i ->
+            Map p = (Map) r.paymentPreference
+            if (p?.statusId != "PAYMENT_REFUNDED") return
+            String id = normalize(r.orderPaymentPreferenceId) ?: "#${i}".toString()
+            byPayment.putIfAbsent(id, decimal(p.maxAmount))
+        }
+        return byPayment.values().inject(BigDecimal.ZERO) { BigDecimal a, BigDecimal b -> a + b }
     }
 
     private static BigDecimal decimal(Object v) {

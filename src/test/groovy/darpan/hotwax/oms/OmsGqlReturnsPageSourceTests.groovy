@@ -131,6 +131,30 @@ class OmsGqlReturnsPageSourceTests {
                 [r.exchangeOrderId, r.exchangeOrderName, r.exchangeOrderNetsuiteId, r.openReturnOnOrderId, r.openReturnOnOrderStatus])
     }
 
+    /** DAR-BE-192: withReturnCredit asks each kept return's refunded payments once and writes returnCredit; off, it asks nothing. */
+    @Test
+    void withReturnCreditTheRecordCarriesTheCreditHotWaxGave() {
+        Map<String, Closure> h = lookupsAnswering() + [
+                returns: { Map v ->
+                    if ((v.q as String).startsWith("returnId:")) return conn([[returnId: "M0001", responses: [
+                            [orderPaymentPreferenceId: "OPP1", paymentPreference: [statusId: "PAYMENT_REFUNDED", maxAmount: 60.37]],
+                            [orderPaymentPreferenceId: "OPP1", paymentPreference: [statusId: "PAYMENT_REFUNDED", maxAmount: 60.37]]]]])
+                    return conn([ret("M0001")]) }]
+        List<List<Map>> pages = []
+        Map result = OmsGqlReturnsPageSource.fetchAll(client(h), [fromMillis: FROM, thruMillis: THRU, config: CONFIG, withReturnCredit: true,
+                pageConsumer: { List<Map> records -> pages.add(records) }])
+        assertEquals([], result.errors)
+        assertEquals(new BigDecimal("60.37"), (pages.flatten() as List<Map>)[0].returnCredit)
+        assertEquals(1, requests.count { (it.query as String).contains("OmsReturnCredits") })
+        assertEquals("returnId:M0001", requests.find { (it.query as String).contains("OmsReturnCredits") }.variables.q)
+
+        requests.clear(); pages.clear()
+        Map without = run(client(lookupsAnswering() + [returns: { Map v -> conn([ret("M0001")]) }]), pages)
+        assertEquals([], without.errors)
+        assertFalse((pages.flatten() as List<Map>)[0].containsKey("returnCredit"))
+        assertEquals(0, requests.count { (it.query as String).contains("OmsReturnCredits") })
+    }
+
     /** DAR-BE-119: an older open finding's return is read by its id, with no window. */
     @Test
     void returnsAreReadByIdWhenAskedByKey() {

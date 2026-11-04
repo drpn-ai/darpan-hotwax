@@ -113,6 +113,31 @@ class OmsGqlReturnAssemblerTests {
         assertFalse(OmsGqlReturnAssembler.build(node(), [item()], lookups()).containsKey("netsuiteCreditMemoId"))
     }
 
+    /**
+     * DAR-BE-192 (probed gorjana returns, 2026-11-04): the credit is each refunded payment once. M246344 names its 60.00
+     * credit twice; M249948's second response is the replacement's SETTLED credit, the same money spent; M250443's
+     * credit carries its 5.37 tax.
+     */
+    @Test
+    void theCreditIsEachRefundedPaymentOnceSummed() {
+        Closure resp = { String id, String status, Object amount -> [orderPaymentPreferenceId: id, paymentPreference: [statusId: status, maxAmount: amount]] }
+        Closure same = { String expected, BigDecimal actual -> assertEquals(0, new BigDecimal(expected).compareTo(actual), "${expected} vs ${actual}") }
+        same("60", OmsGqlReturnAssembler.creditOf([resp("P1", "PAYMENT_REFUNDED", "60.000"), resp("P1", "PAYMENT_REFUNDED", "60.000")]))
+        same("85.1", OmsGqlReturnAssembler.creditOf([resp("P1", "PAYMENT_REFUNDED", 85.1), resp("P9", "PAYMENT_SETTLED", 85.1)]))
+        same("65.37", OmsGqlReturnAssembler.creditOf([resp("P1", "PAYMENT_REFUNDED", "60.00"), resp("P2", "PAYMENT_REFUNDED", "5.37")]))
+        same("0", OmsGqlReturnAssembler.creditOf([[orderPaymentPreferenceId: null, paymentPreference: null]]))
+        same("0", OmsGqlReturnAssembler.creditOf(null))
+    }
+
+    /** DAR-BE-192: returnCredit is written only when credits were read; a return with none read carries 0. */
+    @Test
+    void aReturnCarriesItsCreditOnlyWhenCreditsWereRead() {
+        assertFalse(OmsGqlReturnAssembler.build(node(), [item()], lookups()).containsKey("returnCredit"))
+        assertEquals(0, OmsGqlReturnAssembler.build(node(), [item()], lookups() + [returnCredits: [:]]).returnCredit as int)
+        assertEquals(new BigDecimal("60.37"), OmsGqlReturnAssembler.build(node(), [item()],
+                lookups() + [returnCredits: [M247650: new BigDecimal("60.370")]]).returnCredit)
+    }
+
     /** DAR-UI-080 (gorjana M263376 -> 6URJ7WK3): a warranty return carries its AfterShip warranty id; others have no key. */
     @Test
     void aWarrantyReturnCarriesItsWarrantyId() {

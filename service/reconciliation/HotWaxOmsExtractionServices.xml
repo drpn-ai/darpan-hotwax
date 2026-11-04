@@ -214,6 +214,11 @@
                     NetSuite must. For a check against NetSuite (R8), set in the automation source's
                     safeMetadataJson.parameters; every Shopify comparison leaves it off.</description>
             </parameter>
+            <parameter name="withReturnCredit" type="Boolean" default="false">
+                <description>DAR-BE-192. Also read the payments each return's responses refund and write the credit HotWax gives
+                    the return as returnCredit (each refunded payment once, summed; 0 when none), for a check that its
+                    NetSuite credit memo carries it. One more lookup a page, so off unless a run side sets it.</description>
+            </parameter>
             <parameter name="onlyCancelledReturns" type="Boolean" default="false">
                 <description>DAR-BE-094 R16. Read ONLY the returns the OMS cancelled (asked of the OMS by status), with or
                     without a Shopify reference: for a check that nothing stays open in NetSuite for them. Set in the

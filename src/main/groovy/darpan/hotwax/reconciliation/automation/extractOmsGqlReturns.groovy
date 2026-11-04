@@ -21,6 +21,8 @@ OmsScriptServiceSupport.runExtract(ec, context, [
                     [pageFetcher: OmsGqlReturnsPageSource.fetcher(new OmsGqlClient(OmsExtractSupport.toPlainMap(a.sourceConfig)),
                             [includeReturnsWithoutShopifyRef: includeReturnsWithoutShopifyRef == true,
                              onlyCancelledReturns: onlyCancelledReturns == true,
+                             // DAR-BE-192: each return's credit (returnCredit), for a check against its credit memo.
+                             withReturnCredit: withReturnCredit == true,
                              // DAR-BE-119: an audit re-checking older open findings reads their returns by id.
                              lookupKeys: (lookupKeys instanceof List) ? (List) lookupKeys : null, lookupKeyField: lookupKeyField])])
         },
