@@ -48,19 +48,36 @@ class OmsGqlReturnsPageSource {
         if (!keys && (ctx.fromMillis == null || ctx.thruMillis == null)) {
             return failed("The OMS GraphQL returns extract requires a date window.")
         }
-        if (keys && !(ctx.lookupKeyField in [null, "returnId"])) {
-            return failed("The OMS GraphQL returns extract reads by returnId only, not '${ctx.lookupKeyField}'.")
+        if (keys && !(ctx.lookupKeyField in [null, "returnId", REPLACEMENT_KEY])) {
+            return failed("The OMS GraphQL returns extract reads by returnId or ${REPLACEMENT_KEY} only, not '${ctx.lookupKeyField}'.")
         }
+        // DAR-BE-192: asked by replacement order, every return naming one is kept (a warranty claim has no Shopify reference)
+        // and carries its credit, for the conclusion brain's held-by-return causes.
+        boolean byReplacement = keys && ctx.lookupKeyField == REPLACEMENT_KEY
+        if (byReplacement) keepNoShopifyRef = true
+        if (keepNoShopifyRef) serverCounts.keptNoShopifyRefCount = 0
         Closure consumer = (Closure) ctx.pageConsumer
         Map shared = [pageSize: new AtomicInteger(OmsGqlQueries.RETURNS_PAGE_SIZE), pages: new AtomicInteger(0),
                       maxPages: OmsReturnsSourceSupport.MAX_RETURNS_PAGE_COUNT, pagination: pagination, serverCounts: serverCounts,
                       onlyCancelled: onlyCancelled, keepNoShopifyRef: keepNoShopifyRef,
                       // DAR-BE-192: the credit HotWax gives each return (returnCredit), only when a run asks for it.
-                      withReturnCredit: ctx.withReturnCredit == true,
+                      withReturnCredit: ctx.withReturnCredit == true || byReplacement,
                       pageConsumer: { List<Map> records -> synchronized (pagination) { consumer.call(records) } }]
         Closure<String> scoped = { String filter -> onlyCancelled ? "statusId:RETURN_CANCELLED ${filter}".toString() : filter }
         try {
-            if (keys) {
+            if (byReplacement) {
+                // DAR-BE-192: each replacement's return, found from the order (no search names a return by its replacement),
+                // then read like any return by id and tagged with the replacement it was found for.
+                Map<String, String> replacementOf = replacementReturns(client, keys, pagination)
+                Closure inner = (Closure) shared.pageConsumer
+                shared.pageConsumer = { List<Map> records ->
+                    inner.call(records.collect { Map r -> r + [replacementOrderId: replacementOf[r.returnId as String]] })
+                }
+                OmsGqlOrderPageSource.runEach((replacementOf.keySet() as List<String>).collate(OmsGqlQueries.LOOKUP_KEYS_CHUNK),
+                        OmsGqlOrderPageSource.CONCURRENCY) { List<String> chunk ->
+                    fetchSlice(client, shared, OmsGqlQueries.keysFilter("returnId", chunk))
+                }
+            } else if (keys) {
                 // DAR-BE-119: an older open finding's returns, by id, whatever their date.
                 OmsGqlOrderPageSource.runEach(keys.collate(OmsGqlQueries.LOOKUP_KEYS_CHUNK), OmsGqlOrderPageSource.CONCURRENCY) { List<String> chunk ->
                     fetchSlice(client, shared, scoped(OmsGqlQueries.keysFilter("returnId", chunk)))
@@ -261,6 +278,53 @@ class OmsGqlReturnsPageSource {
             [(returnId): [exchangeOrderId: orderId, exchangeOrderName: o?.orderName, exchangeOrderNetsuiteId: netsuiteOrderId(o),
                           openReturnOnOrderId: open?.returnId, openReturnOnOrderStatus: open?.statusId]]
         }
+    }
+
+    /** DAR-BE-192: the lookup key that reads the returns naming these replacement orders. */
+    static final String REPLACEMENT_KEY = "replacementOrderId"
+    private static final String ORDER_NAME = /[A-Za-z0-9_\-#]{1,60}/
+
+    /**
+     * DAR-BE-192. returnId -> the replacement it names, for these replacement orders. Only a return's responses name its
+     * replacement and no search reaches them by it, so the returns are found through the orders they are on: every order
+     * sharing the replacement's Shopify id (an exchange keeps the original's, so EXC-2's return on EXC-1 is found too), and
+     * the orders its name descends from (gorjana 2026-11-04: WTY-#GOR195459209-1 replaces #GOR195459209, WTY-#GOR196813520-1-1
+     * replaces WTY-#GOR196813520-1). A return whose items name no order cannot be found this way; R2 names that cause.
+     */
+    static Map<String, String> replacementReturns(OmsGqlClient client, List<String> replacementIds, Map pagination) {
+        Set<String> wanted = replacementIds as Set<String>
+        Map<String, Object> replacements = ordersById(client, replacementIds, pagination)
+        Set<String> candidates = new LinkedHashSet<String>()
+        List<String> shopifyIds = replacements.values().collect { ((Map) it).externalId as String }.findAll { it }.unique()
+        if (shopifyIds) fetchByIds(client, OmsGqlQueries.orderExternalIdsDocument(), "orders", "externalId", shopifyIds,
+                OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_RESERVATION, pagination)
+                .each { candidates.add(it.orderId as String) }
+        List<String> names = replacements.values().collectMany { originalNames(((Map) it).orderName as String) }.unique()
+        // HotWax allows only eq on orderName (a comma `in` is refused: OPERATOR_NOT_ALLOWED), so one name a query.
+        if (names) fetchByIds(client, OmsGqlQueries.orderExternalIdsDocument(), "orders", "orderName", names,
+                1, OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_RESERVATION, pagination)
+                .each { candidates.add(it.orderId as String) }
+        candidates.removeAll(wanted)
+        if (!candidates) return [:]
+        List<String> returnIds = fetchByIds(client, OmsGqlQueries.returnItemsDocument(), "returnItems", "orderId", candidates as List<String>,
+                OmsGqlQueries.RETURN_ITEMS_ID_CHUNK, OmsGqlQueries.RETURN_ITEMS_PAGE_SIZE, OmsGqlQueries.RETURN_ITEMS_RESERVATION, pagination)
+                .collect { it.returnId as String }.findAll { it }.unique()
+        Map<String, String> out = [:]
+        if (returnIds) fetchByIds(client, OmsGqlQueries.returnResponsesDocument(), "returns", "returnId", returnIds,
+                OmsGqlQueries.RETURN_RESPONSES_CHUNK, OmsGqlQueries.RETURN_RESPONSES_CHUNK, OmsGqlQueries.RETURN_RESPONSES_RESERVATION, pagination)
+                .each { Map n ->
+                    String named = ((n.responses ?: []) as List<Map>).collect { it?.replacementOrderId as String }.find { wanted.contains(it) }
+                    if (named) out.putIfAbsent(n.returnId as String, named)
+                }
+        return out
+    }
+
+    /** DAR-BE-192. The names a replacement descends from: its name less its last -N, and that less WTY- / EXC-. */
+    static List<String> originalNames(String name) {
+        def m = (name ?: "") =~ /^(.+)-\d+$/
+        if (!m.matches()) return []
+        String base = m.group(1)
+        return [base, base.replaceFirst(/^(WTY|EXC)-/, "")].unique().findAll { it ==~ ORDER_NAME && it != name }
     }
 
     /** DAR-BE-192: returnId -> the credit HotWax gives the return (OmsGqlReturnAssembler.creditOf its responses). */

@@ -155,6 +155,53 @@ class OmsGqlReturnsPageSourceTests {
         assertEquals(0, requests.count { (it.query as String).contains("OmsReturnCredits") })
     }
 
+    /**
+     * DAR-BE-192. Asked by replacement order, the read finds each replacement's return from the order: EXC-#GOR7-2 (M2) shares
+     * its original's Shopify id, and its return R1 sits on round 1's order (M1, as gorjana M1154107's); WTY-#GOR8-1 (W1) has its
+     * own Shopify id and descends from #GOR8 (O8) by name. A return naming another order is not its. Every record carries the
+     * replacement it was found for and its credit; a warranty claim with no Shopify reference is kept.
+     */
+    @Test
+    void askedByReplacementOrderEachReplacementGetsTheReturnThatNamesIt() {
+        Map<String, Closure> h = lookupsAnswering() + [
+                orders: { Map v ->
+                    String q = v.q as String
+                    if (q.startsWith("orderId:")) return conn([[orderId: "M2", orderName: "EXC-#GOR7-2", externalId: "700", identifications: []],
+                                                              [orderId: "W1", orderName: "WTY-#GOR8-1", externalId: "900", identifications: []]])
+                    if (q.startsWith("externalId:")) return conn([[orderId: "O7", externalId: "700"], [orderId: "M1", externalId: "700"], [orderId: "M2", externalId: "700"]])
+                    if (q.startsWith("orderName:")) {
+                        // HotWax allows only eq on orderName (gorjana 2026-11-04: "comparator 'in' not allowed"): one name a query.
+                        assert !q.contains(",") : q
+                        return conn(q == "orderName:#GOR8" ? [[orderId: "O8", orderName: "#GOR8", externalId: "800"]] : [])
+                    }
+                    return conn([[orderId: "GR1", externalId: "7186636636291", identifications: []]]) },
+                returnItems: { Map v ->
+                    String q = v.q as String
+                    if (q.startsWith("orderId:")) {
+                        assert !q.contains("M2") && !q.contains("W1") : q
+                        return conn([[returnId: "R1", orderId: "M1"], [returnId: "R0", orderId: "O7"], [returnId: "R8", orderId: "O8"]])
+                    }
+                    return conn([[returnId: (q - "returnId:").split(",")[0], returnItemSeqId: "01", orderId: "GR1", orderItemSeqId: "00101", productId: "P1",
+                                  returnQuantity: 1, receivedQuantity: 1, returnPrice: 60, statusId: "RETURN_COMPLETED", returnTypeId: "RTN_REPLACE_EXACT"]]) },
+                returns: { Map v ->
+                    String q = v.q as String
+                    List<String> ids = (q - "returnId:").split(",") as List<String>
+                    return conn(ids.collect { String id ->
+                        Map n = ret(id, [statusId: "RETURN_COMPLETED", identifications: [[returnIdentificationTypeId: "AFTSHIP_WTY_RMA_ID", idValue: "W-${id}", thruDate: null]]])
+                        n + [responses: [[replacementOrderId: [R1: "M2", R0: "M9", R8: "W1"][id], orderPaymentPreferenceId: "P-${id}",
+                                          paymentPreference: [statusId: "PAYMENT_REFUNDED", maxAmount: 60]]]] }) }]
+        List<List<Map>> pages = []
+        Map result = OmsGqlReturnsPageSource.fetchAll(client(h), [config: CONFIG, lookupKeys: ["M2", "W1"], lookupKeyField: "replacementOrderId",
+                pageConsumer: { List<Map> records -> pages.add(records) }])
+        assertEquals([], result.errors)
+        List<Map> records = (pages.flatten() as List<Map>).sort { it.returnId }
+        assertEquals([["R1", "M2"], ["R8", "W1"]], records.collect { [it.returnId, it.replacementOrderId] })
+        assertEquals([60, 60], records*.returnCredit.collect { it as int })
+        assertEquals(["EXC-#GOR7", "#GOR7"], OmsGqlReturnsPageSource.originalNames("EXC-#GOR7-2"))
+        assertEquals(["WTY-#GOR196813520-1", "#GOR196813520-1"], OmsGqlReturnsPageSource.originalNames("WTY-#GOR196813520-1-1"))
+        assertEquals([], OmsGqlReturnsPageSource.originalNames("#GOR195459209"))
+    }
+
     /** DAR-BE-119: an older open finding's return is read by its id, with no window. */
     @Test
     void returnsAreReadByIdWhenAskedByKey() {
