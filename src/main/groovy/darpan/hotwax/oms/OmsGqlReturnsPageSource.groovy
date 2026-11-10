@@ -241,9 +241,11 @@ class OmsGqlReturnsPageSource {
     }
 
     /**
-     * Aditi 2026-10-24 (R8 F-100860, M263376): an exchange return reaches NetSuite after its exchange order, and that order
-     * waits while another return of the same Shopify order is still open (there, an AfterShip warranty requested since
-     * August). returnId -> [exchangeOrderId, exchangeOrderName, exchangeOrderNetsuiteId, openReturnOnOrderId, openReturnOnOrderStatus].
+     * Aditi 2026-10-24 (R8 F-100860, M263376): an exchange return's NetSuite records wait while another return of the same
+     * Shopify order is still open (there, an AfterShip warranty requested since August). NetSuite takes them in order: the
+     * return's RMA, its credit memo, then the exchange order's sales order (Aditi 2026-11-10, DAR-UI-092), so a missing
+     * exchange sales order means the RMA is missing too.
+     * returnId -> [exchangeOrderId, exchangeOrderName, exchangeOrderNetsuiteId, openReturnOnOrderId, openReturnOnOrderStatus].
      * Asked only for returns with an exchange item; the open return only for an exchange order not in NetSuite.
      */
     private static Map<String, Map> exchangeChains(OmsGqlClient client, List<Map> items, Map pagination) {
