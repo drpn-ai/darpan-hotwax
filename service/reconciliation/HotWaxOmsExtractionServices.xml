@@ -92,6 +92,9 @@
             </parameter>
             <parameter name="lookupKeyField"><description>The record field lookupKeys are values of: orderId, or externalId (the
                 Shopify order id; DAR-BE-156, a Shopify-paired audit check's re-check).</description></parameter>
+            <parameter name="conclusionLookup" type="Boolean" default="false"><description>DAR-BE-205. With lookupKeys: this
+                read answers a conclusion lookup, so exchange orders come back too (the exchange exclusion is for a
+                sales-order comparison). An audit re-check by key leaves it off and keeps the exclusion.</description></parameter>
         </in-parameters>
     </service>
 

@@ -975,6 +975,16 @@ class OmsExtractSupport {
         ]
     }
 
+    /**
+     * DAR-BE-205. The extract options of an orders read. A conclusion lookup asks for orders by id and must answer for
+     * every id it names, exchange orders included: the exchange exclusion keeps exchanges out of a sales-order
+     * COMPARISON, and a lookup compares nothing. Every other read, an audit re-check by key included, keeps the default.
+     */
+    static Map<String, Object> lookupExtractOptions(Object lookupKeys, Object conclusionLookup) {
+        boolean keyed = lookupKeys instanceof Collection && !((Collection) lookupKeys).isEmpty()
+        return keyed && normalizeBool(conclusionLookup) ? [applyExchangeExclusion: false] as Map<String, Object> : null
+    }
+
     protected static boolean isSalesOrder(Object record) {
         if (!(record instanceof Map)) return false
         Object recordOrderTypeId = ((Map) record).find { key, ignored ->

@@ -12,8 +12,10 @@ OmsScriptServiceSupport.runExtract(ec, context, [
         exchangeManifestSidecar: true,
         extract                : { Map a ->
             // DAR-BE-064: same REST pipeline (exclusions, filters, projection, sink, manifest), GraphQL pages.
+            // DAR-BE-205: a conclusion lookup answers for every order it names, exchanges included.
             OmsExtractSupport.extractOrdersToFile(a.sourceConfig, windowStart, windowEnd, a.workFile,
-                    a.keepRecordFields, a.pageProgressListener, a.sourceFilters, null,
+                    a.keepRecordFields, a.pageProgressListener, a.sourceFilters,
+                    OmsExtractSupport.lookupExtractOptions(context.lookupKeys, context.conclusionLookup),
                     OmsGqlOrderPageSource.fetcher(new OmsGqlClient(OmsExtractSupport.toPlainMap(a.sourceConfig)),
                             // DAR-BE-120: read by key for a conclusion lookup.
                             [lookupKeys: (lookupKeys instanceof List) ? (List) lookupKeys : null, lookupKeyField: lookupKeyField]))

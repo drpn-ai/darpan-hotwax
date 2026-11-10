@@ -413,6 +413,19 @@ class OmsExtractSupportTests {
         assertEquals(false, OmsExtractSupport.normalizeExtractOptions([requireShopifyLineId: "N"]).requireShopifyLineId)
     }
 
+    /** DAR-BE-205 (gorjana R10): a lookup of approved exchange orders came back empty, so no facility rule could match. */
+    @Test
+    void onlyAKeyedConclusionLookupReadsExchangeOrders() {
+        assertEquals([applyExchangeExclusion: false], OmsExtractSupport.lookupExtractOptions(["M1214942"], true))
+        assertEquals([applyExchangeExclusion: false], OmsExtractSupport.lookupExtractOptions(["M1214942"], "Y"))
+        // An audit re-check by key sends no flag: its comparison still leaves exchanges out.
+        assertNull(OmsExtractSupport.lookupExtractOptions(["M1214942"], null))
+        assertNull(OmsExtractSupport.lookupExtractOptions(["M1214942"], false))
+        // A window read is never widened by the flag.
+        assertNull(OmsExtractSupport.lookupExtractOptions(null, true))
+        assertNull(OmsExtractSupport.lookupExtractOptions([], true))
+    }
+
     @Test
     void anExtractNeedsAPageSourceAndBothWindowBounds() {
         Map noFetcher = OmsExtractSupport.extractOrders(baseConfig(), "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z",
