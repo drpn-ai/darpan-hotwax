@@ -71,7 +71,7 @@ class OmsGqlReturnsConnectorWiringTests {
     void theIdCardOffersOnlyTheTwoShopifyReturnIds() {
         Map<String, String> expected = [
                 "\$.records[*].shopifyReturnId": "Shopify return ID",
-                "\$.records[*].externalId"     : "Refund or return ID",
+                "\$.records[*].externalId"     : "Shopify refund ID",
         ]
         [FIELDS, UPGRADE].each { String path ->
             ["OMS_RETURNS_GQL"].each { String system ->
