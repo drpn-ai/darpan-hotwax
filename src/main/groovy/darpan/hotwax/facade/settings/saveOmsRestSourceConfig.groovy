@@ -86,28 +86,25 @@ if (!ec.message.hasError()) {
         ec.message.addError(e.message)
     }
 
-    // DAR-BE-080: the stored password or token is reused only while it goes to the same place. A moved base URL, auth
-    // type or header set with no new secret would send it to whoever runs the new address (a peer of a shared config can
-    // edit every field). With auth NONE nothing is sent, so the old secret is simply dropped.
-    boolean keepStoredSecret = true
-    if (!ec.message.hasError() && existingConfig && !passwordValue && !apiTokenValue && (existingConfig.password || existingConfig.apiToken)) {
-        List<String> moved = SecretCarryOver.changedFields(existingConfig, [baseUrl: baseUrlValue, authType: authTypeValue, headersJson: headersJsonValue],
-                ["baseUrl", "authType", "headersJson"])
-        if (moved) {
-            keepStoredSecret = false
-            if (authTypeValue != "NONE") ec.message.addError(SecretCarryOver.refusal(moved, "password or token"))
-        }
-    }
+    // DAR-BE-080: a stored password or token is reused only while it goes to the same place. When the base URL, auth type
+    // or headers moved, NO stored secret is carried over (not even the one of the other kind than the caller sent): the
+    // auth type's own checks below then need every secret it uses in this request. A peer of a shared config can edit
+    // every field, so otherwise they could point it at their server and receive the stored secret.
+    List<String> movedFields = (existingConfig && (existingConfig.password || existingConfig.apiToken)) ?
+            SecretCarryOver.changedFields(existingConfig, [baseUrl: baseUrlValue, authType: authTypeValue, headersJson: headersJsonValue],
+                    ["baseUrl", "authType", "headersJson"]) : []
+    String storedPassword = movedFields ? null : existingConfig?.password
+    String storedApiToken = movedFields ? null : existingConfig?.apiToken
 
     if (!ec.message.hasError() && authTypeValue == "BASIC") {
         if (!usernameValue) ec.message.addError("Username is required for BASIC auth.")
-        if (!passwordValue && !existingConfig?.password) ec.message.addError("Password is required for BASIC auth.")
+        if (!passwordValue && !storedPassword) ec.message.addError(movedFields ? SecretCarryOver.refusal(movedFields, "password or token") : "Password is required for BASIC auth.")
     }
-    if (!ec.message.hasError() && authTypeValue == "BEARER" && !apiTokenValue && !passwordValue && !existingConfig?.apiToken && !existingConfig?.password) {
-        ec.message.addError("API token is required for BEARER auth.")
+    if (!ec.message.hasError() && authTypeValue == "BEARER" && !apiTokenValue && !passwordValue && !storedApiToken && !storedPassword) {
+        ec.message.addError(movedFields ? SecretCarryOver.refusal(movedFields, "password or token") : "API token is required for BEARER auth.")
     }
-    if (!ec.message.hasError() && authTypeValue == "API_KEY" && !apiTokenValue && !passwordValue && !existingConfig?.apiToken && !existingConfig?.password) {
-        ec.message.addError("API key is required for API_KEY auth.")
+    if (!ec.message.hasError() && authTypeValue == "API_KEY" && !apiTokenValue && !passwordValue && !storedApiToken && !storedPassword) {
+        ec.message.addError(movedFields ? SecretCarryOver.refusal(movedFields, "password or token") : "API key is required for API_KEY auth.")
     }
 
     if (!ec.message.hasError()) {
@@ -135,10 +132,10 @@ if (!ec.message.hasError()) {
         ]
 
         if (passwordValue) configMap.password = passwordValue
-        else if (keepStoredSecret && existingConfig?.password) configMap.password = existingConfig.password
+        else if (storedPassword) configMap.password = storedPassword
 
         if (apiTokenValue) configMap.apiToken = apiTokenValue
-        else if (keepStoredSecret && existingConfig?.apiToken) configMap.apiToken = existingConfig.apiToken
+        else if (storedApiToken) configMap.apiToken = storedApiToken
 
         ec.service.sync()
                 .name("store#darpan.hotwax.HotWaxOmsRestSourceConfig")

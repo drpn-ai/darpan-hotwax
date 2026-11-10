@@ -376,6 +376,19 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
         assertEquals("tok-new", findOne("GORJANA_MOVE_HOTWAX").apiToken?.toString())
     }
 
+    /** Review of DAR-BE-080: a new token sent with a moved address must not carry the stored password along (BASIC sends it). */
+    @Test
+    void aNewSecretOfOneKindDoesNotCarryTheOtherStoredOneToAMovedAddress() {
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
+        Map<String, Object> base = [omsRestSourceConfigId: "GORJANA_MIX_HOTWAX", authType: "BASIC", username: "svc", timeZone: "America/Chicago",
+                connectTimeoutSeconds: 30, readTimeoutSeconds: 60, isActive: true, canReadOrders: true]
+        assertTrue((Boolean) saveFacade(base + [baseUrl: "https://mix.hotwax.io", password: "pw-stored"]).ok)
+        ec.message.clearErrors()
+        Map<String, Object> out = saveFacade(base + [baseUrl: "https://other.hotwax.io", apiToken: "tok-decoy"])
+        assertFalse((Boolean) out.ok, "the stored BASIC password went along to the moved address")
+        assertEquals(["https://mix.hotwax.io", "pw-stored"], findOne("GORJANA_MIX_HOTWAX").with { [it.baseUrl, it.password?.toString()] })
+    }
+
     @Test
     void deleteReportsNotFoundForMissingConfig() {
         ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
