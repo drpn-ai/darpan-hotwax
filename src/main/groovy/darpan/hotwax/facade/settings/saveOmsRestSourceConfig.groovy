@@ -1,4 +1,5 @@
 import darpan.facade.common.FacadeSupport
+import darpan.facade.common.SecretCarryOver
 import darpan.facade.common.SharedConfigAccessSupport
 import darpan.facade.common.TenantAccessSupport
 import darpan.hotwax.oms.OmsExtractSupport
@@ -85,6 +86,19 @@ if (!ec.message.hasError()) {
         ec.message.addError(e.message)
     }
 
+    // DAR-BE-080: the stored password or token is reused only while it goes to the same place. A moved base URL, auth
+    // type or header set with no new secret would send it to whoever runs the new address (a peer of a shared config can
+    // edit every field). With auth NONE nothing is sent, so the old secret is simply dropped.
+    boolean keepStoredSecret = true
+    if (!ec.message.hasError() && existingConfig && !passwordValue && !apiTokenValue && (existingConfig.password || existingConfig.apiToken)) {
+        List<String> moved = SecretCarryOver.changedFields(existingConfig, [baseUrl: baseUrlValue, authType: authTypeValue, headersJson: headersJsonValue],
+                ["baseUrl", "authType", "headersJson"])
+        if (moved) {
+            keepStoredSecret = false
+            if (authTypeValue != "NONE") ec.message.addError(SecretCarryOver.refusal(moved, "password or token"))
+        }
+    }
+
     if (!ec.message.hasError() && authTypeValue == "BASIC") {
         if (!usernameValue) ec.message.addError("Username is required for BASIC auth.")
         if (!passwordValue && !existingConfig?.password) ec.message.addError("Password is required for BASIC auth.")
@@ -121,10 +135,10 @@ if (!ec.message.hasError()) {
         ]
 
         if (passwordValue) configMap.password = passwordValue
-        else if (existingConfig?.password) configMap.password = existingConfig.password
+        else if (keepStoredSecret && existingConfig?.password) configMap.password = existingConfig.password
 
         if (apiTokenValue) configMap.apiToken = apiTokenValue
-        else if (existingConfig?.apiToken) configMap.apiToken = existingConfig.apiToken
+        else if (keepStoredSecret && existingConfig?.apiToken) configMap.apiToken = existingConfig.apiToken
 
         ec.service.sync()
                 .name("store#darpan.hotwax.HotWaxOmsRestSourceConfig")

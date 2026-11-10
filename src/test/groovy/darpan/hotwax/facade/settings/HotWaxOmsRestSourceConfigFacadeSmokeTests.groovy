@@ -351,6 +351,31 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
         assertNull(findOne("GORJANA_BEARER_MISSING"))
     }
 
+    /** DAR-BE-080: a stored token is reused only while base URL, auth type and headers are the same. */
+    @Test
+    void movingTheServerNeedsTheSecretAgain() {
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
+        Map<String, Object> base = [omsRestSourceConfigId: "GORJANA_MOVE_HOTWAX", authType: "BEARER", timeZone: "America/Chicago",
+                connectTimeoutSeconds: 30, readTimeoutSeconds: 60, isActive: true, canReadOrders: true]
+        assertTrue((Boolean) saveFacade(base + [baseUrl: "https://move.hotwax.io", apiToken: "tok-stored"]).ok)
+
+        for (Map moved in [[baseUrl: "https://other.hotwax.io"], [baseUrl: "https://move.hotwax.io", authType: "API_KEY"],
+                           [baseUrl: "https://move.hotwax.io", headersJson: '{"X-Forward":"1"}']]) {
+            ec.message.clearErrors()
+            Map<String, Object> refused = saveFacade(base + moved)
+            assertFalse((Boolean) refused.ok, "${moved} kept the stored token")
+            assertTrue((refused.errors ?: []).join(" ").contains("Enter the password or token again"), refused.errors?.toString())
+        }
+        assertEquals(["https://move.hotwax.io", "tok-stored"], findOne("GORJANA_MOVE_HOTWAX").with { [it.baseUrl, it.apiToken?.toString()] })
+
+        ec.message.clearErrors()
+        assertTrue((Boolean) saveFacade(base + [baseUrl: "https://MOVE.hotwax.io/", description: "same place"]).ok, "the same address keeps it")
+        ec.message.clearErrors()
+        Map<String, Object> withToken = saveFacade(base + [baseUrl: "https://other.hotwax.io", apiToken: "tok-new"])
+        assertTrue((Boolean) withToken.ok, withToken.errors?.toString())
+        assertEquals("tok-new", findOne("GORJANA_MOVE_HOTWAX").apiToken?.toString())
+    }
+
     @Test
     void deleteReportsNotFoundForMissingConfig() {
         ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
