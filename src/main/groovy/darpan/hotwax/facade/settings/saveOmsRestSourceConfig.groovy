@@ -95,9 +95,12 @@ if (!ec.message.hasError()) {
                     ["baseUrl", "authType", "headersJson"]) : []
     String storedPassword = movedFields ? null : existingConfig?.password
     String storedApiToken = movedFields ? null : existingConfig?.apiToken
+    // DAR-BE-212: the edit form never shows the username back (the record carries only hasUsername) and says "leave
+    // blank to keep existing", so a blank one keeps the stored one — under the same move rule as the secrets above.
+    String storedUsername = movedFields ? null : existingConfig?.username
 
     if (!ec.message.hasError() && authTypeValue == "BASIC") {
-        if (!usernameValue) ec.message.addError("Username is required for BASIC auth.")
+        if (!usernameValue && !storedUsername) ec.message.addError("Username is required for BASIC auth.")
         if (!passwordValue && !storedPassword) ec.message.addError(movedFields ? SecretCarryOver.refusal(movedFields, "password or token") : "Password is required for BASIC auth.")
     }
     if (!ec.message.hasError() && authTypeValue == "BEARER" && !apiTokenValue && !passwordValue && !storedApiToken && !storedPassword) {
@@ -121,7 +124,7 @@ if (!ec.message.hasError()) {
                 baseUrl               : baseUrlValue,
                 timeZone              : timeZoneValue,
                 authType              : authTypeValue,
-                username              : usernameValue,
+                username              : usernameValue ?: storedUsername,
                 headersJson           : headersJsonValue,
                 connectTimeoutSeconds : connectTimeoutValue,
                 readTimeoutSeconds    : readTimeoutValue,

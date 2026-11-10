@@ -351,6 +351,34 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
         assertNull(findOne("GORJANA_BEARER_MISSING"))
     }
 
+    /**
+     * DAR-BE-212: the edit form never shows the saved username back (the record carries only hasUsername) and says
+     * "leave blank to keep existing", so a blank username on an edit keeps the stored one — as password and token do.
+     */
+    @Test
+    void aBlankUsernameOnEditKeepsTheStoredOne() {
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
+        Map<String, Object> base = [omsRestSourceConfigId: "GORJANA_KEEPUSER_HOTWAX", baseUrl: "https://keepuser.hotwax.io", authType: "BASIC",
+                timeZone: "America/Chicago", connectTimeoutSeconds: 30, readTimeoutSeconds: 60, isActive: true, canReadOrders: true]
+        assertTrue((Boolean) saveFacade(base + [username: "svc", password: "pw-stored"]).ok)
+
+        ec.message.clearErrors()
+        Map<String, Object> blank = saveFacade(base + [description: "renamed"])
+        assertTrue((Boolean) blank.ok, blank.errors?.toString())
+        assertEquals(["renamed", "svc", "pw-stored"], findOne("GORJANA_KEEPUSER_HOTWAX").with { [it.description, it.username, it.password?.toString()] })
+
+        ec.message.clearErrors()
+        assertTrue((Boolean) saveFacade(base + [username: "svc2"]).ok, "a typed username still replaces it")
+        assertEquals("svc2", findOne("GORJANA_KEEPUSER_HOTWAX").username)
+
+        // Same move rule as the secrets (DAR-BE-080): pointed somewhere else, the stored account does not go along.
+        ec.message.clearErrors()
+        Map<String, Object> moved = saveFacade(base + [baseUrl: "https://elsewhere.hotwax.io", password: "pw-new"])
+        assertFalse((Boolean) moved.ok, "the stored username went along to a moved address")
+        assertTrue((moved.errors ?: []).join(" ").contains("Username is required for BASIC auth."), moved.errors?.toString())
+        assertEquals("https://keepuser.hotwax.io", findOne("GORJANA_KEEPUSER_HOTWAX").baseUrl)
+    }
+
     /** DAR-BE-080: a stored token is reused only while base URL, auth type and headers are the same. */
     @Test
     void movingTheServerNeedsTheSecretAgain() {
