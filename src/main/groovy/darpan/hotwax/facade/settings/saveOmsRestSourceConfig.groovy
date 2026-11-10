@@ -90,14 +90,17 @@ if (!ec.message.hasError()) {
     // or headers moved, NO stored secret is carried over (not even the one of the other kind than the caller sent): the
     // auth type's own checks below then need every secret it uses in this request. A peer of a shared config can edit
     // every field, so otherwise they could point it at their server and receive the stored secret.
-    List<String> movedFields = (existingConfig && (existingConfig.password || existingConfig.apiToken)) ?
+    List<String> changedPlace = existingConfig ?
             SecretCarryOver.changedFields(existingConfig, [baseUrl: baseUrlValue, authType: authTypeValue, headersJson: headersJsonValue],
                     ["baseUrl", "authType", "headersJson"]) : []
+    List<String> movedFields = (existingConfig?.password || existingConfig?.apiToken) ? changedPlace : []
     String storedPassword = movedFields ? null : existingConfig?.password
     String storedApiToken = movedFields ? null : existingConfig?.apiToken
     // DAR-BE-212: the edit form never shows the username back (the record carries only hasUsername) and says "leave
-    // blank to keep existing", so a blank one keeps the stored one — under the same move rule as the secrets above.
-    String storedUsername = movedFields ? null : existingConfig?.username
+    // blank to keep existing", so a blank one keeps the stored one — but never to a moved place. The move check is the
+    // username's own (changedPlace), not movedFields: that one is empty when no secret is stored, which would let a
+    // username-only config carry its account name to a new server (security review, 2026-11-10).
+    String storedUsername = changedPlace ? null : existingConfig?.username
 
     if (!ec.message.hasError() && authTypeValue == "BASIC") {
         if (!usernameValue && !storedUsername) ec.message.addError("Username is required for BASIC auth.")

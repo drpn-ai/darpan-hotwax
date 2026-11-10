@@ -377,6 +377,20 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
         assertFalse((Boolean) moved.ok, "the stored username went along to a moved address")
         assertTrue((moved.errors ?: []).join(" ").contains("Username is required for BASIC auth."), moved.errors?.toString())
         assertEquals("https://keepuser.hotwax.io", findOne("GORJANA_KEEPUSER_HOTWAX").baseUrl)
+
+        // Security review of DAR-BE-212: the move check must not depend on a secret being stored. A config holding only a
+        // username (no password, no token) moved elsewhere with a blank username must not take the stored one along.
+        ec.message.clearErrors()
+        Map<String, Object> noSecret = [omsRestSourceConfigId: "GORJANA_USERONLY_HOTWAX", authType: "NONE", timeZone: "America/Chicago",
+                connectTimeoutSeconds: 30, readTimeoutSeconds: 60, isActive: true, canReadOrders: true]
+        assertTrue((Boolean) saveFacade(noSecret + [baseUrl: "https://useronly.hotwax.io", username: "svc-only"]).ok)
+        assertEquals("svc-only", findOne("GORJANA_USERONLY_HOTWAX").username, "precondition: the username was stored with no secret")
+        ec.message.clearErrors()
+        assertTrue((Boolean) saveFacade(noSecret + [baseUrl: "https://useronly.hotwax.io", description: "same place"]).ok)
+        assertEquals("svc-only", findOne("GORJANA_USERONLY_HOTWAX").username, "same address keeps it")
+        ec.message.clearErrors()
+        assertTrue((Boolean) saveFacade(noSecret + [baseUrl: "https://elsewhere.hotwax.io"]).ok)
+        assertNull(findOne("GORJANA_USERONLY_HOTWAX").username, "the stored username went along to a moved address")
     }
 
     /** DAR-BE-080: a stored token is reused only while base URL, auth type and headers are the same. */
