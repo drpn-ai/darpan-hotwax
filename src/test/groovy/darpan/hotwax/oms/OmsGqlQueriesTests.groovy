@@ -156,6 +156,28 @@ class OmsGqlQueriesTests {
         assertFalse(OmsGqlQueries.sharedOrdersCover(["orderId", "externalId", "paymentPreferences"] as Set))
     }
 
+    /**
+     * DAR-BE-239, the prod shape (DOLLS_KILL daily, 2026-11-10): no projection, no filter, a rule on paymentRefNums. It
+     * took the two-slot shared read and the rule passed 1,608 of 1,608. Now it reads its own five slots of manualRefNum
+     * and keeps the shared read's whole record; a run whose rules read only covered fields stays on the shared read, and a
+     * name the read cannot select is left out rather than failing a scheduled run.
+     */
+    @Test
+    void aRunsRuleFieldsAreReadEvenWithoutAProjection() {
+        Set<String> required = OmsGqlQueries.withReadFields(OmsGqlQueries.requiredFields(null, null),
+                ["isCompleted", "paymentRefNums"])
+        assertTrue(required.containsAll(OmsGqlQueries.SHARED_ORDER_FIELDS), required.toString())
+        assertFalse(OmsGqlQueries.sharedOrdersCover(required))
+        Map plan = OmsGqlQueries.orderGrainPagePlan(required)
+        assertEquals(true, plan.paymentRefNums)
+        assertTrue((plan.document as String).contains("manualRefNum"), plan.document as String)
+
+        assertTrue(OmsGqlQueries.sharedOrdersCover(OmsGqlQueries.withReadFields(null, ["isCompleted", "hasPaymentPreference"])))
+        assertNull(OmsGqlQueries.withReadFields(null, ["isFulfilled"]))
+        assertEquals(["productStoreId", "paymentRefNums"] as Set,
+                OmsGqlQueries.withReadFields(["productStoreId"] as Set, ["paymentRefNums", "\$.records[*].nope", "nope"]))
+    }
+
     @Test
     void keepingPaymentPreferencesKeepsTheSlotsFullFlag() {
         assertTrue(OmsGqlQueries.keepWithCompanions(["orderId", "paymentPreferences"] as Set).contains("paymentPreferenceSlotsFull"))

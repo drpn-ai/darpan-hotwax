@@ -68,7 +68,8 @@ class OmsGqlOrderPageSource {
         Object exclusionFlag = extractOptions.applyExchangeExclusion
         boolean exchangePass = !(exclusionFlag == false || (exclusionFlag as String)?.trim()?.toLowerCase() in ["false", "n"])
         Map plan
-        Set<String> required = OmsGqlQueries.requiredFields((Set<String>) ctx.keepFieldSet, (List<Map>) ctx.excludeRules)
+        Set<String> required = OmsGqlQueries.withReadFields(
+                OmsGqlQueries.requiredFields((Set<String>) ctx.keepFieldSet, (List<Map>) ctx.excludeRules), ctx.readFields)
         try {
             if (unitGrain) {
                 List<String> unknown = unitFilterFieldsNotCarried((List<Map>) ctx.excludeRules)

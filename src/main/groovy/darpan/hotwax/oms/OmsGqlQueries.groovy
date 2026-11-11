@@ -84,6 +84,21 @@ class OmsGqlQueries {
         return (keepFieldSet == null && required.isEmpty()) ? null : required
     }
 
+    /**
+     * DAR-BE-239: the required fields plus the ones the run's rules read (readFields), so a field this document selects
+     * only when asked is asked for. Before, a scheduled run sent no projection, its read was the shared one, and
+     * paymentRefNums never came back: the transaction rule passed every order. Not a projection: a run with neither a
+     * projection nor a filter keeps the shared read's whole record, and a name this read cannot select is left out (its
+     * rule reads a blank, as before), never a failed run.
+     */
+    static Set<String> withReadFields(Set<String> required, Object readFields) {
+        Set<String> asked = (readFields instanceof Collection ? (Collection) readFields : []).collect { (it as String)?.trim() }
+                .findAll { String f -> f && (HEADER_FIELDS.contains(f) || DERIVED_FIELDS.contains(f) ||
+                        NESTED_FIELDS.containsKey(f) || f == RAW_PAYMENTS_FIELD) } as Set<String>
+        if (!asked) return required
+        return new LinkedHashSet<String>(required == null ? SHARED_ORDER_FIELDS : required) + asked
+    }
+
     static Map orderGrainPagePlan(Set<String> requiredFields) {
         Set<String> wanted = requiredFields ?: ([] as Set<String>)
         List<String> unknown = wanted.findAll { String f ->

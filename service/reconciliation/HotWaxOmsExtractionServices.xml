@@ -92,6 +92,13 @@
             </parameter>
             <parameter name="lookupKeyField"><description>The record field lookupKeys are values of: orderId, or externalId (the
                 Shopify order id; DAR-BE-156, a Shopify-paired audit check's re-check).</description></parameter>
+            <parameter name="readFields" type="List">
+                <description>DAR-BE-239. The record fields the run's rules read on this side. Selected even without a
+                    projection, so a field this read asks for only when needed (paymentRefNums: five payment slots with
+                    manualRefNum) comes back. Not a projection: nothing is trimmed, and a name this read cannot select is
+                    left out. A caller checks this parameter is declared before sending it.</description>
+                <parameter name="fieldName"/>
+            </parameter>
             <parameter name="conclusionLookup" type="Boolean" default="false"><description>DAR-BE-205. With lookupKeys: this
                 read answers a conclusion lookup, so exchange orders come back too (the exchange exclusion is for a
                 sales-order comparison). An audit re-check by key leaves it off and keeps the exclusion.</description></parameter>
