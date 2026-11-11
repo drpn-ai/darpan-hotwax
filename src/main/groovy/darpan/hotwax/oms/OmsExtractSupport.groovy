@@ -577,13 +577,24 @@ class OmsExtractSupport {
         }
         // Any HTTP status at all proves the host answered.
         List<Map<String, Object>> checks = [diagnosticsCheck("reachable", "Base URL reachable", "PASS", null, elapsedMillis)]
-        if (statusCode == 401 || statusCode == 403) {
-            checks.add(diagnosticsCheck("auth", "Credentials accepted", "FAIL",
-                    "The stored credentials were rejected (HTTP ${statusCode}).".toString()))
+        // Moqui answers 401 to any credential it cannot verify (bad signature, wrong algorithm, expired, unknown key)
+        // and 403 to a caller it knows but will not serve. With no credentials at all it also answers 403.
+        boolean credentialsSent = (normalize(config?.authType)?.toUpperCase() ?: "NONE") != "NONE"
+        if (statusCode == 401 || (statusCode == 403 && !credentialsSent)) {
+            checks.add(diagnosticsCheck("auth", "Credentials accepted", "FAIL", statusCode == 401
+                    ? "The stored credentials were rejected (HTTP 401): invalid, expired, or issued by another OMS."
+                    : "The OMS needs credentials (HTTP 403); none are configured."))
             checks.add(probeSkipped("ordersRead", "Orders readable"))
             return [checks: checks, nextStage: null]
         }
         checks.add(diagnosticsCheck("auth", "Credentials accepted", "PASS"))
+
+        if (statusCode == 403) {
+            checks.add(diagnosticsCheck("ordersRead", "Orders readable", "FAIL",
+                    "The OMS user behind these credentials may not read orders through GraphQL (HTTP 403). " +
+                            "Ask HotWax to grant that user API access."))
+            return [checks: checks, nextStage: null]
+        }
 
         if (statusCode == 404) {
             checks.add(diagnosticsCheck("ordersRead", "Orders readable", "FAIL",

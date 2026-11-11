@@ -115,6 +115,32 @@ class OmsConnectionProbeTests {
     }
 
     @Test
+    void aForbiddenAnswerToSentCredentialsIsAPermissionGapNotABadToken() {
+        // NEW_ERA_CAPS (DAR-BE-240): the OMS answers 401 to every unverifiable token, so a 403 to a sent token
+        // means the token verified and its user is refused the orders query.
+        OmsExtractSupport.probeSender = { String url, Map headers, String body -> response(403) }
+
+        Map<String, Object> result = OmsExtractSupport.probeConnection(config())
+
+        assertStatus(result, "auth", "PASS")
+        assertStatus(result, "ordersRead", "FAIL")
+        String detail = checkFor(result, "ordersRead").detail as String
+        assertTrue(detail.contains("HTTP 403") && detail.contains("API access"), detail)
+        assertFalse(detail.contains("rejected"), "a 403 must not read as a rejected token: ${detail}")
+    }
+
+    @Test
+    void aForbiddenAnswerWithNoCredentialsConfiguredIsACredentialFailure() {
+        OmsExtractSupport.probeSender = { String url, Map headers, String body -> response(403) }
+
+        Map<String, Object> result = OmsExtractSupport.probeConnection(config([authType: "NONE", apiToken: null]))
+
+        assertStatus(result, "auth", "FAIL")
+        assertStatus(result, "ordersRead", "SKIP")
+        assertTrue((checkFor(result, "auth").detail as String).contains("none are configured"))
+    }
+
+    @Test
     void aMissingGraphQlEndpointFailsOnlyTheOrdersCheck() {
         OmsExtractSupport.probeSender = { String url, Map headers, String body -> response(404) }
 
@@ -188,7 +214,7 @@ class OmsConnectionProbeTests {
     void noCheckDetailEverEchoesAStoredSecret() {
         String secret = "oms_super_secret_token"
         List<Map<String, Object>> results = []
-        [401, 404, 500].each { int statusCode ->
+        [401, 403, 404, 500].each { int statusCode ->
             OmsExtractSupport.probeSender = { String url, Map headers, String body -> response(statusCode, "token ${secret} rejected") }
             results.add(OmsExtractSupport.probeConnection(config([apiToken: secret])))
         }
