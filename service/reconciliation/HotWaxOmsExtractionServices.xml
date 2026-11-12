@@ -428,12 +428,20 @@
                 <description>DAR-BE-190. Ask each order's items instead of the order: itemStatusByKey is filled
                     and statusByOrderId stays empty; missingIds are the orders HotWax returned no item for.</description>
             </parameter>
+            <parameter name="withShipGroupFacilities" type="Boolean" default="false">
+                <description>DAR-BE-245. Ask where each order's ship groups ship from instead: shipGroupFacilityByKey is
+                    filled; missingIds are the orders HotWax did not return.</description>
+            </parameter>
         </in-parameters>
         <out-parameters>
             <parameter name="ok" type="Boolean"/>
             <parameter name="statusByOrderId" type="Map"><description>OMS order id -> statusId.</description></parameter>
             <parameter name="itemStatusByKey" type="Map"><description>DAR-BE-190, withItems: "orderId|orderItemSeqId" ->
                 the item's statusId.</description></parameter>
+            <parameter name="itemShipGroupByKey" type="Map"><description>DAR-BE-245, withItems: "orderId|orderItemSeqId" ->
+                the item's shipGroupSeqId.</description></parameter>
+            <parameter name="shipGroupFacilityByKey" type="Map"><description>DAR-BE-245, withShipGroupFacilities:
+                "orderId|shipGroupSeqId" -> [facilityId, the facility's externalId].</description></parameter>
             <parameter name="missingIds" type="List"><description>Ids HotWax has no order for.</description></parameter>
             <parameter name="errors" type="List"/>
         </out-parameters>

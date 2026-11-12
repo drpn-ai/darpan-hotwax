@@ -78,6 +78,7 @@ class OmsOrderStatusLookupSupport {
             OmsGqlClient client = (OmsGqlClient) clientFactory.call(config)
             Set<String> requested = new HashSet<String>(ids)
             Map<String, String> itemStatusByKey = [:]
+            Map<String, String> itemShipGroupByKey = [:]
             Set<String> answered = new HashSet<String>()
             OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.orderItemStatusesDocument(), "orderItems", "orderId", ids,
                     ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.ORDER_ITEMS_RESERVATION, [lookupCalls: 0])
@@ -86,10 +87,49 @@ class OmsOrderStatusLookupSupport {
                         if (!orderId || !requested.contains(orderId) || !normalize(n.orderItemSeqId)) return
                         answered.add(orderId)
                         itemStatusByKey.put(itemKey(orderId, n.orderItemSeqId), normalize(n.statusId))
+                        if (normalize(n.shipGroupSeqId)) itemShipGroupByKey.put(itemKey(orderId, n.orderItemSeqId), normalize(n.shipGroupSeqId))
                     }
-            return [ok: true, itemStatusByKey: itemStatusByKey, missingIds: ids.findAll { !answered.contains(it) }, errors: []]
+            return [ok: true, itemStatusByKey: itemStatusByKey, itemShipGroupByKey: itemShipGroupByKey,
+                    missingIds: ids.findAll { !answered.contains(it) }, errors: []]
         } catch (Exception e) {
             return [ok: false, itemStatusByKey: [:], missingIds: [], errors: ["OMS order item status lookup failed: ${e.message}".toString()]]
+        }
+    }
+
+    /**
+     * DAR-BE-245. Where each asked order's ship groups ship from: itemKey(orderId, shipGroupSeqId) -> [facilityId,
+     * externalId] (the facility's externalId is the NetSuite location id on RAILS). Asked only of the orders whose
+     * completed ship groups outnumber NetSuite's fulfillments, so the facility read stays small. Same guarantees as
+     * the other lookups: only asked orders count, and a failed call classifies nothing.
+     */
+    static Map<String, Object> lookupShipGroupFacilities(Object rawConfig, Collection orderIds) {
+        List<String> ids = (orderIds ?: []).collect { normalize(it) }.findAll { it }.unique()
+        if (!ids) return [ok: true, shipGroupFacilityByKey: [:], missingIds: [], errors: []]
+        if (!ids.every { ASKABLE_ID.matcher(it).matches() }) {
+            return [ok: false, shipGroupFacilityByKey: [:], missingIds: [], errors: ["OMS order ids must be plain identifiers."]]
+        }
+        Map<String, Object> config = OmsExtractSupport.toPlainMap(rawConfig)
+        if (!config) return [ok: false, shipGroupFacilityByKey: [:], missingIds: [], errors: ["OMS source config could not be read."]]
+        try {
+            OmsGqlClient client = (OmsGqlClient) clientFactory.call(config)
+            Set<String> requested = new HashSet<String>(ids)
+            Set<String> answered = new HashSet<String>()
+            Map<String, List<String>> byKey = [:]
+            OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.shipGroupFacilitiesDocument(), "orders", "orderId", ids,
+                    OmsGqlQueries.SHIP_GROUP_FACILITIES_ID_CHUNK, OmsGqlQueries.SHIP_GROUP_FACILITIES_ID_CHUNK,
+                    OmsGqlQueries.SHIP_GROUP_FACILITIES_RESERVATION, [lookupCalls: 0])
+                    .each { Map n ->
+                        String orderId = normalize(n.orderId)
+                        if (!orderId || !requested.contains(orderId)) return
+                        answered.add(orderId)
+                        OmsGqlOrderGrainAssembler.edgeNodes((Map) n.shipGroups).each { Map g ->
+                            String seq = normalize(g.shipGroupSeqId)
+                            if (seq) byKey.put(itemKey(orderId, seq), [normalize(g.facilityId), normalize(((Map) g.facility)?.externalId)])
+                        }
+                    }
+            return [ok: true, shipGroupFacilityByKey: byKey, missingIds: ids.findAll { !answered.contains(it) }, errors: []]
+        } catch (Exception e) {
+            return [ok: false, shipGroupFacilityByKey: [:], missingIds: [], errors: ["OMS ship group lookup failed: ${e.message}".toString()]]
         }
     }
 }

@@ -166,4 +166,40 @@ class OmsOrderStatusLookupTests {
         assertEquals([:], failed.statusByOrderId)
         assertEquals([], failed.missingIds, "a failed lookup never calls an order missing")
     }
+
+    // DAR-BE-245. RAILS #8777CAN (150738), live 2026-11-12: NetSuite shipped it in one fulfillment (IF387146 from
+    // location 77) and HotWax holds its five completed items in TWO ship groups at CAN WH (100102, externalId 77).
+    @Test
+    void itemsCarryTheirShipGroupAndShipGroupsComeBackWithWhereTheyShipFrom() {
+        List<Map> items = [[orderId: "150738", orderItemSeqId: "01", statusId: "ITEM_COMPLETED", shipGroupSeqId: "00004"],
+                           [orderId: "150738", orderItemSeqId: "02", statusId: "ITEM_COMPLETED", shipGroupSeqId: "00003"]]
+        List<Map> orders = [[orderId: "150738", shipGroups: [edges: [
+                [node: [shipGroupSeqId: "00003", facilityId: "100102", facility: [externalId: "77"]]],
+                [node: [shipGroupSeqId: "00004", facilityId: "100102", facility: [externalId: "77"]]],
+                [node: [shipGroupSeqId: "00002", facilityId: "_NA_", facility: null]]]]],
+                            [orderId: "NOT_ASKED", shipGroups: [edges: [[node: [shipGroupSeqId: "00001", facilityId: "100000"]]]]]]
+        OmsOrderStatusLookupSupport.setClientFactory { Map config ->
+            OmsGqlClient c = new OmsGqlClient(config, { String url, Map headers, String body ->
+                Map payload = (Map) new JsonSlurper().parseText(body)
+                requests.add(payload)
+                boolean itemsAsked = payload.query.toString().contains("orderItems")
+                Map data = itemsAsked ? [orderItems: [edges: items.collect { [node: it] }, pageInfo: [hasNextPage: false]]] :
+                        [orders: [edges: orders.collect { [node: it] }, pageInfo: [hasNextPage: false]]]
+                return [statusCode: 200, body: JsonOutput.toJson([data: data, errors: []])]
+            })
+            c.sleeper = { long ms -> }
+            return c
+        }
+
+        Map looked = OmsOrderStatusLookupSupport.lookupOrderItemStatuses(CONFIG, ["150738"])
+        assertEquals(["150738|01": "00004", "150738|02": "00003"], looked.itemShipGroupByKey)
+
+        Map groups = OmsOrderStatusLookupSupport.lookupShipGroupFacilities(CONFIG, ["150738", "999999"])
+        assertTrue(groups.ok as Boolean)
+        assertEquals(["150738|00003": ["100102", "77"], "150738|00004": ["100102", "77"], "150738|00002": ["_NA_", null]],
+                groups.shipGroupFacilityByKey, "a ship group with no facility record keeps a null externalId; an order not asked is dropped")
+        assertEquals(["999999"], groups.missingIds)
+        assertTrue(requests.last().query.toString().contains("facility { externalId }"))
+        assertFalse(OmsOrderStatusLookupSupport.lookupShipGroupFacilities(CONFIG, ["1,2"]).ok as Boolean)
+    }
 }
