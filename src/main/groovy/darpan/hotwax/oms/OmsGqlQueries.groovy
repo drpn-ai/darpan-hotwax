@@ -51,7 +51,14 @@ class OmsGqlQueries {
             "orderDate", "grandTotal"]
     /** Computed by OmsGqlOrderGrainAssembler from paymentPreferences and statusId, which are always selected. */
     static final Set<String> DERIVED_FIELDS = ["hasPaymentPreference", "paymentMethodTypeIds", "paymentPreferenceSlotsFull",
-            "isCompleted", "paymentRefNums"] as Set
+            "isCompleted", "paymentRefNums", ITEM_QUANTITY_FIELD] as Set
+    /**
+     * DAR-BE-251: the order's units, the sum of its item rows' quantities (HotWax keeps one row per unit where Shopify has
+     * one line of several: #42424EU, 1 line of 8, 8 rows). Equal to Shopify subtotalLineItemsQuantity on 590 of 590 RAILS
+     * orders (2026-11-12); orderItemCount is not (it repeats Shopify's line count, 7 of 590 differ). Read from the items by
+     * order id, once per page, only when a rule reads it: nested in the orders read it cost a page of 2 orders.
+     */
+    static final String ITEM_QUANTITY_FIELD = "itemQuantity"
     /**
      * DAR-BE-151: the raw OPP rows themselves, kept for the conclusion brain's order-payments question (a tender taken and
      * given back is two rows). Always selected; asking for them widens the read to six slots, like paymentRefNums.
@@ -141,7 +148,8 @@ class OmsGqlQueries {
     pageInfo { hasNextPage endCursor }
   }
 }"""
-        return [document: document, pageSize: pageSize, reservation: reservation, paymentSlots: slots, paymentRefNums: refNums]
+        return [document: document, pageSize: pageSize, reservation: reservation, paymentSlots: slots, paymentRefNums: refNums,
+                itemQuantity: wanted.contains(ITEM_QUANTITY_FIELD)]
     }
 
     /**
@@ -374,7 +382,8 @@ class OmsGqlQueries {
      */
     static boolean sharedOrdersCover(Set<String> requiredFields) {
         // DAR-BE-153: paymentRefNums needs manualRefNum from six slots, which the shared read does not ask for.
-        return (requiredFields ?: []).every { it != "paymentRefNums" &&
+        // DAR-BE-251: nor itemQuantity, read from the items only by a read that asks for it.
+        return (requiredFields ?: []).every { it != "paymentRefNums" && it != ITEM_QUANTITY_FIELD &&
                 (ALWAYS_FIELDS.contains(it) || SHARED_ORDER_FIELDS.contains(it) || DERIVED_FIELDS.contains(it)) }
     }
 
@@ -414,6 +423,16 @@ class OmsGqlQueries {
         return '''query OmsShipGroupFacilities($q: String, $first: Int, $after: String) {
   orders(query: $q, first: $first, after: $after) {
     edges { node { orderId shipGroups(first: 10) { edges { node { shipGroupSeqId facilityId facility { externalId } } } } } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
+    // DAR-BE-251: each item row's quantity, summed per order into itemQuantity.
+    static String orderItemQuantitiesDocument() {
+        return '''query OmsOrderItemQuantities($q: String, $first: Int, $after: String) {
+  orderItems(query: $q, first: $first, after: $after) {
+    edges { node { orderId orderItemSeqId quantity } }
     pageInfo { hasNextPage endCursor }
   }
 }'''

@@ -21,6 +21,28 @@ class OmsGqlOrderGrainAssembler {
         return edges.collect { ((it as Map)?.node) as Map }.findAll { it != null }
     }
 
+    /**
+     * DAR-BE-251: itemQuantity on each order, the sum of its item rows' quantities, as a plain number ("8", never "8.0",
+     * so it equals Shopify's subtotalLineItemsQuantity); "0" for an order with no item row. Rows of orders not on the page
+     * are ignored, and a row is counted once however many times a page repeats it.
+     */
+    static void putItemQuantities(List<Map> orders, List<Map> itemRows) {
+        Map<String, BigDecimal> sums = [:]
+        Set<String> seen = new HashSet<String>()
+        for (Map row : (itemRows ?: [])) {
+            String orderId = row?.get("orderId") as String
+            if (!orderId || !seen.add("${orderId}|${row.get('orderItemSeqId')}".toString())) continue
+            // HotWax answers quantity as a JSON number (1), sometimes as text ("1.000000"); either counts.
+            Object raw = row.get("quantity")
+            Object q = raw instanceof Number ? new BigDecimal(raw.toString()) : toDecimal(raw)
+            sums.put(orderId, (sums.get(orderId) ?: BigDecimal.ZERO) + (q instanceof BigDecimal ? (BigDecimal) q : BigDecimal.ZERO))
+        }
+        for (Map order : (orders ?: [])) {
+            BigDecimal sum = sums.get(order.get("orderId") as String) ?: BigDecimal.ZERO
+            order.put(OmsGqlQueries.ITEM_QUANTITY_FIELD, sum.signum() == 0 ? "0" : sum.stripTrailingZeros().toPlainString())
+        }
+    }
+
     private static Object toEpochMillis(Object value) {
         if (!(value instanceof CharSequence)) return value
         try { return java.time.Instant.parse(value.toString()).toEpochMilli() } catch (Exception ignored) { return value }

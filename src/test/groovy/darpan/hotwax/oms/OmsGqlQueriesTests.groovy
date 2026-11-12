@@ -238,4 +238,18 @@ class OmsGqlQueriesTests {
         assertEquals("goodIdentificationTypeId:NETSUITE_PRODUCT_ID", OmsGqlQueries.NETSUITE_PRODUCT_ID_FILTER)
         assertEquals(100, OmsGqlQueries.PRODUCT_PAGE_SIZE)
     }
+
+    // DAR-BE-251: the daily order runs' item-count rule (Shopify units = HotWax units). Like paymentRefNums, a rule naming
+    // itemQuantity on a run with no projection must reach its own read, which sums the items; nothing is nested.
+    @Test
+    void aRuleOnItemQuantityGetsItsOwnReadThatAsksTheItems() {
+        Set<String> required = OmsGqlQueries.withReadFields(OmsGqlQueries.requiredFields(null, null), ["isCompleted", "itemQuantity"])
+        assertTrue(required.contains("itemQuantity"))
+        assertFalse(OmsGqlQueries.sharedOrdersCover(required), "the shared read never sums items")
+        Map plan = OmsGqlQueries.orderGrainPagePlan(required)
+        assertEquals(true, plan.itemQuantity)
+        assertFalse((plan.document as String).contains("orderItems"), "summed from the items read, not nested: ${plan.document}")
+        assertEquals(false, OmsGqlQueries.orderGrainPagePlan(OmsGqlQueries.SHARED_ORDER_FIELDS).itemQuantity)
+        assertTrue(OmsGqlQueries.orderItemQuantitiesDocument().contains("quantity"))
+    }
 }

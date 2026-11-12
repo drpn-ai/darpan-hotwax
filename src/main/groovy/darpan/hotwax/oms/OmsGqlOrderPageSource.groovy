@@ -335,6 +335,7 @@ class OmsGqlOrderPageSource {
         List<Map> assembled = OmsGqlOrderGrainAssembler.assemble(nodes, assocs,
                 (plan.paymentSlots ?: OmsGqlQueries.PAYMENT_PREF_SLOTS) as int, plan.paymentRefNums == true)
         if (shared.unitGrain == true) attachItemsToShipGroups(client, assembled, ids, pagination)
+        if (plan.itemQuantity == true) attachItemQuantities(client, assembled, ids, pagination)
         if (shared.sink != null) {
             // A shared read: the raw records go to the spill file, and each caller shapes them itself.
             ((Closure) shared.sink).call(assembled)
@@ -368,6 +369,13 @@ class OmsGqlOrderPageSource {
      * name, each read by id once per page as the returns read does (nesting them is charged per order), for the audit
      * finding.
      */
+    /** DAR-BE-251: each order's units, its item rows' quantities summed; an order HotWax returned no item for has 0. */
+    private static void attachItemQuantities(OmsGqlClient client, List<Map> orders, List<String> orderIds, Map pagination) {
+        List<Map> items = OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.orderItemQuantitiesDocument(), "orderItems", "orderId",
+                orderIds, OmsGqlQueries.ORDER_ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.ORDER_ITEMS_RESERVATION, pagination)
+        OmsGqlOrderGrainAssembler.putItemQuantities(orders, items)
+    }
+
     private static void attachItemsToShipGroups(OmsGqlClient client, List<Map> orders, List<String> orderIds, Map pagination) {
         List<Map> items = OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.unitOrderItemsDocument(), "orderItems", "orderId",
                 orderIds, OmsGqlQueries.ORDER_ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.UNIT_ITEMS_RESERVATION, pagination)

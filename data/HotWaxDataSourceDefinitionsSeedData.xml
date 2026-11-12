@@ -14,6 +14,8 @@
   the coded costs (OmsGqlQueries: 8 an order, 1.5 an extra scalar, slots x (1 + fields), the nested parts' measured
   costs, (950 - 100) / cost, at most 100 a page); exchange orders are dropped with their manifest beside the extract.
   Allowed differences: no shared read, a fixed reservation, counts at the metadata top level. DRAFT until cutover.
+  DAR-BE-251: itemQuantity (the order's item rows' quantities summed) is read from the items by the page's order ids only
+  when a run asks for it, as the coded read does.
 
   OMS_PRODUCTS_GQL_V1: the whole-catalogue products read, equal to the coded extract#HotWaxOmsGqlProducts
   (OmsGqlProductsDataDefinitionTests). wholeSet: both sweeps read once and every step sees the catalogue as one batch;
@@ -1049,6 +1051,23 @@
      ],
      "text": "statuses(first: 12) { statusId statusDatetime orderItemSeqId }",
      "cost": 50
+    },
+    {
+     "at": "scalars",
+     "when": [
+      {
+       "field": "wanted[*]",
+       "op": "IN",
+       "values": [
+        "itemQuantity"
+       ]
+      }
+     ],
+     "text": "orderId",
+     "cost": 0,
+     "set": {
+      "readsItemQuantity": "Y"
+     }
     }
    ],
    "connectionAt": "orders",
@@ -1150,6 +1169,92 @@
    ],
    "many": true,
    "as": "orderItemAssocs"
+  },
+  {
+   "id": "itemRows",
+   "kind": "query",
+   "document": "query OmsOrderItemQuantities($q: String, $first: Int, $after: String) {\n  orderItems(query: $q, first: $first, after: $after) {\n    edges { node { orderId orderItemSeqId quantity } }\n    pageInfo { hasNextPage endCursor }\n  }\n}",
+   "connectionAt": "orderItems",
+   "recordsAt": "edges[*].node",
+   "hasNextAt": "pageInfo.hasNextPage",
+   "cursorAt": "pageInfo.endCursor",
+   "bind": {
+    "ids": {
+     "variables": {
+      "q": "orderId:{ids}"
+     },
+     "from": "orders.orderId",
+     "chunk": 100,
+     "separator": ",",
+     "when": [
+      {
+       "field": "readsItemQuantity",
+       "op": "IN",
+       "values": [
+        "Y"
+       ]
+      }
+     ]
+    }
+   },
+   "paging": {
+    "firstVariable": "first",
+    "afterVariable": "after",
+    "pageSize": 100,
+    "maxPages": 20000
+   },
+   "reservation": 450
+  },
+  {
+   "id": "itemQuantityRows",
+   "kind": "join",
+   "into": "orders",
+   "from": "itemRows",
+   "on": [
+    {
+     "into": "orderId",
+     "from": "orderId"
+    }
+   ],
+   "many": true,
+   "as": "itemRowsOfOrder"
+  },
+  {
+   "id": "itemQuantityFact",
+   "kind": "derive",
+   "on": "orders",
+   "rules": [
+    {
+     "set": "itemQuantity",
+     "when": [
+      {
+       "field": "readsItemQuantity",
+       "op": "IN",
+       "values": [
+        "Y"
+       ]
+      }
+     ],
+     "value": {
+      "fn": "text",
+      "args": [
+       {
+        "fn": "decimalPlain",
+        "args": [
+         {
+          "fn": "sum",
+          "args": [
+           {
+            "copy": "itemRowsOfOrder[*].quantity"
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     }
+    }
+   ]
   },
   {
    "id": "groupList",
@@ -1432,6 +1537,7 @@
     "paymentPreferenceSlotsFull",
     "isCompleted",
     "paymentRefNums",
+    "itemQuantity",
     "paymentPreferences",
     "identifications",
     "shipGroups",
@@ -1463,6 +1569,7 @@
    "lastUpdatedTxStamp",
    "paymentMethodTypeIds",
    "paymentRefNums",
+   "itemQuantity",
    "paymentPreferences",
    "identifications",
    "shipGroups",

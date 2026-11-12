@@ -172,4 +172,18 @@ class OmsGqlOrderGrainAssemblerTests {
         assertNull(o.paymentRefNums)
         assertTrue(o.containsKey("paymentRefNums"))
     }
+
+    // DAR-BE-251. RAILS #42424EU (POS, 2026-11-12): one Shopify line of 8 is eight HotWax rows of 1, so the order's units
+    // are summed from its rows, never taken from orderItemCount (1).
+    @Test
+    void itemQuantityIsTheSumOfTheOrdersItemRows() {
+        List<Map> orders = [[orderId: "M1"], [orderId: "M2"], [orderId: "M3"]]
+        // HotWax answers quantity as a JSON number (live RAILS 2026-11-12: every order read 0 while only text was summed).
+        List<Map> rows = (1..8).collect { [orderId: "M1", orderItemSeqId: String.format("%02d", it), quantity: it % 2 ? 1 : 1.0d] } +
+                [[orderId: "M2", orderItemSeqId: "01", quantity: "2"], [orderId: "M2", orderItemSeqId: "01", quantity: "2"],
+                 [orderId: "OTHER", orderItemSeqId: "01", quantity: "5"]]
+        OmsGqlOrderGrainAssembler.putItemQuantities(orders, rows)
+        assertEquals(["8", "2", "0"], orders.collect { it.itemQuantity },
+                "eight rows of 1 are 8; a row a page repeats counts once; an order with no item row is 0, never blank")
+    }
 }
