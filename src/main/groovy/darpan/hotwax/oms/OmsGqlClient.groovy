@@ -1,23 +1,23 @@
 package darpan.hotwax.oms
 
+import darpan.facade.common.OutboundHttpClient
 import darpan.facade.common.OutboundHttpPolicy
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
+import org.eclipse.jetty.client.HttpClient
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 
-import java.net.http.HttpClient
-import java.net.http.HttpRequest
-import java.net.http.HttpResponse
 import java.nio.charset.StandardCharsets
-import java.time.Duration
 
 /**
  * One POST to {baseUrl}/rest/s1/graphql, with the cost bucket honoured.
  *
  * Headers are OmsExtractSupport.buildHeaders(config) (BEARER, BASIC, API_KEY with its configured header,
  * headersJson). The `sender` is injected for tests; the default re-validates the URL against
- * OutboundHttpPolicy at request time (audit 2026-06-11 #15).
+ * OutboundHttpPolicy at request time (audit 2026-06-11 #15) and sends through darpan's OutboundHttpClient (DAR-BE-262),
+ * whose DNS step is that policy's check: an OMS host name (tenant-configured, often self-hosted) that resolves to a
+ * public address when validated and to an internal one when connecting is refused at the connect.
  */
 class OmsGqlClient {
 
@@ -232,26 +232,35 @@ class OmsGqlClient {
     static Closure httpSender(Map config) { return httpSender(config, 0L) }
 
     /**
-     * The real HTTP sender; with {@code maxBodyBytes} above 0 the answer is read bounded ({@link #readBounded}). The
-     * agent's fresh-query path uses the bound; extraction paths keep the plain sender.
+     * The real HTTP sender; with {@code maxBodyBytes} above 0 the answer is streamed and read bounded ({@link #readBounded}).
+     * The agent's fresh-query path uses the bound; extraction paths read the answer whole (OutboundHttpClient's 256 MB cap).
+     *
+     * Timeouts: the shared guarded client for connectTimeoutSeconds (default 30) bounds the connect; a whole-body read is
+     * bounded by connect + readTimeoutSeconds (default 120) in all, so the agent's 15 s + 45 s still ends within its 60 s;
+     * a bounded (streamed) read waits at most that long for the status line and readTimeoutSeconds between bytes.
+     * A timeout, a refused or reset connection, or an address refused at the connect throws an IOException, which
+     * execute retries as transient. A URL the policy refuses outright is still an IllegalStateException up front.
      */
     static Closure httpSender(Map config, long maxBodyBytes) {
-        HttpClient http = HttpClient.newBuilder().connectTimeout(
-                Duration.ofSeconds(((config?.connectTimeoutSeconds ?: 30) as Number).intValue())).build()
-        int readTimeout = ((config?.readTimeoutSeconds ?: 120) as Number).intValue()
+        return httpSender(config, maxBodyBytes, null)
+    }
+
+    /** As above; {@code client} replaces the shared guarded client (tests pass one with their own DNS step). */
+    static Closure httpSender(Map config, long maxBodyBytes, HttpClient client) {
+        int connectTimeout = Math.max(1, ((config?.connectTimeoutSeconds ?: 30) as Number).intValue())
+        int readTimeout = Math.max(1, ((config?.readTimeoutSeconds ?: 120) as Number).intValue())
         return { String url, Map headers, String body ->
             def check = OutboundHttpPolicy.validate(url)
             if (!check.ok) throw new IllegalStateException("OMS endpoint URL blocked by outbound policy: ${check.error}")
-            HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(url))
-                    .timeout(Duration.ofSeconds(readTimeout))
-                    .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
-            headers.each { k, v -> b.header(k as String, v as String) }
+            HttpClient http = client ?: OutboundHttpClient.shared(connectTimeout * 1000L)
             if (maxBodyBytes > 0) {
-                HttpResponse<InputStream> streamed = http.send(b.build(), HttpResponse.BodyHandlers.ofInputStream())
-                return [statusCode: streamed.statusCode(), body: readBounded(streamed.body(), maxBodyBytes)]
+                // The status line within connect + read, then no gap longer than readTimeoutSeconds between bytes.
+                return OutboundHttpClient.stream(http, "POST", url, headers, body, readTimeout * 1000L) { Map answer ->
+                    [statusCode: answer.statusCode, body: readBounded((InputStream) answer.body, maxBodyBytes)]
+                }
             }
-            HttpResponse<String> resp = http.send(b.build(), HttpResponse.BodyHandlers.ofString())
-            return [statusCode: resp.statusCode(), body: resp.body()]
+            Map answer = OutboundHttpClient.send(http, "POST", url, headers, body, connectTimeout + readTimeout)
+            return [statusCode: answer.statusCode, body: answer.body]
         }
     }
 }

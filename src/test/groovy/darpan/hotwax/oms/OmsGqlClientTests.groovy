@@ -232,4 +232,50 @@ class OmsGqlClientTests {
             OmsGqlClient.readBounded(new ByteArrayInputStream(new byte[1025]), 1024)
         }
     }
+
+    // ---- DAR-BE-262 follow-up: the real sender goes through darpan's guarded OutboundHttpClient ----
+
+    @Test
+    void "DAR-BE-262: an OMS host that resolves to an internal address at the connect gets no socket and fails as transient"() {
+        ServerSocket server = new ServerSocket(0, 5, InetAddress.getByAddress([127, 0, 0, 1] as byte[]))
+        server.setSoTimeout(200)
+        java.util.concurrent.atomic.AtomicInteger accepted = new java.util.concurrent.atomic.AtomicInteger()
+        boolean stop = false
+        Thread acceptor = Thread.start {
+            while (!stop) {
+                try { Socket sock = server.accept(); accepted.incrementAndGet(); sock.close() } catch (SocketTimeoutException ignored) { } catch (IOException ignored) { break }
+            }
+        }
+        // Public when OutboundHttpPolicy.validate looks (here: no DNS answer, which validate allows), loopback at the connect.
+        def rebinding = { String host -> [InetAddress.getByAddress(host, [127, 0, 0, 1] as byte[])] as InetAddress[] } as java.util.function.Function<String, InetAddress[]>
+        org.eclipse.jetty.client.HttpClient guarded = darpan.facade.common.OutboundHttpClient.newClient(
+                new darpan.facade.common.OutboundHttpClient.VettedAddressResolver(rebinding))
+        try {
+            Map config = CONFIG + [baseUrl: "https://self-hosted-oms.invalid:${server.localPort}".toString(), maxPageAttempts: 2, retryBackoffMillis: 0]
+            OmsGqlClient c = new OmsGqlClient(config, OmsGqlClient.httpSender(config, 0L, guarded))
+            c.sleeper = { long ms -> }
+            OmsGqlException e = assertThrows(OmsGqlException) { c.execute("query Probe { orders { edges { node { orderId } } } }", null, 10) }
+            assertEquals("TRANSIENT", e.code)
+            assertEquals(2, c.callCount)
+
+            Closure bounded = OmsGqlClient.httpSender(config, 1024L, guarded)
+            assertThrows(IOException) { bounded.call(c.url, [:], "{}") }
+            Thread.sleep(300)
+            assertEquals(0, accepted.get(), "no connection reached the loopback server")
+        } finally {
+            stop = true
+            guarded.stop()
+            server.close()
+            acceptor.join(2000)
+        }
+    }
+
+    @Test
+    void "DAR-BE-262: a URL the policy refuses outright still fails before any request"() {
+        Closure sender = OmsGqlClient.httpSender([baseUrl: "http://oms.example.com"], 0L)
+        def e = assertThrows(IllegalStateException) { sender.call("http://oms.example.com/rest/s1/graphql", [:], "{}") }
+        assertTrue(e.message.contains("https"), e.message)
+        def metadata = assertThrows(IllegalStateException) { sender.call("https://169.254.169.254/rest/s1/graphql", [:], "{}") }
+        assertTrue(metadata.message.contains("blocked by outbound policy"), metadata.message)
+    }
 }
