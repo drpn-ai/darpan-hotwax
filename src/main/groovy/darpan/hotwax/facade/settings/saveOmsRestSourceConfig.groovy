@@ -23,7 +23,7 @@ String isActiveValue = normalizeBool(isActive, true) ? "Y" : "N"
 String canReadOrdersValue = normalizeBool(canReadOrders, true) ? "Y" : "N"
 String activeTenantUserGroupId = TenantAccessSupport.currentActiveTenantUserGroupId(ec)
 
-if (!TenantAccessSupport.requireActiveTenantWriteAccess(ec)) {
+if (!TenantAccessSupport.requireActiveTenantRunAccess(ec)) {
     Map envelope = FacadeSupport.envelope(ec)
     ok = envelope.ok
     messages = envelope.messages
@@ -78,7 +78,7 @@ if (!ec.message.hasError()) {
         OmsExtractSupport.requireWritableTenantConfig(
                 existingConfig ? [companyUserGroupId: existingConfig.companyUserGroupId] : null,
                 activeTenantUserGroupId,
-                TenantAccessSupport.hasActiveTenantWriteAccess(ec),
+                TenantAccessSupport.hasActiveTenantRunAccess(ec),
                 isSharedPeer
         )
         if (configIdValue && existingConfig == null) ec.message.addError("Requested OMS source config was not found.")

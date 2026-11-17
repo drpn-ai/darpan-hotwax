@@ -32,7 +32,7 @@ if (!ec.message.hasError()) {
         OmsExtractSupport.requireWritableTenantConfig(
             isOwner ? [companyUserGroupId: config.companyUserGroupId] : null,
             activeTenantUserGroupId,
-            TenantAccessSupport.hasActiveTenantWriteAccess(ec)
+            TenantAccessSupport.hasActiveTenantRunAccess(ec)
         )
     } catch (IllegalArgumentException e) {
         ec.message.addError(e.message)
