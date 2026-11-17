@@ -174,7 +174,7 @@ class OmsOrderStatusLookupTests {
         List<Map> items = [[orderId: "150738", orderItemSeqId: "01", statusId: "ITEM_COMPLETED", shipGroupSeqId: "00004"],
                            [orderId: "150738", orderItemSeqId: "02", statusId: "ITEM_COMPLETED", shipGroupSeqId: "00003"]]
         List<Map> orders = [[orderId: "150738", shipGroups: [edges: [
-                [node: [shipGroupSeqId: "00003", facilityId: "100102", facility: [externalId: "77"]]],
+                [node: [shipGroupSeqId: "00003", facilityId: "100102", shipmentMethodTypeId: "STANDARD", facility: [externalId: "77"]]],
                 [node: [shipGroupSeqId: "00004", facilityId: "100102", facility: [externalId: "77"]]],
                 [node: [shipGroupSeqId: "00002", facilityId: "_NA_", facility: null]]]]],
                             [orderId: "NOT_ASKED", shipGroups: [edges: [[node: [shipGroupSeqId: "00001", facilityId: "100000"]]]]]]
@@ -196,7 +196,7 @@ class OmsOrderStatusLookupTests {
 
         Map groups = OmsOrderStatusLookupSupport.lookupShipGroupFacilities(CONFIG, ["150738", "999999"])
         assertTrue(groups.ok as Boolean)
-        assertEquals(["150738|00003": ["100102", "77"], "150738|00004": ["100102", "77"], "150738|00002": ["_NA_", null]],
+        assertEquals(["150738|00003": ["100102", "77", "STANDARD"], "150738|00004": ["100102", "77", null], "150738|00002": ["_NA_", null, null]],
                 groups.shipGroupFacilityByKey, "a ship group with no facility record keeps a null externalId; an order not asked is dropped")
         assertEquals(["999999"], groups.missingIds)
         assertTrue(requests.last().query.toString().contains("facility { externalId }"))

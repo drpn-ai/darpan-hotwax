@@ -441,7 +441,7 @@
             <parameter name="itemShipGroupByKey" type="Map"><description>DAR-BE-245, withItems: "orderId|orderItemSeqId" ->
                 the item's shipGroupSeqId.</description></parameter>
             <parameter name="shipGroupFacilityByKey" type="Map"><description>DAR-BE-245, withShipGroupFacilities:
-                "orderId|shipGroupSeqId" -> [facilityId, the facility's externalId].</description></parameter>
+                "orderId|shipGroupSeqId" -> [facilityId, the facility's externalId, DAR-BE-294: shipmentMethodTypeId].</description></parameter>
             <parameter name="missingIds" type="List"><description>Ids HotWax has no order for.</description></parameter>
             <parameter name="errors" type="List"/>
         </out-parameters>

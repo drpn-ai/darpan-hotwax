@@ -416,13 +416,14 @@ class OmsGqlQueries {
 
     // DAR-BE-245: each asked order's ship groups and where each ships from, by facility externalId (the NetSuite location
     // id on RAILS). Asked only of the few orders whose completed ship groups outnumber NetSuite's fulfillments.
+    // DAR-BE-294: and how each ships (shipmentMethodTypeId), for an open line's own group.
     static final int SHIP_GROUP_FACILITIES_ID_CHUNK = 20
     static final int SHIP_GROUP_FACILITIES_RESERVATION = 600
 
     static String shipGroupFacilitiesDocument() {
         return '''query OmsShipGroupFacilities($q: String, $first: Int, $after: String) {
   orders(query: $q, first: $first, after: $after) {
-    edges { node { orderId shipGroups(first: 10) { edges { node { shipGroupSeqId facilityId facility { externalId } } } } } }
+    edges { node { orderId shipGroups(first: 10) { edges { node { shipGroupSeqId facilityId shipmentMethodTypeId facility { externalId } } } } } }
     pageInfo { hasNextPage endCursor }
   }
 }'''

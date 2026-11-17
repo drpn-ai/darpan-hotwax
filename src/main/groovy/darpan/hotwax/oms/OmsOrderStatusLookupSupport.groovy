@@ -98,8 +98,9 @@ class OmsOrderStatusLookupSupport {
 
     /**
      * DAR-BE-245. Where each asked order's ship groups ship from: itemKey(orderId, shipGroupSeqId) -> [facilityId,
-     * externalId] (the facility's externalId is the NetSuite location id on RAILS). Asked only of the orders whose
-     * completed ship groups outnumber NetSuite's fulfillments, so the facility read stays small. Same guarantees as
+     * externalId, shipmentMethodTypeId] (the facility's externalId is the NetSuite location id on RAILS; DAR-BE-294 adds
+     * how the group ships). Asked only of the orders whose completed ship groups outnumber NetSuite's fulfillments, or
+     * (DAR-BE-294) that have an approved open line, so the facility read stays small. Same guarantees as
      * the other lookups: only asked orders count, and a failed call classifies nothing.
      */
     static Map<String, Object> lookupShipGroupFacilities(Object rawConfig, Collection orderIds) {
@@ -124,7 +125,8 @@ class OmsOrderStatusLookupSupport {
                         answered.add(orderId)
                         OmsGqlOrderGrainAssembler.edgeNodes((Map) n.shipGroups).each { Map g ->
                             String seq = normalize(g.shipGroupSeqId)
-                            if (seq) byKey.put(itemKey(orderId, seq), [normalize(g.facilityId), normalize(((Map) g.facility)?.externalId)])
+                            if (seq) byKey.put(itemKey(orderId, seq), [normalize(g.facilityId), normalize(((Map) g.facility)?.externalId),
+                                    normalize(g.shipmentMethodTypeId)])
                         }
                     }
             return [ok: true, shipGroupFacilityByKey: byKey, missingIds: ids.findAll { !answered.contains(it) }, errors: []]
