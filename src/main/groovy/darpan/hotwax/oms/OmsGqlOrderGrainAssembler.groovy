@@ -25,8 +25,10 @@ class OmsGqlOrderGrainAssembler {
      * DAR-BE-251: itemQuantity on each order, the sum of its item rows' quantities, as a plain number ("8", never "8.0",
      * so it equals Shopify's subtotalLineItemsQuantity); "0" for an order with no item row. Rows of orders not on the page
      * are ignored, and a row is counted once however many times a page repeats it.
+     * DAR-BE-300: `originalOfExchange` (EXC- order id -> the original it exchanges) adds each exchange order's rows to its
+     * original's count: Shopify puts the exchange line on the original order, HotWax on a separate EXC- order.
      */
-    static void putItemQuantities(List<Map> orders, List<Map> itemRows) {
+    static void putItemQuantities(List<Map> orders, List<Map> itemRows, Map<String, String> originalOfExchange = [:]) {
         Map<String, BigDecimal> sums = [:]
         Set<String> seen = new HashSet<String>()
         for (Map row : (itemRows ?: [])) {
@@ -37,8 +39,14 @@ class OmsGqlOrderGrainAssembler {
             Object q = raw instanceof Number ? new BigDecimal(raw.toString()) : toDecimal(raw)
             sums.put(orderId, (sums.get(orderId) ?: BigDecimal.ZERO) + (q instanceof BigDecimal ? (BigDecimal) q : BigDecimal.ZERO))
         }
+        Map<String, BigDecimal> exchanged = [:]
+        (originalOfExchange ?: [:]).each { String exchangeId, String originalId ->
+            BigDecimal units = sums.get(exchangeId)
+            if (units != null && originalId) exchanged.put(originalId, (exchanged.get(originalId) ?: BigDecimal.ZERO) + units)
+        }
         for (Map order : (orders ?: [])) {
-            BigDecimal sum = sums.get(order.get("orderId") as String) ?: BigDecimal.ZERO
+            String orderId = order.get("orderId") as String
+            BigDecimal sum = (sums.get(orderId) ?: BigDecimal.ZERO) + (exchanged.get(orderId) ?: BigDecimal.ZERO)
             order.put(OmsGqlQueries.ITEM_QUANTITY_FIELD, sum.signum() == 0 ? "0" : sum.stripTrailingZeros().toPlainString())
         }
     }

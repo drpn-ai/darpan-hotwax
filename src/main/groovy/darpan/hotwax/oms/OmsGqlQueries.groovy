@@ -217,6 +217,11 @@ class OmsGqlQueries {
         return pageVariables("orderId:${orderIds.join(',')} orderItemAssocTypeId:EXCHANGE".toString(), ASSOC_PAGE_SIZE, after)
     }
 
+    /** DAR-BE-300: the EXCHANGE assocs pointing AT these orders (toOrderId), naming each original's EXC- orders. */
+    static Map exchangeAssocsToVariables(List<String> orderIds, String after) {
+        return pageVariables("toOrderId:${orderIds.join(',')} orderItemAssocTypeId:EXCHANGE".toString(), ASSOC_PAGE_SIZE, after)
+    }
+
     // --- DAR-BE-040: returns by-id lookup ------------------------------------------------------
 
     /**

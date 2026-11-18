@@ -369,11 +369,36 @@ class OmsGqlOrderPageSource {
      * name, each read by id once per page as the returns read does (nesting them is charged per order), for the audit
      * finding.
      */
-    /** DAR-BE-251: each order's units, its item rows' quantities summed; an order HotWax returned no item for has 0. */
+    /**
+     * DAR-BE-251: each order's units, its item rows' quantities summed; an order HotWax returned no item for has 0.
+     * DAR-BE-300: plus the units of its EXC- orders (the EXCHANGE assocs pointing at it), since Shopify keeps an
+     * exchange line on the original order.
+     */
     private static void attachItemQuantities(OmsGqlClient client, List<Map> orders, List<String> orderIds, Map pagination) {
+        if (!orderIds) return
+        Map<String, String> originalOfExchange = exchangeOrdersOf(client, orderIds, pagination)
+        List<String> itemOrderIds = (orderIds + originalOfExchange.keySet()).unique()
         List<Map> items = OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.orderItemQuantitiesDocument(), "orderItems", "orderId",
-                orderIds, OmsGqlQueries.ORDER_ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.ORDER_ITEMS_RESERVATION, pagination)
-        OmsGqlOrderGrainAssembler.putItemQuantities(orders, items)
+                itemOrderIds, OmsGqlQueries.ORDER_ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.ORDER_ITEMS_RESERVATION, pagination)
+        OmsGqlOrderGrainAssembler.putItemQuantities(orders, items, originalOfExchange)
+    }
+
+    /**
+     * DAR-BE-300: EXC- order id -> the original it exchanges, for the given originals. A row naming an order not asked
+     * for, or not an EXCHANGE, means HotWax ignored the filter: MALFORMED, never a count built on someone else's orders.
+     */
+    static Map<String, String> exchangeOrdersOf(OmsGqlClient client, List<String> orderIds, Map pagination) {
+        Set<String> asked = orderIds as Set<String>
+        Map<String, String> originalOfExchange = [:]
+        for (Map assoc : fetchExchangeAssocs(client, orderIds, pagination, true)) {
+            String original = assoc.toOrderId as String
+            if (!asked.contains(original) || assoc.orderItemAssocTypeId != "EXCHANGE") {
+                throw new OmsGqlException("MALFORMED", "exchange assocs by toOrderId answered ${assoc.orderItemAssocTypeId} to ${original}, which was not asked")
+            }
+            String exchange = assoc.orderId as String
+            if (exchange && exchange != original) originalOfExchange.putIfAbsent(exchange, original)
+        }
+        return originalOfExchange
     }
 
     private static void attachItemsToShipGroups(OmsGqlClient client, List<Map> orders, List<String> orderIds, Map pagination) {
@@ -411,13 +436,15 @@ class OmsGqlOrderPageSource {
         }
     }
 
-    static List<Map> fetchExchangeAssocs(OmsGqlClient client, List<String> orderIds, Map pagination) {
+    /** The EXCHANGE assocs from these orders, or (`toOrders`, DAR-BE-300) the ones pointing at them. */
+    static List<Map> fetchExchangeAssocs(OmsGqlClient client, List<String> orderIds, Map pagination, boolean toOrders = false) {
         List<Map> all = []
         String cursor = null
         Set<String> seenCursors = [] as Set
         while (true) {
-            Map page = client.execute(OmsGqlQueries.exchangeAssocsDocument(),
-                    OmsGqlQueries.exchangeAssocsVariables(orderIds, cursor), OmsGqlQueries.ASSOC_RESERVATION)
+            Map variables = toOrders ? OmsGqlQueries.exchangeAssocsToVariables(orderIds, cursor)
+                    : OmsGqlQueries.exchangeAssocsVariables(orderIds, cursor)
+            Map page = client.execute(OmsGqlQueries.exchangeAssocsDocument(), variables, OmsGqlQueries.ASSOC_RESERVATION)
             synchronized (pagination) { pagination.exchangeAssocCalls = (pagination.exchangeAssocCalls as int) + 1 }
             Map connection = requireConnection(page, "orderItemAssocs")
             all.addAll(OmsGqlOrderGrainAssembler.edgeNodes(connection))

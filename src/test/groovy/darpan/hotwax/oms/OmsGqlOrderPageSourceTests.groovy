@@ -521,6 +521,43 @@ class OmsGqlOrderPageSourceTests {
         } finally { out.delete() }
     }
 
+    /**
+     * DAR-BE-300: Shopify keeps an exchange line on the original order; HotWax puts it on an EXC- order. itemQuantity is
+     * the original's units plus its EXC- orders' (the EXCHANGE assocs pointing at it), read in the same items call.
+     */
+    @Test
+    void itemQuantityAddsTheUnitsOfTheOrdersExchangeOrders() {
+        ScriptedClient client = new ScriptedClient([
+                ordersPage([order("M1"), order("M2")], false),
+                assocsPage([]),
+                assocsPage([[orderId: "E1", orderItemSeqId: "00101", toOrderId: "M1", orderItemAssocTypeId: "EXCHANGE"],
+                            [orderId: "E1", orderItemSeqId: "00102", toOrderId: "M1", orderItemAssocTypeId: "EXCHANGE"]]),
+                itemsPage([item("M1", "00101", "00001"), item("M1", "00102", "00001"), item("M2", "00101", "00001"),
+                           item("E1", "00101", "00001"), item("E1", "00102", "00001")])])
+        File out = File.createTempFile("gql-", ".json")
+        try {
+            run(client, out, ["orderId", "externalId", "itemQuantity"])
+            assertEquals("toOrderId:M1,M2 orderItemAssocTypeId:EXCHANGE", ((Map) client.calls[2].variables).q)
+            assertEquals("orderId:M1,M2,E1", ((Map) client.calls[3].variables).q)
+            List records = (List) (new JsonSlurper().parse(out) as Map).records
+            assertEquals(["4", "1"], records.collect { (it as Map).itemQuantity })
+        } finally { out.delete() }
+    }
+
+    /** DAR-BE-300: an assoc to an order not asked for means HotWax ignored the toOrderId filter; never count on it. */
+    @Test
+    void anExchangeAssocToAnOrderNotAskedForFailsTheExtract() {
+        ScriptedClient client = new ScriptedClient([
+                ordersPage([order("M1")], false),
+                assocsPage([]),
+                assocsPage([[orderId: "E7", toOrderId: "M7", orderItemAssocTypeId: "EXCHANGE"]])])
+        File out = File.createTempFile("gql-", ".json"); out.delete()
+        Map result = run(client, out, ["orderId", "externalId", "itemQuantity"])
+        assertTrue(((List) result.errors)[0].toString().contains("MALFORMED"), String.valueOf(result.errors))
+        assertEquals(false, result.dataAvailable)
+        assertFalse(out.exists())
+    }
+
     // ---- review fix pass ----
 
     @Test

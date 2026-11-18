@@ -186,4 +186,16 @@ class OmsGqlOrderGrainAssemblerTests {
         assertEquals(["8", "2", "0"], orders.collect { it.itemQuantity },
                 "eight rows of 1 are 8; a row a page repeats counts once; an order with no item row is 0, never blank")
     }
+
+    // DAR-BE-300. MALBON #931985 (2026-11-18): Shopify 6 units on the original, HotWax 2 on it + 4 on its EXC- orders.
+    @Test
+    void anExchangeOrdersUnitsCountOnItsOriginal() {
+        List<Map> orders = [[orderId: "M1"], [orderId: "M2"]]
+        List<Map> rows = [[orderId: "M1", orderItemSeqId: "01", quantity: 1], [orderId: "M1", orderItemSeqId: "02", quantity: 1],
+                          [orderId: "E1", orderItemSeqId: "01", quantity: 3], [orderId: "E2", orderItemSeqId: "01", quantity: 1],
+                          [orderId: "E3", orderItemSeqId: "01", quantity: 9]]
+        OmsGqlOrderGrainAssembler.putItemQuantities(orders, rows, [E1: "M1", E2: "M1", E3: "M9", E4: "M2"])
+        assertEquals(["6", "0"], orders.collect { it.itemQuantity },
+                "both exchanges add to M1; an exchange of an order not on the page, or with no item row, adds nothing")
+    }
 }
