@@ -11,6 +11,13 @@ OmsScriptServiceSupport.runExtract(ec, context, [
         excludedRecordsSidecar : true,
         exchangeManifestSidecar: true,
         extract                : { Map a ->
+            // DAR-BE-318: the window is orderDate and nothing else. Absent or orderDate reads as today; any other field is
+            // refused before a call, never ignored.
+            String windowField = windowFieldName?.toString()?.trim()
+            if (windowField && windowField != "orderDate") {
+                return [errors: ["The OMS GraphQL order extract windows on orderDate only, not '${windowField}'.".toString()],
+                        warnings: [], requestMetadata: [:], recordCount: 0, dataAvailable: false]
+            }
             // DAR-BE-064: same REST pipeline (exclusions, filters, projection, sink, manifest), GraphQL pages.
             // DAR-BE-205: a conclusion lookup answers for every order it names, exchanges included.
             OmsExtractSupport.extractOrdersToFile(a.sourceConfig, windowStart, windowEnd, a.workFile,
@@ -20,6 +27,8 @@ OmsScriptServiceSupport.runExtract(ec, context, [
                             // DAR-BE-120: read by key for a conclusion lookup.
                             [lookupKeys: (lookupKeys instanceof List) ? (List) lookupKeys : null, lookupKeyField: lookupKeyField,
                              // DAR-BE-239: the fields the run's rules read, selected even without a projection.
-                             readFields: (readFields instanceof List) ? (List) readFields : null]))
+                             readFields: (readFields instanceof List) ? (List) readFields : null]),
+                    // DAR-BE-318: a dataset refresh lists every exchange order of its 60 days; runs keep the default
+                    (exchangeManifestMaxEntries as Integer) ?: OmsExtractSupport.EXCHANGE_MANIFEST_MAX_ENTRIES)
         },
 ])

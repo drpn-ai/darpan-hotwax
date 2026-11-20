@@ -131,7 +131,9 @@ class OmsExtractScriptCharacterizationTests {
         List<String> plainOut = ["dataAvailable", "fileLocation", "fileName", "recordCount", "requestMetadata", "warnings", "errors"]
         Map<String, List<List<String>>> expected = [
                 // DAR-BE-120: read by key, for a conclusion lookup (an order's notes behind R1's "never reached NetSuite").
-                "extract#HotWaxOmsGqlOrders"           : [windowedIn + ["lookupKeys", "lookupKeyField", "readFields", "conclusionLookup"], ordersOut],
+                // DAR-BE-318: windowFieldName (orderDate only) and the dataset read's exchange-manifest cap, its own (not the contract's).
+                "extract#HotWaxOmsGqlOrders"           : [windowedIn + ["lookupKeys", "lookupKeyField", "readFields", "conclusionLookup",
+                                                                        "windowFieldName", "exchangeManifestMaxEntries"], ordersOut],
                 // DAR-BE-094 R8 / R16 added the two returns-scope switches.
                 // DAR-BE-119: lookupKeys / lookupKeyField, an audit's re-check of its older open findings by key.
                 "extract#HotWaxOmsGqlReturns"          : [returnsIn + ["lookupKeys", "lookupKeyField", "includeReturnsWithoutShopifyRef", "withReturnCredit", "onlyCancelledReturns"], plainOut],
@@ -300,6 +302,75 @@ class OmsExtractScriptCharacterizationTests {
                 products   : { Map v -> conn([[productId: "P1", internalName: "219-001-G"]]) },
                 goodIdentifications: { Map v -> conn([]) },
         ]
+    }
+
+    /** DAR-BE-318 (3b1-4): the orders window is orderDate and nothing else; any other field is refused before a call. */
+    @Test
+    void theOrdersWindowFieldIsOrderDateOnly() {
+        assertEquals("orderDate", ec.factory.serviceFacade.getServiceDefinition(SVC + "extract#HotWaxOmsGqlOrders")
+                .getInParameter("windowFieldName").attribute("default-value"), "a slice reads the read's own field off its default")
+        assertNull(ec.factory.serviceFacade.getServiceDefinition(SVC + "extract#HotWaxOmsGqlProducts").getInParameter("windowFieldName"),
+                "the products read windows on nothing, so it declares no window field a dataset could keep it by")
+        ["entryDate", "createdAt", "lastUpdatedTxStamp"].each { String field ->
+            String out = freshOut()
+            sentBodies.clear()
+            serveGql(out, [], [orders: { Map v -> conn([gqlOrder("G1")]) }, orderItemAssocs: { Map v -> conn([]) }])
+
+            Map result = extract("HotWaxOmsGqlOrders", baseParams(out) + [windowFieldName: field])
+
+            assertTrue(((List) result.errors).any { it.toString().contains("orderDate") && it.toString().contains(field) }, result.errors.toString())
+            assertEquals(0, result.recordCount, field)
+            assertNull(result.fileLocation, field)
+            assertTrue(sentBodies.isEmpty(), "${field}: refused before any OMS call")
+            assertEquals([], listing(out), "${field}: no file, no work file")
+        }
+    }
+
+    /** DAR-BE-318: with windowFieldName absent, blank or orderDate, the orders read asks the same bytes and writes the same file. */
+    @Test
+    void anAbsentOrdersWindowFieldIsToday() {
+        Map<String, Map> runs = [:]
+        [absent: null, blank: "  ", orderDate: "orderDate"].each { String label, String field ->
+            String out = freshOut()
+            sentBodies.clear()
+            serveGql(out, [], [orders: { Map v -> conn([gqlOrder("G1"), gqlOrder("G2")]) },
+                               orderItemAssocs: { Map v -> conn([[orderId: "G2", orderItemSeqId: "01", toOrderId: "G9",
+                                                                  toOrderItemSeqId: "01", orderItemAssocTypeId: "EXCHANGE"]]) }])
+            Map params = baseParams(out)
+            if (field != null) params.windowFieldName = field
+            Map result = extract("HotWaxOmsGqlOrders", params)
+            assertEquals([], result.errors, "${label}: ${result}")
+            runs[label] = [bodies: new ArrayList<String>(sentBodies), records: records(result), count: result.recordCount,
+                           manifest: fileAt(result.exchangeManifestFileLocation as String)]
+        }
+        assertFalse(runs.absent.bodies.isEmpty())
+        [runs.blank, runs.orderDate].each { Map run ->
+            assertEquals(runs.absent.bodies, run.bodies)
+            assertEquals(runs.absent.records, run.records)
+            assertEquals(runs.absent.count, run.count)
+            assertEquals(runs.absent.manifest, run.manifest)
+        }
+    }
+
+    /** DAR-BE-318: a dataset read asks for a longer exchange manifest; a run keeps the 500 it always listed. */
+    @Test
+    void theExchangeManifestCapIsTheReadsOwnWhenGiven() {
+        Closure<Map> read = { Integer cap ->
+            String out = freshOut()
+            serveGql(out, [], [orders: { Map v -> conn([gqlOrder("G1"), gqlOrder("G2"), gqlOrder("G3")]) },
+                               orderItemAssocs: { Map v -> conn(["G2", "G3"].collect { [orderId: it, orderItemSeqId: "01", toOrderId: "X${it}",
+                                                                                         toOrderItemSeqId: "01", orderItemAssocTypeId: "EXCHANGE"] }) }])
+            Map result = extract("HotWaxOmsGqlOrders", baseParams(out) + (cap == null ? [:] : [exchangeManifestMaxEntries: cap]))
+            assertEquals([], result.errors, result.toString())
+            return [meta: result.requestMetadata, manifest: JSON.parseText(fileAt(result.exchangeManifestFileLocation as String))]
+        }
+        Map capped = read(1)
+        assertEquals(1, capped.manifest.manifest.size())
+        assertEquals(true, capped.manifest.truncated)
+        assertEquals(true, capped.meta.filters.exchangeManifestTruncated)
+        Map whole = read(null)
+        assertEquals(2, whole.manifest.manifest.size())
+        assertEquals(false, whole.manifest.truncated)
     }
 
     /** DAR-BE-318 (3b1-4): the returns window is entryDate and nothing else; any other field is refused before a call. */

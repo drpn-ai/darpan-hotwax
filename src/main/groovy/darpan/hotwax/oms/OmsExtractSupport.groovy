@@ -3,6 +3,7 @@ package darpan.hotwax.oms
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 
+import darpan.dataset.KeptFieldsProjection
 import darpan.facade.common.SharedConfigAccessSupport
 import darpan.reconciliation.automation.SourceEndpointAccessSupport
 import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
@@ -75,7 +76,8 @@ class OmsExtractSupport {
                                                    File targetFile, List keepRecordFields,
                                                    Closure pageProgressListener,
                                                    List excludeFilters, Map extractOptions,
-                                                   Closure pageFetcher) {
+                                                   Closure pageFetcher,
+                                                   int exchangeManifestMaxEntries = EXCHANGE_MANIFEST_MAX_ENTRIES) {
         OrdersDocumentSink sink = new OrdersDocumentSink({ ->
             targetFile.getParentFile()?.mkdirs()
             return new BufferedWriter(new OutputStreamWriter(new FileOutputStream(targetFile), StandardCharsets.UTF_8))
@@ -83,7 +85,7 @@ class OmsExtractSupport {
         Map<String, Object> result
         try {
             result = extractOrdersInternal(rawConfig, windowStart, windowEnd, sink, keepRecordFields,
-                    pageProgressListener, excludeFilters, extractOptions, pageFetcher)
+                    pageProgressListener, excludeFilters, extractOptions, pageFetcher, exchangeManifestMaxEntries)
         } catch (Exception e) {
             sink.abort()
             targetFile.delete()
@@ -114,7 +116,8 @@ class OmsExtractSupport {
                                                              OrdersDocumentSink sink, List keepRecordFields,
                                                              Closure pageProgressListener,
                                                              List excludeFilters, Map extractOptions,
-                                                             Closure pageFetcher) {
+                                                             Closure pageFetcher,
+                                                             int exchangeManifestMaxEntries = EXCHANGE_MANIFEST_MAX_ENTRIES) {
         Set<String> keepFieldSet = normalizeKeepFields(keepRecordFields)
         Map config = toPlainMap(rawConfig)
         // Synchronized: the page source shapes pages on its slice threads.
@@ -199,7 +202,7 @@ class OmsExtractSupport {
                 fieldAbsentByRuleCounts.put(sequenceNum, (fieldAbsentByRuleCounts.get(sequenceNum) ?: 0) + count)
             }
             for (Object entry : (List) (pageBundle.excludedExchangeOrders ?: [])) {
-                if (exchangeManifest.size() >= EXCHANGE_MANIFEST_MAX_ENTRIES) { exchangeManifestTruncated = true; break }
+                if (exchangeManifest.size() >= exchangeManifestMaxEntries) { exchangeManifestTruncated = true; break }
                 exchangeManifest.add(entry)
             }
             // DAR-BE-050: outputCount, not filteredCount. At unit grain one filtered ORDER serializes as many UNITS.
@@ -734,23 +737,13 @@ class OmsExtractSupport {
         return scalars
     }
 
+    /** DAR-BE-318 (ruling P3b1-8): the one projection a kept-copy slice also trims with (darpan KeptFieldsProjection). */
     protected static Set<String> normalizeKeepFields(List keepRecordFields) {
-        if (!keepRecordFields) return null
-        Set<String> keepFieldSet = new LinkedHashSet<String>()
-        keepRecordFields.each { Object field ->
-            String name = normalize(field)
-            if (name) keepFieldSet.add(name)
-        }
-        return keepFieldSet ?: null
+        return KeptFieldsProjection.keepSet(keepRecordFields)
     }
 
     protected static Map trimRecord(Object record, Set<String> keepFieldSet) {
-        if (!(record instanceof Map)) return [:]
-        Map trimmed = new LinkedHashMap()
-        ((Map) record).each { Object key, Object value ->
-            if (keepFieldSet.contains(key?.toString()?.trim())) trimmed.put(key, value)
-        }
-        return trimmed
+        return KeptFieldsProjection.project(record, keepFieldSet)
     }
 
     static Map<String, String> buildHeaders(Map config) {

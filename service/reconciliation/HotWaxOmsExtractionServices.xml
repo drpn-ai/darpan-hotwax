@@ -102,6 +102,18 @@
             <parameter name="conclusionLookup" type="Boolean" default="false"><description>DAR-BE-205. With lookupKeys: this
                 read answers a conclusion lookup, so exchange orders come back too (the exchange exclusion is for a
                 sales-order comparison). An audit re-check by key leaves it off and keeps the exclusion.</description></parameter>
+            <parameter name="windowFieldName" default-value="orderDate">
+                <description>Only orderDate (or empty): the one field the OMS orders read windows on. Any other field is
+                    refused rather than ignored, so a dataset refresh that names a field the read cannot honour fails
+                    instead of silently windowing on orderDate (DAR-BE-318). The default declares that field, so a kept copy
+                    serving a run whose connector names no field slices on the field this read windows on. Declared here,
+                    not on HotWaxOmsOrdersContract: extract#HotWaxOmsGqlProducts implements the contract and reads no window.</description>
+            </parameter>
+            <parameter name="exchangeManifestMaxEntries" type="Integer">
+                <description>DAR-BE-318. The most excluded exchange orders the exchange-manifest side file lists (default 500,
+                    then exchangeManifestTruncated). A dataset refresh reads 60 days at once and asks for more, so a slice of
+                    its copy can list a day's exchanges as that day's live read would. Runs never send it.</description>
+            </parameter>
         </in-parameters>
     </service>
 

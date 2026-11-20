@@ -2,6 +2,7 @@ package darpan.hotwax.oms
 
 import groovy.json.JsonOutput
 
+import darpan.dataset.KeptFieldsProjection
 import darpan.reconciliation.source.SourceFilterSupport
 
 import static darpan.common.ValueSupport.normalize
@@ -335,14 +336,9 @@ class OmsReturnsSourceSupport {
      * items — phase 2's composite key addresses it by JSON path.
      */
     protected static Map<String, Object> projectRecord(Map<String, Object> record, List keepRecordFields) {
-        if (!keepRecordFields) return record
-        Set<String> keep = keepRecordFields.collect { normalize(it) }.findAll { it } as Set
-        keep.add("items")
-        Map<String, Object> projected = [:]
-        record.each { Object key, Object value ->
-            if (keep.contains(String.valueOf(key))) projected.put(String.valueOf(key), value)
-        }
-        return projected
+        // DAR-BE-318 (ruling P3b1-8): the projection a kept-copy slice also trims with (darpan KeptFieldsProjection)
+        Set<String> keep = KeptFieldsProjection.keptBy(KeptFieldsProjection.OMS_RETURNS, keepRecordFields)
+        return keep == null ? record : (Map<String, Object>) KeptFieldsProjection.project(record, keep)
     }
 
     protected static Map<String, Object> buildMetadata(Map serverCounts, Map exclusionCounts,
