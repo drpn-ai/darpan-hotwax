@@ -308,9 +308,11 @@ class OmsGqlClientTests {
     @Test
     void aTenantWithAShareWaitsForItsPacer() {
         List<String> askedFor = []
-        // 25% of max 1000 = 250 in hand: the 2nd read spends it; the 3rd waits 250 / 12.5 per s = 20 s before it is sent,
-        // while the governor itself (1000 reported) would let it straight through.
-        assertEquals(["send", "send", "sleep 20000", "send"], threeReadsFor("TENANT_A", askedFor))
+        // The 1st read is free: before any answer the bucket's maximum is unknown (unbounded). Its answer reports max 1000,
+        // so 25% = 250 is held; the 2nd read spends the 250 and its answer (actual cost 100 of 250 reserved) refunds 150.
+        // The 3rd needs 100 more at 12.5 per s = 8 s before it is sent, while the governor (1000 reported) would let it
+        // straight through.
+        assertEquals(["send", "send", "sleep 8000", "send"], threeReadsFor("TENANT_A", askedFor))
         assertEquals(["TENANT_A"], askedFor, "the connection's tenant is asked, once per read through the policy cache")
     }
 
@@ -333,5 +335,24 @@ class OmsGqlClientTests {
         3.times { c.execute("query Q { orders { edges { node { orderId } } } }", null, 250) }
         assertEquals(["send", "send", "send"], events)
         assertEquals([], askedFor)
+    }
+
+    @Test
+    void thePacerWaitComesBeforeTheGovernorWaitAndBothAreSlept() {
+        PeakReadPolicy.limitsLoader = { def ec, String t -> new ReadLimits(25, false) }
+        List events = []
+        // Every answer: 100 of 1000 left at 50/s, actual cost 100. The governor then wants (250 - 100) / 50 per s = 3 s
+        // (plus its margin) before each later read; the pacer, as above, 8 s before the 3rd.
+        OmsGqlClient c = new OmsGqlClient(CONFIG + [companyUserGroupId: "TENANT_A"], { String url, Map headers, String body ->
+            events << "send"
+            return [statusCode: 200, body: JsonOutput.toJson(okBody([ok: true], 100))]
+        })
+        c.pacer = new OmsGqlTenantPacer({ -> 0L })
+        c.sleeper = { long ms -> events << ms }
+        3.times { c.execute("query Q { orders { edges { node { orderId } } } }", null, 250) }
+
+        assertEquals(["send", Long, "send", 8000L, Long, "send"], events.collect { it instanceof Long && it != 8000L ? Long : it })
+        // The governor's own waits ride a real clock, so they are a few ms under 3.5 s, never skipped.
+        [events[1], events[4]].each { long ms -> assertTrue(ms > 3000L && ms <= 3500L, "governor wait ${ms}") }
     }
 }

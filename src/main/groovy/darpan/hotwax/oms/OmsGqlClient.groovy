@@ -111,10 +111,12 @@ class OmsGqlClient {
         // bucket's refill. Read once per call (cached for a minute); no share, or a failed lookup, is today's path.
         String tenant = tenantId()
         Integer share = tenant ? PeakReadPolicy.limitsFor(tenant).hotwaxSharePct : null
+        // A share of 100 is the whole bucket, which the governor already keeps to: nothing to pace or refund.
+        boolean paced = share != null && share < 100
         for (int attempt = 0; ; attempt++) {
             // The pacer's wait comes first and is in addition to the governor's, never instead of it. It is not throttling,
             // so it does not count against MAX_THROTTLE_WAIT_MILLIS.
-            long paceWait = share != null ? pacer.sleepMillisFor(reservation, governor.restoreRate, governor.maximum, share) : 0L
+            long paceWait = paced ? pacer.sleepMillisFor(reservation, governor.restoreRate, governor.maximum, share) : 0L
             if (paceWait > 0L) sleeper.call(paceWait)
             long wait = governor.sleepMillisFor(reservation)
             if (wait > 0L) sleeper.call(wait)
@@ -143,6 +145,8 @@ class OmsGqlClient {
                 backoff = transientBackoff(++transientFailures, maxAttempts, retryBackoff, operation, e.toString())
             } finally {
                 governor.settle(reservation, extensions)
+                // The pacer was charged only when paced; it gets back what the read did not cost.
+                if (paced) pacer.settle(reservation, extensions)
                 governor.releaseCall()
                 // One line per call: where an extract's time goes (our wait vs OMS's answer) and the
                 // bucket exactly as OMS reports it, so a raised limit is visible without a probe.

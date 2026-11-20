@@ -86,4 +86,53 @@ class OmsGqlTenantPacerTests {
         assertEquals(0L, p.sleepMillisFor(250, 0d, 1000d, 25))
         assertTrue(p.sleepMillisFor(250, 0d, 1000d, 25) > 0L)
     }
+
+    // ---- Fix round 1: the server charges a read's actual cost, often less than reserved; the share is of what is spent.
+
+    @Test
+    void anAnswerRefundsWhatTheReadDidNotCost() {
+        OmsGqlTenantPacer p = new OmsGqlTenantPacer({ -> 0L })
+        assertEquals(0L, p.sleepMillisFor(100, 50d, 1000d, 25))          // 250 - 100 = 150 left
+        p.settle(100, [cost: [actualQueryCost: 70]])                       // 30 back: 180
+        // 200 needs 20 more at 12.5/s = 1.6 s (without the refund it would need 50 more: 4 s)
+        assertEquals(1600L, p.sleepMillisFor(200, 50d, 1000d, 25))
+    }
+
+    @Test
+    void anAnswerWithNoCostRefundsTheWholeReservation() {
+        OmsGqlTenantPacer p = new OmsGqlTenantPacer({ -> 0L })
+        assertEquals(0L, p.sleepMillisFor(250, 50d, 1000d, 25))
+        // An error, THROTTLED or a failed connection reports no actual cost: the read is asked again and pays again.
+        p.settle(250, [cost: [throttleStatus: [currentlyAvailable: 0]]])
+        assertEquals(0L, p.sleepMillisFor(250, 50d, 1000d, 25))
+        p.settle(250, [:])
+        p.settle(250, null)
+        assertEquals(0L, p.sleepMillisFor(250, 50d, 1000d, 25))
+    }
+
+    @Test
+    void aRefundNeverFillsPastTheShare() {
+        OmsGqlTenantPacer p = new OmsGqlTenantPacer({ -> 0L })
+        assertEquals(0L, p.sleepMillisFor(100, 50d, 1000d, 25))
+        p.settle(1000, [cost: [actualQueryCost: 0]])
+        assertEquals(0L, p.sleepMillisFor(250, 50d, 1000d, 25))
+        assertEquals(800L, p.sleepMillisFor(10, 50d, 1000d, 25))           // held 250 at most, so 0 left: 10 needs 0.8 s
+    }
+
+    @Test
+    void anActualCostAboveTheReservationTakesTheDifference() {
+        OmsGqlTenantPacer p = new OmsGqlTenantPacer({ -> 0L })
+        assertEquals(0L, p.sleepMillisFor(100, 50d, 1000d, 25))           // 150 left
+        p.settle(100, [cost: [actualQueryCost: 150]])                       // 50 more spent: 100 left
+        assertEquals(0L, p.sleepMillisFor(100, 50d, 1000d, 25))
+        assertEquals(800L, p.sleepMillisFor(10, 50d, 1000d, 25))
+    }
+
+    @Test
+    void aSettleBeforeAnyCallIsIgnored() {
+        OmsGqlTenantPacer p = new OmsGqlTenantPacer({ -> 0L })
+        p.settle(100, [cost: [actualQueryCost: 70]])
+        assertEquals(0L, p.sleepMillisFor(250, 50d, 1000d, 25))
+        assertEquals(800L, p.sleepMillisFor(10, 50d, 1000d, 25))
+    }
 }
