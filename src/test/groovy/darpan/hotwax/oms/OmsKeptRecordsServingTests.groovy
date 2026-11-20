@@ -77,6 +77,24 @@ class OmsKeptRecordsServingTests {
         assertEquals([], orders.writtenLocations)
     }
 
+    /** I2: a planned dataset read keeps only fields the HotWax read can select, so one bad field never fails the shared read. */
+    @Test
+    void aPlannedReadKeepsOnlyFieldsTheOmsReadCanSelect() {
+        Map orders = OmsKeptRecordsServing.project(null, [systemEnumId: "OMS_GQL",
+                unionFields: ["orderId", "notAnOmsField", "paymentRefNums", "billToCustomer", "salesChannelEnumId"]])
+        assertEquals(["orderId", "paymentRefNums", "billToCustomer", "salesChannelEnumId"], orders.keepableFields)
+        assertEquals(["returnId", "anything"], OmsKeptRecordsServing.project(null, [systemEnumId: "OMS_RETURNS_GQL",
+                unionFields: ["returnId", "anything"]]).keepableFields, "a returns record keeps whatever it carries, never fails")
+        assertNull(OmsKeptRecordsServing.project(null, [systemEnumId: "OMS_OTHER", unionFields: ["x"]]).keepableFields,
+                "an endpoint HotWax keeps no projection for keeps whole records")
+        try {
+            OmsGqlQueries.orderGrainPagePlan(["orderId", "notAnOmsField"] as Set)
+            throw new AssertionError("the order read refuses a field it cannot select")
+        } catch (IllegalArgumentException expected) {
+            assertTrue(expected.message.contains("notAnOmsField"))
+        }
+    }
+
     private Map check(Map copy) {
         return OmsKeptRecordsServing.project(null, request("OMS_GQL", copy, BASE))
     }

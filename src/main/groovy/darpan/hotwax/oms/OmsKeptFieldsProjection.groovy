@@ -117,8 +117,8 @@ class OmsKeptFieldsProjection {
      * otherwise [reason, missing], where missing names the fields the copy lacks (null when the copy is not short of a
      * field but read differently, which a rebuild under the same union would not change).
      *
-     * @param copy keptFields (the list the copy's read was sent; null: whole records) and heldFields (the top-level fields
-     *        the copy's records carry), both from its manifest
+     * @param copy keptFields (the list the copy's read was sent; null: whole records), readFields (what it was asked to read
+     *        besides) and heldFields (the top-level fields the copy's records carry), all from its manifest
      * @param side keepFields (the list the side sends; null: whole records), filterFields, readFields, windowField
      */
     static Map servingProblem(Spec spec, Map copy, Map side) {
@@ -144,10 +144,12 @@ class OmsKeptFieldsProjection {
         if (copyKept != null) {
             Set<String> missing = needed.findAll { !copyKept.contains(it) } as Set<String>
             if (missing) return [reason: "the copy lacks ${missing.sort().join(', ')}".toString(), missing: missing]
-            // the side keeps a field whose value depends on how the payments were read: read the same way, or live
-            if (sideKept.any { spec.shapedFields.contains(it) }) {
+            // the side keeps or filters on a field whose value depends on how the payments were read (a filter on it keeps
+            // or drops orders by that value): read the same way, or live. The copy's read asked what it kept and read.
+            if ((sideKept + filterFields).any { spec.shapedFields.contains(it) }) {
                 Set<String> sideAsked = new LinkedHashSet<String>(sideKept) + asked
-                Set<String> differ = spec.readShapers.findAll { sideAsked.contains(it) != copyKept.contains(it) } as Set<String>
+                Set<String> copyAsked = new LinkedHashSet<String>(copyKept) + ((copy?.readFields ?: []) as Set<String>)
+                Set<String> differ = spec.readShapers.findAll { sideAsked.contains(it) != copyAsked.contains(it) } as Set<String>
                 if (differ) return [reason: "the copy read ${differ.sort().join(', ')} otherwise than this side would".toString(), missing: null]
             }
             // a record lists the fields its read asked in the order they were asked: the side's must come in its own order

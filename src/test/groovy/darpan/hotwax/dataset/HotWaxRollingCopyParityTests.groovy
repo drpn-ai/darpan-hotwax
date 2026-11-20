@@ -325,6 +325,25 @@ class HotWaxRollingCopyParityTests {
         assertEquals(JsonOutput.toJson(expected), row.keptFieldsJson)
     }
 
+    /**
+     * I2: a source's rule that reads a field the OMS order read cannot select never fails the shared read: the keep list
+     * leaves it out (the HotWax service's keepableFields), the rule's read fields go as readFields, as a live read sends them.
+     */
+    @Test
+    void aFieldTheOmsCannotSelectNeverFailsTheDatasetRead() {
+        String id = rollingOrders("rcp-oms-bad")
+        List<String> kept = keptFieldsOf(id)
+        assertFalse(kept.contains("notAnOmsField"), kept.toString())
+        assertTrue(kept.contains("salesChannelEnumId"), "a selectable rule field is kept")
+        List<Map> calls = []
+        assertEquals([], atCopyClock(0) { refresh(id, omsStub(calls)) }.errors)
+        assertFalse((calls[0].params.keepRecordFields as List).contains("notAnOmsField"))
+        assertEquals(["notAnOmsField", "salesChannelEnumId"], (calls[0].params.readFields as List).sort(), "the rules' fields, as readFields")
+        Map manifest = KeptCopyStore.manifest(DatasetRefreshSupport.datasetDir(ec, A, id))
+        assertNotNull(manifest.version, "the copy builds")
+        assertEquals(["notAnOmsField", "salesChannelEnumId"], (manifest.readFields as List).sort())
+    }
+
     /** A source whose rules cannot be projected, or an automation source (which keeps whole records), makes the copy whole. */
     @Test
     void aSourceThatCannotProjectMakesTheCopyKeepWholeRecords() {
@@ -636,6 +655,13 @@ class HotWaxRollingCopyParityTests {
             <darpan.reconciliation.ReconciliationAutomationSource automationId="RCP_BAUTO" fileSide="FILE_1" companyUserGroupId="${B}"
                 sourceTypeEnumId="${AutomationExecutionSupport.AUTOMATION_SOURCE_API}" systemEnumId="OMS_GQL"
                 safeMetadataJson='{"parameters":{"omsRestSourceConfigId":"rcp-oms-union"}}'/>
+
+            ${scope('RCP_BADRS', 'RCP_OBAD')}
+            ${omsSide('RCP_OBAD', 'FILE_1', 'rcp-oms-bad')}
+            <darpan.rule.Rule ruleId="RCP_BAD_RULE" ruleSetId="RCP_BADRS" sequenceNum="1" ruleText="bad" enabled="Y"
+                expression='{"file1FieldPath":"notAnOmsField","file2FieldPath":"x","operator":"EQUALS"}'/>
+            <darpan.rule.Rule ruleId="RCP_CHANNEL_RULE" ruleSetId="RCP_BADRS" sequenceNum="2" ruleText="channel" enabled="Y"
+                expression='{"file1FieldPath":"salesChannelEnumId","file2FieldPath":"x","operator":"EQUALS"}'/>
 
             ${scope('RCP_WRS', 'RCP_OWHOLE')}
             ${omsSide('RCP_OWHOLE', 'FILE_1', 'rcp-oms-whole')}

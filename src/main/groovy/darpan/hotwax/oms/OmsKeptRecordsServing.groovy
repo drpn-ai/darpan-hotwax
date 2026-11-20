@@ -26,6 +26,7 @@ class OmsKeptRecordsServing {
     /** The service body: the contract's in-parameters in, its out-parameters back. */
     static Map<String, Object> project(def ec, Map ctx) {
         OmsKeptFieldsProjection.Spec spec = OmsKeptFieldsProjection.specFor(ctx.systemEnumId)
+        if (ctx.unionFields != null) return [keepableFields: keepableFields(ctx.systemEnumId as String, ctx.unionFields as List)]
         if (spec == null) return [servingProblem: "HotWax keeps no projection for ${ctx.systemEnumId}".toString()]
         Map copy = (ctx.copy ?: [:]) as Map
         Map side = (ctx.side ?: [:]) as Map
@@ -62,6 +63,18 @@ class OmsKeptRecordsServing {
             ((Map) out.resultFields).put("exchangeManifestFileLocation", location)
         }
         return out
+    }
+
+    /**
+     * The fields of a planned dataset read the endpoint's read can keep, in order: the order document only selects the fields
+     * it knows (OmsGqlQueries.orderFieldSelectable; any other fails the whole read), the returns document keeps whatever its
+     * records carry. Null (whole records) for an endpoint HotWax keeps no projection for.
+     */
+    static List<String> keepableFields(String systemEnumId, List fields) {
+        List<String> names = (fields ?: []).collect { it as String }
+        if (systemEnumId == "OMS_GQL") return names.findAll { OmsGqlQueries.orderFieldSelectable(it) }
+        if (systemEnumId == "OMS_RETURNS_GQL") return names
+        return null
     }
 
     /** The copy's excluded exchange orders in [from, to), or [problem] when a slice cannot list them as the live read would. */

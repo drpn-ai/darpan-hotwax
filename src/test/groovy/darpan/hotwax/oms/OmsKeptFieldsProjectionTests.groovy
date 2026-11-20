@@ -66,6 +66,23 @@ class OmsKeptFieldsProjectionTests {
         assertNull(problem(wide, side(BASE + ["paymentMethodTypeIds", "paymentRefNums"])))
     }
 
+    /**
+     * I1: a side that only FILTERS on a payment field (keeps none) is served only from a copy whose read asked the payments
+     * the same way: read with five slots, an order's paymentMethodTypeIds can differ, and the filter keeps or drops it otherwise.
+     */
+    @Test
+    void aFilterOnAPaymentFieldIsServedOnlyFromACopyThatReadThePaymentsTheSameWay() {
+        Map wide = [keptFields: BASE + ["paymentMethodTypeIds", "paymentRefNums"]]
+        Map differ = problem(wide, side(BASE, ["paymentMethodTypeIds"]))
+        assertNull(differ.missing)
+        assertTrue((differ.reason as String).contains("paymentRefNums"), differ.reason as String)
+        // the copy's read fields shape its read too: asked for paymentRefNums without keeping it
+        Map readWide = [keptFields: BASE + ["paymentMethodTypeIds"], readFields: ["paymentRefNums"]]
+        assertTrue((problem(readWide, side(BASE, ["paymentMethodTypeIds"])).reason as String).contains("paymentRefNums"))
+        assertNull(problem(readWide, side(BASE, ["paymentMethodTypeIds"], ["paymentRefNums"])), "asked the same way")
+        assertNull(problem([keptFields: BASE + ["paymentMethodTypeIds"]], side(BASE, ["paymentMethodTypeIds"])), "both two slots")
+    }
+
     @Test
     void aCopyAskedForTheSidesFieldsInAnotherOrderDoesNotServeIt() {
         Map copy = [keptFields: ["orderId", "currencyUomId", "statusId", "orderDate"]]

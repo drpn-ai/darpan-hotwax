@@ -106,11 +106,17 @@ class OmsGqlQueries {
         return new LinkedHashSet<String>(required == null ? SHARED_ORDER_FIELDS : required) + asked
     }
 
+    /**
+     * Whether the order document can supply this field: a header scalar, a derived field, a nested list, or the raw payment
+     * rows. orderGrainPagePlan refuses any other; DAR-BE-318's kept-copy union keeps only these (OmsKeptRecordsServing).
+     */
+    static boolean orderFieldSelectable(String f) {
+        return HEADER_FIELDS.contains(f) || DERIVED_FIELDS.contains(f) || NESTED_FIELDS.containsKey(f) || f == RAW_PAYMENTS_FIELD
+    }
+
     static Map orderGrainPagePlan(Set<String> requiredFields) {
         Set<String> wanted = requiredFields ?: ([] as Set<String>)
-        List<String> unknown = wanted.findAll { String f ->
-            !HEADER_FIELDS.contains(f) && !DERIVED_FIELDS.contains(f) && !NESTED_FIELDS.containsKey(f) && f != RAW_PAYMENTS_FIELD
-        }.sort()
+        List<String> unknown = wanted.findAll { String f -> !orderFieldSelectable(f) }.sort()
         if (unknown) {
             throw new IllegalArgumentException("The OMS GraphQL order extract cannot supply field(s) ${unknown}. " +
                     "A filter or projection on a field the document does not carry would silently not apply " +
