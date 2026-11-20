@@ -72,6 +72,15 @@ class OmsGqlReturnsConnectorWiringTests {
         return found
     }
 
+    /** Field names of the current SourceSystemConnector entity definition. */
+    private static Set<String> connectorEntityFields() {
+        def entity = new XmlSlurper().parse(file("../darpan/entity/ReconciliationEntities.xml")).'**'.find {
+            it.name() == "entity" && it.@"entity-name" == "SourceSystemConnector" && it.@package == "darpan.reconciliation"
+        }
+        assertTrue(entity != null, "no SourceSystemConnector entity")
+        return entity.field.collect { it.@name.toString() } as Set
+    }
+
     private static boolean shippedEnum(String enumId) {
         return shippedPacks().any { File pack ->
             new XmlSlurper().parse(pack).'**'.find { it.name() == "moqui.basic.Enumeration" && it.@enumId == enumId }?.size() == 1
@@ -159,7 +168,10 @@ class OmsGqlReturnsConnectorWiringTests {
     void theUpgradePackCarriesTheEnumConnectorAndFields() {
         // A seed-only row never reaches a deployed instance (the entrypoint loads by type; upgrade data is the record).
         // Since 3.3.0 upgrade-data.xml is only the release delta, so each row is read from the newest pack carrying it.
-        assertEquals(connector(SEED, "OMS_RETURNS_GQL"), shippedConnector("OMS_RETURNS_GQL"))
+        // Attributes of columns the entity no longer has (e.g. lookupMaxIds, removed in DAR-BE-320) are harmless in an old pack, so only entity fields are compared.
+        Set<String> entityFields = connectorEntityFields()
+        assertEquals(connector(SEED, "OMS_RETURNS_GQL").findAll { entityFields.contains(it.key) },
+                shippedConnector("OMS_RETURNS_GQL").findAll { entityFields.contains(it.key) })
         assertEquals(fields(FIELDS, "OMS_RETURNS_GQL").keySet(), shippedFields("OMS_RETURNS_GQL").keySet())
         assertTrue(shippedEnum("OMS_RETURNS_GQL"))
     }
