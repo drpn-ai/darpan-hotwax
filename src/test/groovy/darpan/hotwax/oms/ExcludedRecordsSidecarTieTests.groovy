@@ -3,6 +3,7 @@ package darpan.hotwax.oms
 import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
 import darpan.reconciliation.source.SourceFilterSupport
 import groovy.json.JsonOutput
+import groovy.xml.XmlSlurper
 import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
@@ -10,10 +11,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
- * DAR-BE-318 plan 3b-1 (Task 2b's minor M1). darpan's ExcludedRecordsSidecar.WRITTEN_BY / NOT_WRITTEN_BY decide whether a
- * kept-copy slice writes the excluded-records side file (ruling P3b1-7), and the conclude pass reads a filtered side with no
- * side file as UNKNOWN. This ties those two sets to what the HotWax extractors really do, so an extractor that starts or
- * stops writing one fails here until darpan's sets follow.
+ * DAR-BE-318 plan 3b-1 (Task 2b's minor M1, ruling P3b1-9). Each HotWax connector row declares, in this component's own data
+ * (data/HotWaxConnectorSeedData.xml, excludedRecordsSidecar), whether its extract writes the excluded-records side file; a
+ * kept-copy slice writes it exactly when that says Y, and the conclude pass reads a filtered side with no side file as
+ * UNKNOWN. This ties the declarations to what the HotWax extractors really do, so an extractor that starts or stops writing
+ * one fails here until its declaration follows.
  *
  * An extractor writes the side file when its script asks OmsScriptServiceSupport.runExtract for it (excludedRecordsSidecar:
  * true) AND its pipeline feeds the collector the records its filters drop. Both are read from the code: the script's spec
@@ -23,6 +25,14 @@ class ExcludedRecordsSidecarTieTests {
 
     private static final File SCRIPTS = new File(System.getProperty("user.dir"),
             "src/main/groovy/darpan/hotwax/reconciliation/automation")
+    private static final File DECLARATIONS = new File(System.getProperty("user.dir"), "data/HotWaxConnectorSeedData.xml")
+
+    /** Each HotWax connector row's excludedRecordsSidecar, as this component declares it. */
+    private static Map<String, String> declared() {
+        assertTrue(DECLARATIONS.isFile(), "missing ${DECLARATIONS}")
+        return new XmlSlurper().parse(DECLARATIONS).'**'.findAll { it.name() == "darpan.reconciliation.SourceSystemConnector" }
+                .collectEntries { [(it.@systemEnumId.toString()): it.@excludedRecordsSidecar.toString()] }
+    }
     /** A rule as the shaper is handed it: parsed, as the extract parses its sourceFilters once. */
     private static final List<Map<String, Object>> DROP_POS = SourceFilterSupport.parseRules([[sequenceNum: 1,
             fieldExpression: "salesChannelEnumId", operator: "EXCLUDE_IN", filterValues: "POS_SALES_CHANNEL"]])
@@ -88,23 +98,19 @@ class ExcludedRecordsSidecarTieTests {
     }
 
     @Test
-    void everyHotWaxExtractorWritesTheSideFileExactlyWhenDarpanSaysItDoes() {
+    void everyHotWaxExtractorWritesTheSideFileExactlyWhenItsRowSaysItDoes() {
         Map<String, Boolean> specs = sidecarSpecs()
         assertEquals(["OMS_GQL", "OMS_ORDER_ITEMS_GQL", "OMS_PRODUCTS_GQL", "OMS_RETURNS_GQL"] as Set, specs.keySet(),
                 "an extract script was added or removed: tie it here")
+        Map<String, String> rows = declared()
         specs.each { String endpoint, Boolean asked ->
             boolean writes = asked && collectsDrops(endpoint)
-            if (writes) {
-                assertTrue(endpoint in ExcludedRecordsSidecar.WRITTEN_BY, "${endpoint} writes the side file; darpan must list it in WRITTEN_BY")
-                assertFalse(endpoint in ExcludedRecordsSidecar.NOT_WRITTEN_BY, "${endpoint} writes the side file; not in NOT_WRITTEN_BY")
-            } else {
-                assertTrue(endpoint in ExcludedRecordsSidecar.NOT_WRITTEN_BY, "${endpoint} writes no side file; darpan must list it in NOT_WRITTEN_BY")
-                assertFalse(endpoint in ExcludedRecordsSidecar.WRITTEN_BY, "${endpoint} writes no side file; not in WRITTEN_BY")
-            }
+            assertEquals(writes ? "Y" : "N", rows.get(endpoint),
+                    "${endpoint} ${writes ? 'writes' : 'writes no'} side file; data/HotWaxConnectorSeedData.xml must declare it")
         }
     }
 
-    /** The order-grain read asks runExtract for the side file and never fills it: what NOT_WRITTEN_BY says of OMS_GQL. */
+    /** The order-grain read asks runExtract for the side file and never fills it: what its row's N says of OMS_GQL. */
     @Test
     void theOrderGrainReadAsksForTheSideFileButNeverFillsIt() {
         assertTrue(sidecarSpecs().OMS_GQL)

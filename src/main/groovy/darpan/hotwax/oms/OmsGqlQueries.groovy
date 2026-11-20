@@ -1,7 +1,5 @@
 package darpan.hotwax.oms
 
-import darpan.dataset.KeptFieldsProjection
-
 /**
  * The order-grain GraphQL documents and their variables.
  *
@@ -167,8 +165,8 @@ class OmsGqlQueries {
      * short would look complete to whoever reads the rows. Null stays null (no projection).
      */
     static Set<String> keepWithCompanions(Set<String> keepFieldSet) {
-        // DAR-BE-318 (ruling P3b1-8): the companions live in the projection a kept-copy slice also trims with
-        return KeptFieldsProjection.withCompanions(keepFieldSet, KeptFieldsProjection.OMS_ORDERS.companions)
+        // DAR-BE-318 (ruling P3b1-9): the companions live in the projection the kept-copy projection service also trims with
+        return OmsKeptFieldsProjection.withCompanions(keepFieldSet, OmsKeptFieldsProjection.OMS_ORDERS.companions)
     }
 
     /** Requested (= actual) cost of one orders page under the measured model. */

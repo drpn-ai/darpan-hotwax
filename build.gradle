@@ -54,6 +54,11 @@ check.dependsOn.clear()
 
 test {
     useJUnitPlatform()
+    // DAR-BE-318: HotWaxRollingCopyParityTests runs darpan's Spark compare, which needs darpan's JDK 21 module openings.
+    // Read from darpan's own list when the task runs (every project is configured by then), so there is one list.
+    doFirst {
+        jvmArgs(project(':runtime:component:darpan').ext.sparkJava21Opens + ['-XX:+EnableDynamicAgentLoading', '--enable-native-access=ALL-UNNAMED'])
+    }
 }
 
 task cleanLib(type: Delete) { delete fileTree(dir: projectDir.absolutePath + '/lib', include: '*') }

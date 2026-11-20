@@ -117,6 +117,15 @@
         </in-parameters>
     </service>
 
+    <service verb="project" noun="HotWaxOmsKeptRecords" allow-remote="false" authenticate="true">
+        <description>DAR-BE-318 (ruling P3b1-9). The HotWax side of darpan's kept-copy projection: says whether a kept copy of
+            OMS orders or returns stands in for a side's live read, and trims the slice's records with the projection the
+            extracts use (OmsKeptFieldsProjection); for orders it also writes the window's exchange manifest beside the slice.
+            Named by the OMS_GQL and OMS_RETURNS_GQL rows (data/HotWaxConnectorSeedData.xml). Reads files only: no OMS call.</description>
+        <implements service="dataset.DatasetServices.project#KeptRecords"/>
+        <actions><script>context.putAll(darpan.hotwax.oms.OmsKeptRecordsServing.project(ec, context))</script></actions>
+    </service>
+
     <service verb="extract" noun="HotWaxOmsGqlProducts" type="script" transaction="ignore" allow-remote="false" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsGqlProducts.groovy">
         <description>DAR-BE-157. Every sellable HotWax product (not virtual, FINISHED_GOOD or MARKETING_PKG_PICK, not

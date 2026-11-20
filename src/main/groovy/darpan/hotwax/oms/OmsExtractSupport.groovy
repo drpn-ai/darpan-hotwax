@@ -3,7 +3,6 @@ package darpan.hotwax.oms
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 
-import darpan.dataset.KeptFieldsProjection
 import darpan.facade.common.SharedConfigAccessSupport
 import darpan.reconciliation.automation.SourceEndpointAccessSupport
 import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
@@ -737,13 +736,13 @@ class OmsExtractSupport {
         return scalars
     }
 
-    /** DAR-BE-318 (ruling P3b1-8): the one projection a kept-copy slice also trims with (darpan KeptFieldsProjection). */
+    /** DAR-BE-318 (ruling P3b1-9): the one projection the kept-copy projection service also trims with (OmsKeptFieldsProjection). */
     protected static Set<String> normalizeKeepFields(List keepRecordFields) {
-        return KeptFieldsProjection.keepSet(keepRecordFields)
+        return OmsKeptFieldsProjection.keepSet(keepRecordFields)
     }
 
     protected static Map trimRecord(Object record, Set<String> keepFieldSet) {
-        return KeptFieldsProjection.project(record, keepFieldSet)
+        return OmsKeptFieldsProjection.project(record, keepFieldSet)
     }
 
     static Map<String, String> buildHeaders(Map config) {

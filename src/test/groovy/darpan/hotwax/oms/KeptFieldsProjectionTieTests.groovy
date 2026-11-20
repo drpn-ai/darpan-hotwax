@@ -1,6 +1,6 @@
 package darpan.hotwax.oms
 
-import darpan.dataset.KeptFieldsProjection
+import groovy.xml.XmlSlurper
 import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
@@ -9,21 +9,36 @@ import static org.junit.jupiter.api.Assertions.assertTrue
 /**
  * DAR-BE-318 plan 3b-1 (ruling P3b1-8). darpan's KeptFieldsProjection trims HotWax records for the extractors (they
  * delegate to it) and for a kept-copy slice, which serves a side from a copy read with the union of every check's fields
- * only when KeptFieldsProjection.servingProblem says the copy record stands in for the side's own live read. That rests on
+ * only when OmsKeptFieldsProjection.servingProblem says the copy record stands in for the side's own live read. That rests on
  * claims about how the HotWax order read selects fields; each is pinned here against the real code, so a change to the
  * read that breaks one fails here, not in a served run.
  */
 class KeptFieldsProjectionTieTests {
 
-    private static final KeptFieldsProjection.Spec ORDERS = KeptFieldsProjection.OMS_ORDERS
+    private static final OmsKeptFieldsProjection.Spec ORDERS = OmsKeptFieldsProjection.OMS_ORDERS
     /** Fields that shape no other field: header scalars, nested lists and derived fields outside the spec's shapers. */
     private static final List<String> PLAIN = (OmsGqlQueries.HEADER_FIELDS + OmsGqlQueries.NESTED_FIELDS.keySet() +
             OmsGqlQueries.DERIVED_FIELDS).findAll { !ORDERS.readShapers.contains(it) }.sort()
 
+    /** The OMS orders and returns rows name the projection service, and it implements darpan's contract. */
+    @Test
+    void theOrdersAndReturnsRowsNameTheProjectionService() {
+        String service = "reconciliation.HotWaxOmsExtractionServices.project#HotWaxOmsKeptRecords"
+        def rows = new XmlSlurper().parse(new File(System.getProperty("user.dir"), "data/HotWaxConnectorSeedData.xml")).'**'
+                .findAll { it.name() == "darpan.reconciliation.SourceSystemConnector" }
+        assertEquals(["OMS_GQL", "OMS_RETURNS_GQL"] as Set, rows.findAll { it.@servingProjectionServiceName.toString() }
+                .collect { it.@systemEnumId.toString() } as Set)
+        assertTrue(rows.findAll { it.@servingProjectionServiceName.toString() }.every { it.@servingProjectionServiceName == service })
+        assertEquals(OmsKeptFieldsProjection.SPECS.keySet(), ["OMS_GQL", "OMS_RETURNS_GQL"] as Set, "a spec for each row that names it")
+        def svc = new XmlSlurper().parse(new File(System.getProperty("user.dir"), "service/reconciliation/HotWaxOmsExtractionServices.xml"))
+                .'**'.find { it.name() == "service" && it.@verb == "project" && it.@noun == "HotWaxOmsKeptRecords" }
+        assertEquals("dataset.DatasetServices.project#KeptRecords", svc.implements.@service.toString())
+    }
+
     @Test
     void theExtractorsProjectWithTheSpecsDarpanServesBy() {
-        assertTrue(KeptFieldsProjection.specFor("OMS_GQL").is(ORDERS))
-        assertTrue(KeptFieldsProjection.specFor("OMS_RETURNS_GQL").is(KeptFieldsProjection.OMS_RETURNS))
+        assertTrue(OmsKeptFieldsProjection.specFor("OMS_GQL").is(ORDERS))
+        assertTrue(OmsKeptFieldsProjection.specFor("OMS_RETURNS_GQL").is(OmsKeptFieldsProjection.OMS_RETURNS))
         // the companion the order read keeps with the raw payment rows
         assertEquals([(OmsGqlQueries.RAW_PAYMENTS_FIELD): ["paymentPreferenceSlotsFull"] as Set], ORDERS.companions)
         assertEquals(["orderId", "paymentPreferences", "paymentPreferenceSlotsFull"] as Set,
