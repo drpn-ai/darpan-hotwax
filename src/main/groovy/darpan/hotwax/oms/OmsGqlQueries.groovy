@@ -100,8 +100,7 @@ class OmsGqlQueries {
      */
     static Set<String> withReadFields(Set<String> required, Object readFields) {
         Set<String> asked = (readFields instanceof Collection ? (Collection) readFields : []).collect { (it as String)?.trim() }
-                .findAll { String f -> f && (HEADER_FIELDS.contains(f) || DERIVED_FIELDS.contains(f) ||
-                        NESTED_FIELDS.containsKey(f) || f == RAW_PAYMENTS_FIELD) } as Set<String>
+                .findAll { String f -> f && orderFieldSelectable(f) } as Set<String>
         if (!asked) return required
         return new LinkedHashSet<String>(required == null ? SHARED_ORDER_FIELDS : required) + asked
     }
