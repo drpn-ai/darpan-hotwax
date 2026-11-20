@@ -59,6 +59,8 @@ class OmsExtractScriptCharacterizationTests {
     ]
 
     private ExecutionContext ec
+    /** Every GraphQL request body serveGql's sender saw, in order. */
+    private final List<String> sentBodies = Collections.synchronizedList([])
     private int outSeq = 0
 
     @BeforeAll
@@ -119,6 +121,8 @@ class OmsExtractScriptCharacterizationTests {
         List<String> windowedIn = ["omsRestSourceConfigId", "automationExecutionId", "companyUserGroupId", "windowStart",
                                    "windowEnd", "outputLocation", "fileName", "keepRecordFields", "sourceFilters",
                                    "reconciliationRunResultId", "progressStageCode", "expectedRecordCount"]
+        // DAR-BE-318: the returns contract declares windowFieldName (entryDate only) right after the window.
+        List<String> returnsIn = windowedIn.take(5) + ["windowFieldName"] + windowedIn.drop(5)
         List<String> unitIn = ["omsRestSourceConfigId", "automationExecutionId", "companyUserGroupId", "windowStart",
                                "windowEnd", "windowFieldName", "orderStatusIds", "outputLocation", "fileName", "sourceFilters",
                                "reconciliationRunResultId", "progressStageCode", "expectedRecordCount"]
@@ -127,10 +131,10 @@ class OmsExtractScriptCharacterizationTests {
         List<String> plainOut = ["dataAvailable", "fileLocation", "fileName", "recordCount", "requestMetadata", "warnings", "errors"]
         Map<String, List<List<String>>> expected = [
                 // DAR-BE-120: read by key, for a conclusion lookup (an order's notes behind R1's "never reached NetSuite").
-                "extract#HotWaxOmsGqlOrders"           : [windowedIn + ["lookupKeys", "lookupKeyField"], ordersOut],
+                "extract#HotWaxOmsGqlOrders"           : [windowedIn + ["lookupKeys", "lookupKeyField", "readFields", "conclusionLookup"], ordersOut],
                 // DAR-BE-094 R8 / R16 added the two returns-scope switches.
                 // DAR-BE-119: lookupKeys / lookupKeyField, an audit's re-check of its older open findings by key.
-                "extract#HotWaxOmsGqlReturns"          : [windowedIn + ["lookupKeys", "lookupKeyField", "includeReturnsWithoutShopifyRef", "onlyCancelledReturns"], plainOut],
+                "extract#HotWaxOmsGqlReturns"          : [returnsIn + ["lookupKeys", "lookupKeyField", "includeReturnsWithoutShopifyRef", "withReturnCredit", "onlyCancelledReturns"], plainOut],
                 "extract#HotWaxOmsGqlOrderItems"       : [unitIn + ["lookupKeys", "lookupKeyField"], plainOut],
                 // DAR-BE-129: over GraphQL, any date, so no window.
                 "lookup#HotWaxOmsOrdersByExternalId"   : [["omsRestSourceConfigId", "externalIds", "companyUserGroupId"],
@@ -283,6 +287,67 @@ class OmsExtractScriptCharacterizationTests {
         assertFalse(partialsSeen.isEmpty())
         assertFalse(result.containsKey("exchangeManifestFileLocation"))
         assertEquals([result.fileName], listing(out))
+    }
+
+    private static Map<String, Closure> returnsHandlers() {
+        return [
+                returns    : { Map v -> conn([gqlReturn("M0001")]) },
+                returnItems: { Map v -> conn([[returnId: "M0001", returnItemSeqId: "01", orderId: "GR1", orderItemSeqId: "00101",
+                                               productId: "P1", returnQuantity: 1, receivedQuantity: 0, returnPrice: 65,
+                                               returnReasonId: "UNKNOWN", statusId: "RETURN_REQUESTED", returnTypeId: "RTN_REFUND"]]) },
+                orders     : { Map v -> conn([[orderId: "GR1", externalId: "7186636636291", productStoreId: "STORE"]]) },
+                orderItems : { Map v -> conn([[orderId: "GR1", orderItemSeqId: "00101", externalId: "16501091238019"]]) },
+                products   : { Map v -> conn([[productId: "P1", internalName: "219-001-G"]]) },
+                goodIdentifications: { Map v -> conn([]) },
+        ]
+    }
+
+    /** DAR-BE-318 (3b1-4): the returns window is entryDate and nothing else; any other field is refused before a call. */
+    @Test
+    void theReturnsWindowFieldIsEntryDateOnly() {
+        ["orderDate", "createdAt", "lastUpdatedTxStamp", "returnDate"].each { String field ->
+            String out = freshOut()
+            sentBodies.clear()
+            serveGql(out, [], returnsHandlers())
+
+            Map result = extract("HotWaxOmsGqlReturns", baseParams(out) + [windowFieldName: field])
+
+            assertFalse(((List) result.errors).isEmpty(), "${field}: ${result}")
+            assertTrue(((List) result.errors).any { it.toString().contains("entryDate") && it.toString().contains(field) }, result.errors.toString())
+            assertEquals(0, result.recordCount, field)
+            assertNull(result.fileLocation, field)
+            assertTrue(sentBodies.isEmpty(), "${field}: refused before any OMS call")
+            assertEquals([], listing(out), "${field}: no file, no work file")
+        }
+        String out = freshOut()
+        serveGql(out, [], returnsHandlers())
+        Map ok = extract("HotWaxOmsGqlReturns", baseParams(out) + [windowFieldName: "entryDate"])
+        assertEquals([], ok.errors, ok.toString())
+        assertEquals(["M0001"], records(ok)*.returnId)
+    }
+
+    /** DAR-BE-318: with windowFieldName absent, blank or entryDate the OMS is asked the same questions and the file is the same. */
+    @Test
+    void anAbsentWindowFieldIsToday() {
+        Map<String, Map> runs = [:]
+        [absent: null, blank: "  ", entryDate: "entryDate"].each { String label, String field ->
+            String out = freshOut()
+            sentBodies.clear()
+            serveGql(out, [], returnsHandlers())
+            Map params = baseParams(out)
+            if (field != null) params.windowFieldName = field
+            Map result = extract("HotWaxOmsGqlReturns", params)
+            assertEquals([], result.errors, "${label}: ${result}")
+            runs[label] = [bodies: new ArrayList<String>(sentBodies), records: records(result), count: result.recordCount,
+                           meta: result.requestMetadata]
+        }
+        assertFalse(runs.absent.bodies.isEmpty())
+        assertEquals(runs.absent.bodies, runs.blank.bodies, "blank asks the same bytes")
+        assertEquals(runs.absent.bodies, runs.entryDate.bodies, "entryDate asks the same bytes")
+        assertEquals(runs.absent.records, runs.entryDate.records)
+        assertEquals(runs.absent.records, runs.blank.records)
+        assertEquals(runs.absent.count, runs.entryDate.count)
+        assertEquals(runs.absent.meta.keySet(), runs.entryDate.meta.keySet())
     }
 
     @Test
@@ -477,6 +542,7 @@ class OmsExtractScriptCharacterizationTests {
     /** Swaps OmsGqlClient's one-arg constructor (the one the scripts call) for a scripted sender. */
     private void serveGql(String out, List<String> partialsSeen, Map<String, Closure> handlers, boolean fail = false) {
         Closure sender = { String url, Map headers, String body ->
+            sentBodies.add(body)
             partialsSeen.addAll(partials(out))
             if (fail) return [statusCode: 200, body: JsonOutput.toJson([data: null, errors: [[message: "boom",
                     extensions: [code: "INTERNAL"]]]])]

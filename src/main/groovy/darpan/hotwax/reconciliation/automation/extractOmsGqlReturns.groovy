@@ -14,6 +14,13 @@ OmsScriptServiceSupport.runExtract(ec, context, [
         workFilePrefix      : "oms-gql-returns-extract-",
         safeFileName        : { Object name -> OmsReturnsSourceSupport.safeReturnsFileName(name) },
         extract             : { Map a ->
+            // DAR-BE-318: the window is entryDate and nothing else. Absent or entryDate reads as today; any other
+            // field is refused before a call, never ignored.
+            String windowField = windowFieldName?.toString()?.trim()
+            if (windowField && windowField != "entryDate") {
+                return [errors: ["The OMS GraphQL returns extract windows on entryDate only, not '${windowField}'.".toString()],
+                        warnings: [], requestMetadata: [:], recordCount: 0, dataAvailable: false]
+            }
             // DAR-BE-040 fix 3: the REST returns pipeline (filters, join-key fallback, projection, sink, metadata)
             // fed by GraphQL pages, which still carry the returns reconciliationReturns stopped serving.
             OmsReturnsSourceSupport.extractReturnsToFile(a.sourceConfig, windowStart, windowEnd,

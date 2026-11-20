@@ -116,6 +116,33 @@ class DataDefinedOrderItemsServiceSmokeTests {
         assertTrue(server.calls.every { it.url == "https://oms.test/rest/s1/graphql" && it.apiKey == "k" })
     }
 
+    /** DAR-BE-318 (3b1-8): a dataset refresh names its window field; a data-defined read honours only its definition's own. */
+    @Test
+    void aDataDefinedReadAcceptsOnlyItsDefinitionsWindowField() {
+        OmsGqlOrderItemsDataDefinitionTests.Server server = serve()
+        Map window = [windowStart: "2026-10-01T00:00:00Z", windowEnd: "2026-10-03T00:00:00Z"]
+        assertTrue(((List) ((Map) ec.service.sync().name(SERVICE).parameters([systemEnumId: ENDPOINT, omsRestSourceConfigId: CONFIG_ID,
+                companyUserGroupId: TENANT, outputLocation: "runtime://tmp/data-defined-items-test"] + window).disableAuthz().call())
+                .errors ?: []).isEmpty())
+        int callsToday = server.calls.size()
+        assertTrue(callsToday > 0)
+        for (Object field in ["orderDate", " orderDate ", "", null]) {
+            Map ok = this.call(window + [windowFieldName: field])
+            assertTrue(((List) (ok.errors ?: [])).isEmpty(), "${field}: ${ok.errors}")
+        }
+        int callsBefore = server.calls.size()
+        for (String field in ["createdAt", "entryDate", "lastUpdatedTxStamp"]) {
+            Map refused = this.call(window + [windowFieldName: field])
+            assertTrue(((List) refused.errors).any { it.toString().contains("orderDate") && it.toString().contains(field) }, "${field}: ${refused.errors}")
+            assertEquals(false, refused.dataAvailable ?: false)
+            ec.message.clearErrors()
+        }
+        assertEquals(callsBefore, server.calls.size(), "a refused field is refused before any call")
+        // the helper, for a definition with no window
+        assertEquals(null, darpan.datasource.DataDefinedExtract.windowFieldProblem("X", [steps: [[bind: [all: [:]]]]], null))
+        assertTrue(darpan.datasource.DataDefinedExtract.windowFieldProblem("X", [steps: [[bind: [all: [:]]]]], "createdAt").contains("no window"))
+    }
+
     @Test
     void byKeysWithFiltersAndTheSidecar() {
         serve()
