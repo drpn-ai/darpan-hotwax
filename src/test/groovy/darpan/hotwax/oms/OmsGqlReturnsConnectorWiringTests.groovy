@@ -3,6 +3,9 @@ package darpan.hotwax.oms
 import groovy.xml.XmlSlurper
 import org.junit.jupiter.api.Test
 
+import java.nio.file.Files
+import java.nio.file.Path
+
 import static org.junit.jupiter.api.Assertions.assertEquals
 import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertTrue
@@ -16,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue
 class OmsGqlReturnsConnectorWiringTests {
 
     private static File file(String relativeToHotwax) {
-        File f = new File(System.getProperty("user.dir"), relativeToHotwax)
+        File f = new File(relativeToHotwax).absolute ? new File(relativeToHotwax) : new File(System.getProperty("user.dir"), relativeToHotwax)
         assertTrue(f.exists(), "missing artefact: " + f.absolutePath)
         return f
     }
@@ -27,6 +30,53 @@ class OmsGqlReturnsConnectorWiringTests {
     private static final String UPGRADE = "../darpan/data/upgrade-data.xml"
     private static final String SERVICES = "service/reconciliation/HotWaxOmsExtractionServices.xml"
     private static final String SCRIPT = "src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsGqlReturns.groovy"
+
+    /**
+     * Release packs in version order (ignoring pre-reset), then the current upgrade-data.xml, which since 3.3.0
+     * holds only that release's delta. A row's shipped state is the one in the newest pack that carries it.
+     */
+    private static List<File> shippedPacks() {
+        File data = file(UPGRADE).parentFile
+        List<File> packs = Files.list(new File(data, "releases").toPath())
+                .filter { Path d -> d.fileName.toString() ==~ /\d+(\.\d+)*/ && Files.exists(d.resolve("upgrade-data.xml")) }
+                .sorted({ Path a, Path b -> versionOf(a) <=> versionOf(b) } as Comparator<Path>)
+                .collect { it.resolve("upgrade-data.xml").toFile() }
+        packs << file(UPGRADE)
+        return packs
+    }
+
+    private static String versionOf(Path releaseDir) {
+        return releaseDir.fileName.toString().tokenize(".").collect { (it as int).toString().padLeft(6, "0") }.join(".")
+    }
+
+    /** The connector row from the newest pack carrying it, or null. */
+    private static Map<String, String> shippedConnector(String systemEnumId) {
+        Map<String, String> found = null
+        shippedPacks().each { File pack ->
+            def row = new XmlSlurper().parse(pack).'**'.find {
+                it.name() == "darpan.reconciliation.SourceSystemConnector" && it.@systemEnumId == systemEnumId
+            }
+            if (row != null && row.size() == 1) {
+                found = row.attributes().collectEntries { k, v -> [(k.toString()): v.toString()] }
+            }
+        }
+        return found
+    }
+
+    /** Each field row (by fieldPath) from the newest pack carrying it. */
+    private static Map<String, Map<String, String>> shippedFields(String systemEnumId) {
+        Map<String, Map<String, String>> found = [:]
+        shippedPacks().each { File pack ->
+            found.putAll(fields(pack.path, systemEnumId))
+        }
+        return found
+    }
+
+    private static boolean shippedEnum(String enumId) {
+        return shippedPacks().any { File pack ->
+            new XmlSlurper().parse(pack).'**'.find { it.name() == "moqui.basic.Enumeration" && it.@enumId == enumId }?.size() == 1
+        }
+    }
 
     private static Map<String, String> connector(String path, String systemEnumId) {
         def row = new XmlSlurper().parse(file(path)).'**'.find {
@@ -73,9 +123,8 @@ class OmsGqlReturnsConnectorWiringTests {
                 "\$.records[*].shopifyReturnId": "Shopify return ID",
                 "\$.records[*].externalId"     : "Shopify refund ID",
         ]
-        [FIELDS, UPGRADE].each { String path ->
+        [FIELDS: fields(FIELDS, "OMS_RETURNS_GQL"), SHIPPED: shippedFields("OMS_RETURNS_GQL")].each { String path, Map<String, Map<String, String>> rows ->
             ["OMS_RETURNS_GQL"].each { String system ->
-                Map<String, Map<String, String>> rows = fields(path, system)
                 Map<String, String> candidates = rows.findAll { it.value.isPrimaryIdCandidate == "Y" }
                         .collectEntries { [(it.key): it.value.label] }
                 assertEquals(expected, candidates, "${system} ID candidates in ${path}")
@@ -95,7 +144,7 @@ class OmsGqlReturnsConnectorWiringTests {
         assertEquals("N", pill.isPrimaryIdCandidate ?: "N")
         assertEquals("10", pill.sequenceNum)
         assertFalse(connector(SEED, "OMS_RETURNS_GQL").keepFieldsBase.split(",").contains("orderProductStoreId"))
-        assertEquals(pill, fields(UPGRADE, "OMS_RETURNS_GQL")["\$.records[*].orderProductStoreId"], "upgrade pack carries it verbatim")
+        assertEquals(pill, shippedFields("OMS_RETURNS_GQL")["\$.records[*].orderProductStoreId"], "newest shipped pack carries it verbatim")
     }
 
     @Test
@@ -109,10 +158,10 @@ class OmsGqlReturnsConnectorWiringTests {
     @Test
     void theUpgradePackCarriesTheEnumConnectorAndFields() {
         // A seed-only row never reaches a deployed instance (the entrypoint loads by type; upgrade data is the record).
-        assertEquals(connector(SEED, "OMS_RETURNS_GQL"), connector(UPGRADE, "OMS_RETURNS_GQL"))
-        assertEquals(fields(FIELDS, "OMS_RETURNS_GQL").keySet(), fields(UPGRADE, "OMS_RETURNS_GQL").keySet())
-        def doc = new XmlSlurper().parse(file(UPGRADE))
-        assertTrue(doc.'**'.find { it.name() == "moqui.basic.Enumeration" && it.@enumId == "OMS_RETURNS_GQL" }?.size() == 1)
+        // Since 3.3.0 upgrade-data.xml is only the release delta, so each row is read from the newest pack carrying it.
+        assertEquals(connector(SEED, "OMS_RETURNS_GQL"), shippedConnector("OMS_RETURNS_GQL"))
+        assertEquals(fields(FIELDS, "OMS_RETURNS_GQL").keySet(), shippedFields("OMS_RETURNS_GQL").keySet())
+        assertTrue(shippedEnum("OMS_RETURNS_GQL"))
     }
 
     @Test
