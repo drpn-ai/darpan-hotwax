@@ -2,6 +2,7 @@ package darpan.hotwax.oms
 
 import darpan.facade.common.OutboundHttpClient
 import darpan.facade.common.OutboundHttpPolicy
+import darpan.peak.PeakReadPolicy
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
 import org.eclipse.jetty.client.HttpClient
@@ -50,6 +51,8 @@ class OmsGqlClient {
     private final Closure sender
     private final Map<String, String> headers
     final OmsGqlThrottleGovernor governor
+    /** DAR-BE-328: the tenant's share of the URL's bucket in its peak period. Tests swap in one with a fixed clock. */
+    OmsGqlTenantPacer pacer
     private final java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger()
     Closure sleeper = { long ms -> Thread.sleep(ms) }
 
@@ -60,6 +63,8 @@ class OmsGqlClient {
         this.sender = sender ?: httpSender(this.config)
         // A real sender spends the endpoint's one shared bucket (DAR-BE-116); an injected one (tests) keeps its own.
         this.governor = sender == null ? OmsGqlThrottleGovernor.forUrl(getUrl()) : new OmsGqlThrottleGovernor()
+        // DAR-BE-328: likewise one share per (URL, tenant) for a real sender; a test's client keeps its own.
+        this.pacer = sender == null ? OmsGqlTenantPacer.forKey(getUrl(), tenantId()) : new OmsGqlTenantPacer()
         this.realEndpoint = sender == null
     }
 
@@ -72,6 +77,11 @@ class OmsGqlClient {
      */
     String getReadScope() {
         return "${config.companyUserGroupId ?: ''}|${config.omsRestSourceConfigId ?: ''}|${getUrl()}".toString()
+    }
+
+    /** The tenant that owns this OMS connection: a peak period protects that tenant's HotWax. */
+    private String tenantId() {
+        return config.companyUserGroupId?.toString()?.trim() ?: null
     }
 
     /** Calls made so far. Parallel slices share a client, so this is counted atomically. */
@@ -97,7 +107,15 @@ class OmsGqlClient {
         int maxAttempts = Math.max(1, intConfig("maxPageAttempts", DEFAULT_MAX_PAGE_ATTEMPTS))
         long retryBackoff = Math.max(0, intConfig("retryBackoffMillis", DEFAULT_PAGE_RETRY_BACKOFF_MILLIS))
         int transientFailures = 0
+        // DAR-BE-328: the connection's tenant in a peak period with a HotWax share spends at most that share of the
+        // bucket's refill. Read once per call (cached for a minute); no share, or a failed lookup, is today's path.
+        String tenant = tenantId()
+        Integer share = tenant ? PeakReadPolicy.limitsFor(tenant).hotwaxSharePct : null
         for (int attempt = 0; ; attempt++) {
+            // The pacer's wait comes first and is in addition to the governor's, never instead of it. It is not throttling,
+            // so it does not count against MAX_THROTTLE_WAIT_MILLIS.
+            long paceWait = share != null ? pacer.sleepMillisFor(reservation, governor.restoreRate, governor.maximum, share) : 0L
+            if (paceWait > 0L) sleeper.call(paceWait)
             long wait = governor.sleepMillisFor(reservation)
             if (wait > 0L) sleeper.call(wait)
             int n = calls.incrementAndGet()
@@ -128,8 +146,8 @@ class OmsGqlClient {
                 governor.releaseCall()
                 // One line per call: where an extract's time goes (our wait vs OMS's answer) and the
                 // bucket exactly as OMS reports it, so a raised limit is visible without a probe.
-                logger.info("oms gql call op={} n={} attempt={} outcome={} waitMs={} reserved={} ms={} cost={}",
-                        operation, n, attempt, outcome, wait, reservation,
+                logger.info("oms gql call op={} n={} attempt={} outcome={} paceMs={} waitMs={} reserved={} ms={} cost={}",
+                        operation, n, attempt, outcome, paceWait, wait, reservation,
                         System.currentTimeMillis() - started, JsonOutput.toJson(extensions.cost ?: null))
             }
             // Slept AFTER the in-flight permit is back, so a starved call does not hold a slot while it waits.

@@ -59,6 +59,12 @@ class OmsGqlThrottleGovernor {
         this.clock = clock
     }
 
+    /** The bucket's refill per second as last reported (50 before the first answer). DAR-BE-328: a tenant's share is of this. */
+    synchronized int getRestoreRate() { return restoreRate }
+
+    /** The bucket's size as last reported (unbounded before the first answer). */
+    synchronized double getMaximum() { return maximum }
+
     synchronized int getAvailable() { if (!observed) return -1; refill(); return (int) Math.floor(available) }
 
     /** The bucket refills at the server's rate between calls (DAR-BE-116: 2000/s on gorjana), up to its maximum. */

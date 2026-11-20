@@ -1,7 +1,10 @@
 package darpan.hotwax.oms
 
+import darpan.peak.PeakReadPolicy
+import darpan.peak.ReadLimits
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
@@ -10,6 +13,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue
 
 /** DAR-BE-064 / DAR-BE-052. The sender is injected, so every case runs without a socket. */
 class OmsGqlClientTests {
+
+    @AfterEach
+    void resetPeakPolicy() { PeakReadPolicy.resetForTests() }
 
     private static final Map CONFIG = [baseUrl: "https://gorjana-maarg.hotwax.io",
                                        authType: "BEARER", apiToken: "tok-123"]
@@ -277,5 +283,55 @@ class OmsGqlClientTests {
         assertTrue(e.message.contains("https"), e.message)
         def metadata = assertThrows(IllegalStateException) { sender.call("https://169.254.169.254/rest/s1/graphql", [:], "{}") }
         assertTrue(metadata.message.contains("blocked by outbound policy"), metadata.message)
+    }
+
+    // ---- DAR-BE-328: a tenant in a peak period with a HotWax share spends at most that share of the bucket's refill.
+
+    /** Three reads of 250 on a bucket that always reports 1000 of 1000 at 50/s; returns what happened, in order. */
+    private static List<String> threeReadsFor(String tenant, List<String> askedFor) {
+        PeakReadPolicy.limitsLoader = { def ec, String t ->
+            askedFor << t
+            return t == "TENANT_A" ? new ReadLimits(25, false) : ReadLimits.NONE
+        }
+        List<String> events = []
+        Closure answer = sender([[body: okBody([ok: true], 1000)]])
+        OmsGqlClient c = new OmsGqlClient(CONFIG + [companyUserGroupId: tenant], { String url, Map headers, String body ->
+            events << "send"
+            return answer.call(url, headers, body)
+        })
+        c.pacer = new OmsGqlTenantPacer({ -> 0L })
+        c.sleeper = { long ms -> events << "sleep ${ms}".toString() }
+        3.times { c.execute("query Q { orders { edges { node { orderId } } } }", null, 250) }
+        return events
+    }
+
+    @Test
+    void aTenantWithAShareWaitsForItsPacer() {
+        List<String> askedFor = []
+        // 25% of max 1000 = 250 in hand: the 2nd read spends it; the 3rd waits 250 / 12.5 per s = 20 s before it is sent,
+        // while the governor itself (1000 reported) would let it straight through.
+        assertEquals(["send", "send", "sleep 20000", "send"], threeReadsFor("TENANT_A", askedFor))
+        assertEquals(["TENANT_A"], askedFor, "the connection's tenant is asked, once per read through the policy cache")
+    }
+
+    @Test
+    void noShareMeansNoPacerWait() {
+        assertEquals(["send", "send", "send"], threeReadsFor("TENANT_B", []))
+    }
+
+    @Test
+    void aConnectionWithNoTenantIsNeverPaced() {
+        List<String> askedFor = []
+        List<String> events = []
+        PeakReadPolicy.limitsLoader = { def ec, String t -> askedFor << t; return new ReadLimits(1, false) }
+        OmsGqlClient c = new OmsGqlClient(CONFIG, { String url, Map headers, String body ->
+            events << "send"
+            return [statusCode: 200, body: JsonOutput.toJson(okBody([ok: true], 1000))]
+        })
+        c.pacer = new OmsGqlTenantPacer({ -> 0L })
+        c.sleeper = { long ms -> events << "sleep ${ms}".toString() }
+        3.times { c.execute("query Q { orders { edges { node { orderId } } } }", null, 250) }
+        assertEquals(["send", "send", "send"], events)
+        assertEquals([], askedFor)
     }
 }
