@@ -143,10 +143,11 @@
             <parameter name="windowEnd" required="true">
                 <description>End of the automation window, same accepted formats. Exclusive upper bound on entryDate, so consecutive chunks do not double-count their boundary.</description>
             </parameter>
-            <parameter name="windowFieldName">
+            <parameter name="windowFieldName" default-value="entryDate">
                 <description>Only entryDate (or empty): the one field the OMS returns read windows on. Any other field is
                     refused rather than ignored, so a dataset refresh that names a field the read cannot honour fails
-                    instead of silently windowing on entryDate (DAR-BE-318).</description>
+                    instead of silently windowing on entryDate (DAR-BE-318). The default declares that field, so a kept
+                    copy serving a run whose connector names no field slices on the field this read windows on.</description>
             </parameter>
             <parameter name="outputLocation">
                 <description>Optional output directory. Defaults to runtime://datamanager/reconciliation-runs/{automationExecutionId}/{timestamp}/.</description>
