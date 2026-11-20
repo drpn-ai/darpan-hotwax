@@ -202,4 +202,44 @@ class OmsOrderStatusLookupTests {
         assertTrue(requests.last().query.toString().contains("facility { externalId }"))
         assertFalse(OmsOrderStatusLookupSupport.lookupShipGroupFacilities(CONFIG, ["1,2"]).ok as Boolean)
     }
+
+    // DAR-BE-329. Malbon, live 2026-11-20: 119759 (#932561) is one shipment from 100009 (NetSuite location 221) although
+    // its x-redo item sits in a ship group of its own; 121378 is two shipments from 100009; 121999 has no shipment yet;
+    // 999999 is not in HotWax. A transfer shipment and an order not asked for are not this order's sales shipments.
+    @Test
+    void eachOrderComesBackWithItsSalesShipmentsAndWhereEachLeftFrom() {
+        List<Map> orders = [[orderId: "119759", statusId: "ORDER_COMPLETED"], [orderId: "121378", statusId: "ORDER_COMPLETED"],
+                            [orderId: "121999", statusId: "ORDER_APPROVED"]]
+        List<Map> shipments = [
+                [shipmentId: "113735", primaryOrderId: "119759", originFacilityId: "100009", statusId: "SHIPMENT_SHIPPED", shipmentTypeId: "SALES_SHIPMENT"],
+                [shipmentId: "114524", primaryOrderId: "121378", originFacilityId: "100009", statusId: "SHIPMENT_SHIPPED", shipmentTypeId: "SALES_SHIPMENT"],
+                [shipmentId: "114703", primaryOrderId: "121378", originFacilityId: "100009", statusId: "SHIPMENT_SHIPPED", shipmentTypeId: "SALES_SHIPMENT"],
+                [shipmentId: "114800", primaryOrderId: "121378", originFacilityId: "100009", statusId: "SHIPMENT_SHIPPED", shipmentTypeId: "TRANSFER"],
+                [shipmentId: "1", primaryOrderId: "NOT_ASKED", originFacilityId: "100009", statusId: "SHIPMENT_SHIPPED", shipmentTypeId: "SALES_SHIPMENT"]]
+        OmsOrderStatusLookupSupport.setClientFactory { Map config ->
+            OmsGqlClient c = new OmsGqlClient(config, { String url, Map headers, String body ->
+                Map payload = (Map) new JsonSlurper().parseText(body)
+                requests.add(payload)
+                String query = payload.query.toString()
+                Map data = query.contains("shipments(") ? [shipments: [edges: shipments.collect { [node: it] }, pageInfo: [hasNextPage: false]]] :
+                        query.contains("facilities(") ? [facilities: [edges: [[node: [facilityId: "100009", externalId: "221"]]], pageInfo: [hasNextPage: false]]] :
+                        [orders: [edges: orders.collect { [node: it] }, pageInfo: [hasNextPage: false]]]
+                return [statusCode: 200, body: JsonOutput.toJson([data: data, errors: []])]
+            })
+            c.sleeper = { long ms -> }
+            return c
+        }
+
+        Map looked = OmsOrderStatusLookupSupport.lookupOrderShipments(CONFIG, ["119759", "121378", "121999", "999999"])
+
+        assertTrue(looked.ok as Boolean, "${looked.errors}")
+        assertEquals(["119759": [[shipmentId: "113735", facilityId: "100009", location: "221", statusId: "SHIPMENT_SHIPPED"]],
+                      "121378": [[shipmentId: "114524", facilityId: "100009", location: "221", statusId: "SHIPMENT_SHIPPED"],
+                                 [shipmentId: "114703", facilityId: "100009", location: "221", statusId: "SHIPMENT_SHIPPED"]]],
+                looked.shipmentsByOrderId)
+        assertEquals(["999999"], looked.missingIds, "an order with no shipment is not missing; one HotWax does not have is")
+        assertTrue(requests.any { ((Map) it.variables).q.toString().startsWith("primaryOrderId:") })
+        assertEquals(["facilityId:100009"], requests.findAll { it.query.toString().contains("facilities(") }.collect { ((Map) it.variables).q })
+        assertFalse(OmsOrderStatusLookupSupport.lookupOrderShipments(CONFIG, ["1,2"]).ok as Boolean)
+    }
 }

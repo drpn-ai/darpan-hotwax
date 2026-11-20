@@ -438,6 +438,10 @@
                 <description>DAR-BE-245. Ask where each order's ship groups ship from instead: shipGroupFacilityByKey is
                     filled; missingIds are the orders HotWax did not return.</description>
             </parameter>
+            <parameter name="withShipments" type="Boolean" default="false">
+                <description>DAR-BE-329. Ask each order's sales shipments instead: shipmentsByOrderId is filled;
+                    missingIds are the orders HotWax does not have.</description>
+            </parameter>
         </in-parameters>
         <out-parameters>
             <parameter name="ok" type="Boolean"/>
@@ -448,6 +452,8 @@
                 the item's shipGroupSeqId.</description></parameter>
             <parameter name="shipGroupFacilityByKey" type="Map"><description>DAR-BE-245, withShipGroupFacilities:
                 "orderId|shipGroupSeqId" -> [facilityId, the facility's externalId, DAR-BE-294: shipmentMethodTypeId].</description></parameter>
+            <parameter name="shipmentsByOrderId" type="Map"><description>DAR-BE-329, withShipments: orderId -> its sales
+                shipments, each [shipmentId, facilityId, location (the origin facility's externalId), statusId].</description></parameter>
             <parameter name="missingIds" type="List"><description>Ids HotWax has no order for.</description></parameter>
             <parameter name="errors" type="List"/>
         </out-parameters>

@@ -97,10 +97,57 @@ class OmsOrderStatusLookupSupport {
     }
 
     /**
+     * DAR-BE-329. Each asked order's sales shipments: shipmentsByOrderId orderId -> [[shipmentId, facilityId, location,
+     * statusId], ...], location being the origin facility's externalId (the NetSuite location id; null when HotWax holds
+     * none). missingIds are the orders HotWax does not have at all (read from the orders, since an order with no
+     * shipment is not missing). Aditi 2026-11-20 (Malbon): NetSuite fulfillments are counted against HotWax shipments,
+     * not ship groups: Malbon puts x-redo, a digital good, in a ship group of its own that ships nothing. Same guarantees
+     * as the other lookups: only asked orders count, and a failed call classifies nothing.
+     */
+    static Map<String, Object> lookupOrderShipments(Object rawConfig, Collection orderIds) {
+        List<String> ids = (orderIds ?: []).collect { normalize(it) }.findAll { it }.unique()
+        if (!ids) return [ok: true, shipmentsByOrderId: [:], missingIds: [], errors: []]
+        if (!ids.every { ASKABLE_ID.matcher(it).matches() }) {
+            return [ok: false, shipmentsByOrderId: [:], missingIds: [], errors: ["OMS order ids must be plain identifiers."]]
+        }
+        Map<String, Object> config = OmsExtractSupport.toPlainMap(rawConfig)
+        if (!config) return [ok: false, shipmentsByOrderId: [:], missingIds: [], errors: ["OMS source config could not be read."]]
+        try {
+            OmsGqlClient client = (OmsGqlClient) clientFactory.call(config)
+            Set<String> requested = new HashSet<String>(ids)
+            Set<String> known = OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.orderStatusesDocument(), "orders", "orderId",
+                    ids, ID_CHUNK, ID_CHUNK, OmsGqlQueries.ORDER_STATUSES_RESERVATION, [lookupCalls: 0])
+                    .collect { Map n -> normalize(n.orderId) }.findAll { requested.contains(it) } as Set<String>
+            List<Map> shipments = OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.orderShipmentsDocument(), "shipments",
+                    "primaryOrderId", ids, OmsGqlQueries.SHIPMENTS_ID_CHUNK, OmsGqlQueries.SHIPMENTS_PAGE_SIZE,
+                    OmsGqlQueries.SHIPMENTS_RESERVATION, [lookupCalls: 0])
+                    .findAll { Map n -> requested.contains(normalize(n.primaryOrderId)) && normalize(n.shipmentTypeId) == "SALES_SHIPMENT" }
+            List<String> facilityIds = shipments.collect { normalize(it.originFacilityId) }
+                    .findAll { it && ASKABLE_ID.matcher(it).matches() }.unique()
+            Map<String, String> locationByFacility = [:]
+            if (facilityIds) {
+                OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.facilityExternalIdsDocument(), "facilities", "facilityId",
+                        facilityIds, OmsGqlQueries.FACILITIES_ID_CHUNK, OmsGqlQueries.FACILITIES_ID_CHUNK,
+                        OmsGqlQueries.FACILITIES_RESERVATION, [lookupCalls: 0])
+                        .each { Map f -> if (normalize(f.facilityId)) locationByFacility.put(normalize(f.facilityId), normalize(f.externalId)) }
+            }
+            Map<String, List<Map>> byOrder = [:]
+            shipments.each { Map n ->
+                String facilityId = normalize(n.originFacilityId)
+                ((List) byOrder.computeIfAbsent(normalize(n.primaryOrderId)) { [] }) << [shipmentId: normalize(n.shipmentId),
+                        facilityId: facilityId, location: facilityId ? locationByFacility.get(facilityId) : null, statusId: normalize(n.statusId)]
+            }
+            return [ok: true, shipmentsByOrderId: byOrder, missingIds: ids.findAll { !known.contains(it) }, errors: []]
+        } catch (Exception e) {
+            return [ok: false, shipmentsByOrderId: [:], missingIds: [], errors: ["OMS shipment lookup failed: ${e.message}".toString()]]
+        }
+    }
+
+    /**
      * DAR-BE-245. Where each asked order's ship groups ship from: itemKey(orderId, shipGroupSeqId) -> [facilityId,
      * externalId, shipmentMethodTypeId] (the facility's externalId is the NetSuite location id on RAILS; DAR-BE-294 adds
-     * how the group ships). Asked only of the orders whose completed ship groups outnumber NetSuite's fulfillments, or
-     * (DAR-BE-294) that have an approved open line, so the facility read stays small. Same guarantees as
+     * how the group ships). Asked only of the orders that have an approved open line (DAR-BE-294), so the facility read
+     * stays small. Same guarantees as
      * the other lookups: only asked orders count, and a failed call classifies nothing.
      */
     static Map<String, Object> lookupShipGroupFacilities(Object rawConfig, Collection orderIds) {

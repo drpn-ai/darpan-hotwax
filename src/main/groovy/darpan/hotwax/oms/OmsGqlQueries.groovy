@@ -434,6 +434,32 @@ class OmsGqlQueries {
 }'''
     }
 
+    // DAR-BE-329: each asked order's shipments, by primaryOrderId, for the count of NetSuite fulfillments against HotWax
+    // shipments per location (Malbon/RAILS R10). About one shipment an order (Malbon 2026-11-20: 33 orders, 43 rows).
+    // Five scalars x 100 + 100.
+    static final int SHIPMENTS_ID_CHUNK = 50
+    static final int SHIPMENTS_PAGE_SIZE = 100
+    static final int SHIPMENTS_RESERVATION = 600
+
+    static String orderShipmentsDocument() {
+        return '''query OmsOrderShipments($q: String, $first: Int, $after: String) {
+  shipments(query: $q, first: $first, after: $after) {
+    edges { node { shipmentId primaryOrderId originFacilityId statusId shipmentTypeId } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
+    // DAR-BE-329: the externalId (the NetSuite location id) of the facilities those shipments leave from; a handful a run.
+    static String facilityExternalIdsDocument() {
+        return '''query OmsFacilityExternalIds($q: String, $first: Int, $after: String) {
+  facilities(query: $q, first: $first, after: $after) {
+    edges { node { facilityId externalId } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
     // DAR-BE-251: each item row's quantity, summed per order into itemQuantity.
     static String orderItemQuantitiesDocument() {
         return '''query OmsOrderItemQuantities($q: String, $first: Int, $after: String) {
