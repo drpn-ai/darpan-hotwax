@@ -24,7 +24,6 @@ class OmsGqlOrderItemsConnectorWiringTests {
     private static final String SEED = "../darpan/data/SourceSystemConnectorSeedData.xml"
     private static final String FIELDS = "../darpan/data/SourceSystemConnectorSeedDataFields.xml"
     private static final String ENUMS = "../darpan/data/DarpanSystemSourceSeedData.xml"
-    private static final String UPGRADE = "../darpan/data/upgrade-data.xml"
     private static final String SERVICES = "service/reconciliation/HotWaxOmsExtractionServices.xml"
     private static final String SCRIPT = "src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsGqlOrderItems.groovy"
 
@@ -56,14 +55,18 @@ class OmsGqlOrderItemsConnectorWiringTests {
         Set<String> gql = fieldPaths(FIELDS, "OMS_ORDER_ITEMS_GQL")
         assertTrue(gql.containsAll(['$.records[*].omsOrderId', '$.records[*].shopifyLineId', '$.records[*].unitOrdinal']), gql.toString())
         assertFalse(gql.contains('$.records[*].salesChannelEnumId') || gql.contains('$.records[*].netsuiteOrderId'), gql.toString())
-        assertEquals(gql, fieldPaths(UPGRADE, "OMS_ORDER_ITEMS_GQL"), "upgrade data carries the same pills")
+        assertEquals(gql, OmsGqlReturnsConnectorWiringTests.shippedFields("OMS_ORDER_ITEMS_GQL").keySet(), "the shipped packs carry the same pills")
     }
 
     @Test
     void theEndpointHasAnEnumAndTheUpgradeCarriesTheConnector() {
         assertTrue(new XmlSlurper().parse(file(ENUMS)).'**'.any { it.name() == "moqui.basic.Enumeration" && it.@enumId == "OMS_ORDER_ITEMS_GQL" })
-        assertTrue(new XmlSlurper().parse(file(UPGRADE)).'**'.any { it.name() == "moqui.basic.Enumeration" && it.@enumId == "OMS_ORDER_ITEMS_GQL" })
-        assertEquals(connector(SEED, "OMS_ORDER_ITEMS_GQL"), connector(UPGRADE, "OMS_ORDER_ITEMS_GQL"))
+        // Since 3.3.0 upgrade-data.xml is only the release delta: read each row from the newest pack carrying it, and compare
+        // only fields the SourceSystemConnector entity still has (old packs carry removed columns such as lookupMaxIds).
+        assertTrue(OmsGqlReturnsConnectorWiringTests.shippedEnum("OMS_ORDER_ITEMS_GQL"))
+        Set<String> entityFields = OmsGqlReturnsConnectorWiringTests.connectorEntityFields()
+        assertEquals(connector(SEED, "OMS_ORDER_ITEMS_GQL").findAll { entityFields.contains(it.key) },
+                OmsGqlReturnsConnectorWiringTests.shippedConnector("OMS_ORDER_ITEMS_GQL").findAll { entityFields.contains(it.key) })
     }
 
     @Test

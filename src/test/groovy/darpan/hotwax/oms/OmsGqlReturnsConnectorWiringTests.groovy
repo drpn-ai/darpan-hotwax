@@ -50,7 +50,7 @@ class OmsGqlReturnsConnectorWiringTests {
     }
 
     /** The connector row from the newest pack carrying it, or null. */
-    private static Map<String, String> shippedConnector(String systemEnumId) {
+    static Map<String, String> shippedConnector(String systemEnumId) {
         Map<String, String> found = null
         shippedPacks().each { File pack ->
             def row = new XmlSlurper().parse(pack).'**'.find {
@@ -64,7 +64,7 @@ class OmsGqlReturnsConnectorWiringTests {
     }
 
     /** Each field row (by fieldPath) from the newest pack carrying it. */
-    private static Map<String, Map<String, String>> shippedFields(String systemEnumId) {
+    static Map<String, Map<String, String>> shippedFields(String systemEnumId) {
         Map<String, Map<String, String>> found = [:]
         shippedPacks().each { File pack ->
             found.putAll(fields(pack.path, systemEnumId))
@@ -73,7 +73,7 @@ class OmsGqlReturnsConnectorWiringTests {
     }
 
     /** Field names of the current SourceSystemConnector entity definition. */
-    private static Set<String> connectorEntityFields() {
+    static Set<String> connectorEntityFields() {
         def entity = new XmlSlurper().parse(file("../darpan/entity/ReconciliationEntities.xml")).'**'.find {
             it.name() == "entity" && it.@"entity-name" == "SourceSystemConnector" && it.@package == "darpan.reconciliation"
         }
@@ -81,7 +81,7 @@ class OmsGqlReturnsConnectorWiringTests {
         return entity.field.collect { it.@name.toString() } as Set
     }
 
-    private static boolean shippedEnum(String enumId) {
+    static boolean shippedEnum(String enumId) {
         return shippedPacks().any { File pack ->
             new XmlSlurper().parse(pack).'**'.find { it.name() == "moqui.basic.Enumeration" && it.@enumId == enumId }?.size() == 1
         }
@@ -95,7 +95,7 @@ class OmsGqlReturnsConnectorWiringTests {
         return row.attributes().collectEntries { k, v -> [(k.toString()): v.toString()] }
     }
 
-    private static Map<String, Map<String, String>> fields(String path, String systemEnumId) {
+    static Map<String, Map<String, String>> fields(String path, String systemEnumId) {
         return new XmlSlurper().parse(file(path)).'**'.findAll {
             it.name() == "darpan.reconciliation.SourceSystemConnectorField" && it.@systemEnumId == systemEnumId
         }.collectEntries { [(it.@fieldPath.toString()): it.attributes().collectEntries { k, v -> [(k.toString()): v.toString()] }] }
