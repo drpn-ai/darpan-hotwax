@@ -152,6 +152,46 @@ class OmsOrdersKeepParityTests {
         assertConcludesTheSame(before, after, orders().collect { [orderId: it.orderId] }, ["orderId"])
     }
 
+    /**
+     * Review M3: a side whose only Keep rule is the built-in exchange line. The exchanges are set aside and counted as the
+     * built-in's, configuredExclusions stays empty, and the side is not unknown when a key is absent, as before.
+     */
+    @Test
+    void anOrderSideWithOnlyTheBuiltInExchangeLineKeepsAsTheReadDid() {
+        Map before = ReadTimeFilterBefore.orderGrain(orders(), [], ORDER_BASE)
+        Map after = afterKeep("OMS_GQL", orders(), [], ORDER_BASE, null, "orders-built-in-only.json")
+
+        assertEquals((before.kept as List<Map>)*.orderId, (after.kept as List<Map>)*.orderId)
+        assertEquals(before.kept, (after.kept as List<Map>).collect { Map r -> r.subMap(ORDER_BASE) })
+        assertEquals([O4: "BUILT_IN:0", O5: "BUILT_IN:0"], after.setAsideBy)
+        assertEquals(before.droppedBy, after.setAsideBy)
+        Map summary = KeepArtifacts.readSummary(after.file as File)
+        assertEquals([], summary.configuredExclusions)
+        assertEquals([[sequenceNum: 0, label: "isExchangeOrder", setAsideCount: 2]], summary.builtIn)
+        assertConcludesTheSame(before, after, orders().collect { [orderId: it.orderId] }, ["orderId"])
+        Set<String> keys = orders().collect { it.orderId as String } as Set<String>
+        assertFalse(RunConclusionSupport.indexSide([extractFile: after.file, keyFields: ["orderId"]], keys, keys).unknownWhenAbsent as boolean,
+                "built-ins alone leave the side known")
+    }
+
+    /**
+     * Fix round 1 (I1): a side read by the other side's keys still runs Keep. Its read leaves exchanges out itself and says
+     * isExchangeOrder N on the rest, so a tenant rule on the field sets nothing aside for want of it.
+     */
+    @Test
+    void aKeyedSideWithAnIsExchangeOrderFilterSetsNothingAsideAsFieldAbsent() {
+        List<Map<String, Object>> rows = SourceFilterSupport.toRecordFieldRules([[sequenceNum: 1,
+                fieldExpression: '$.records[*].isExchangeOrder', operator: "INCLUDE_IN", filterValues: "N"]] as List<Map<String, Object>>)
+        List<String> keys = orders()*.orderId as List<String>
+        Map after = afterKeep("OMS_GQL", orders(), rows, ORDER_BASE, OmsExtractSupport.lookupExtractOptions(keys, null), "orders-by-key.json")
+
+        assertEquals([:], after.setAsideBy, "nothing is set aside: every kept order says N")
+        assertEquals(["O1", "O2", "O3", "O6", "O8", "O9", "O10", "O11"], (after.kept as List<Map>)*.orderId,
+                "every sales order but the exchanges, which the read left out")
+        Map rule = (KeepArtifacts.readSummary(after.file as File).configuredExclusions as List<Map>)[0]
+        assertEquals([0, 0], [rule.excludedCount, rule.fieldAbsentCount])
+    }
+
     @Test
     void unitGrainKeepsSetsAsideConcludesAndCountsAsTheReadDid() {
         Map before = ReadTimeFilterBefore.unitGrain(unitOrders(), unitRows(), dir)
@@ -323,8 +363,9 @@ class OmsOrdersKeepParityTests {
             List configured = configuredExclusions(rules, excludedByRuleCounts, fieldAbsentByRuleCounts)
             File file = File.createTempFile("before-orders-", ".json")
             file.deleteOnExit()
-            file.setText(JsonOutput.toJson([records: written, metadata: [filters: [excludedExchangeOrderCount: exchangeCount,
-                                                                                   configuredExclusions: configured]]]), "UTF-8")
+            // the old metadata listed configuredExclusions only when the side had rules (buildFilterMetadata)
+            Map filters = [excludedExchangeOrderCount: exchangeCount] + (rules ? [configuredExclusions: configured] : [:])
+            file.setText(JsonOutput.toJson([records: written, metadata: [filters: filters]]), "UTF-8")
             return [file: file, kept: OmsOrdersKeepParityTests.json(written), droppedBy: droppedBy, exchangeCount: exchangeCount,
                     configuredExclusions: OmsOrdersKeepParityTests.json(configured), manifest: OmsOrdersKeepParityTests.json(manifest)]
         }

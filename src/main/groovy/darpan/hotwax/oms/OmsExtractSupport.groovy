@@ -40,8 +40,11 @@ class OmsExtractSupport {
     static final String ORDER_TYPE_ID_FIELD = "orderTypeId"
     static final String ORDER_ITEM_ASSOC_TYPE_ID_FIELD = "orderItemAssocTypeId"
     /**
-     * DAR-BE-318 (Ruling 3b2b-12): Y on an exchange order, N on every other sales order of a read that leaves the exchange to
-     * Keep. Written after the projection, so whatever the read keeps; never selected from the OMS.
+     * DAR-BE-318 (Ruling 3b2b-12): Y on an exchange order, N on every other sales order, written by every read that runs the
+     * exchange scan (the exchange exclusion on). A window read writes both and leaves the Y orders to Keep; a read by key and
+     * unit grain leave exchange orders out themselves, so they write N on all they keep. A conclusion lookup (exclusion off)
+     * runs no scan and writes it on nothing. Written after the projection, so whatever the read keeps; never selected from
+     * the OMS.
      */
     static final String IS_EXCHANGE_ORDER_FIELD = "isExchangeOrder"
     static final int MAX_ORDERS_PAGE_COUNT = 20000
@@ -645,7 +648,10 @@ class OmsExtractSupport {
      * <ul>
      * <li>Order grain, a read that leaves the exchange to Keep (a window read with the exchange exclusion on): every sales
      *     order is written, with isExchangeOrder Y or N written after the projection; an exchange order is still listed on the
-     *     exchange manifest. A read by key, or unit grain, still leaves exchange orders out here (exchangeExclusionAtRead).</li>
+     *     exchange manifest. A read by key, or unit grain, still leaves exchange orders out here (exchangeExclusionAtRead),
+     *     and writes isExchangeOrder N on every order or unit it keeps (fix round 1, I1: the field is selectable, and a side
+     *     read by key still runs Keep). With the exchange exclusion off (a conclusion lookup) the scan never runs, so no
+     *     record says either way.</li>
      * <li>Unit grain (Ruling 3b2b-10): the old filters saw the order's top-level scalar fields overlaid by the unit row. Each
      *     unit now carries a copy of every order scalar its Keep reads (keepRuleFields) that the unit itself lacks, so Spark
      *     sees that same view; the unit's own field wins, and no field outside keepRuleFields is added.</li>
@@ -659,7 +665,8 @@ class OmsExtractSupport {
         Map<String, Object> pageFilter = filterComparableOrderRecords(rawRecords, extractOptions)
         List filtered = (List) pageFilter.records
         Set exchangeOrders = (Set) pageFilter.flaggedExchangeOrders
-        boolean flagExchanges = pageFilter.exchangeLeftToKeep == true
+        // the scan ran, so every record kept here can say whether it is an exchange order
+        boolean flagExchanges = options.applyExchangeExclusion as boolean
 
         List outputRecords
         int droppedNullLineIdCount = 0
@@ -680,6 +687,8 @@ class OmsExtractSupport {
                 for (Object unit : (List) flattened.units) {
                     // The flattener builds each unit afresh, so the copies never reach the order or another unit.
                     if (orderScalars) carryOrderScalars((Map) unit, orderScalars, overlay)
+                    // unit grain leaves exchange orders out itself, so a unit of a scanned read is never one
+                    if (flagExchanges) ((Map) unit).put(IS_EXCHANGE_ORDER_FIELD, "N")
                     outputRecords.add(unit)
                 }
             }

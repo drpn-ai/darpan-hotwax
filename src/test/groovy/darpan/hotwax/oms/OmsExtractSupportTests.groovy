@@ -188,7 +188,10 @@ class OmsExtractSupportTests {
         assertTrue((whole.records as List<Map>)[0].containsKey("orderItemAssocs"))
     }
 
-    /** DAR-BE-205 / DAR-BE-318: a read by key answers exactly as before the move: no flag, and exchanges as they were. */
+    /**
+     * DAR-BE-205 / DAR-BE-318: a read by key reads exchanges exactly as before the move. A conclusion lookup runs no exchange
+     * scan, so it writes no flag; any other read by key leaves the exchanges out itself and says N on what it keeps.
+     */
     @Test
     void aLookupStillReadsExchangesAsToday() {
         List<Map> raw = [salesOrder("M1", "WEB"), exchangeOrder("M2", "M0")]
@@ -198,10 +201,32 @@ class OmsExtractSupportTests {
         assertEquals([], conclusion.exchangeManifest)
 
         Map recheck = extract(raw, ["orderId"], null, OmsExtractSupport.lookupExtractOptions(["M1", "M2"], null))
-        assertEquals([[orderId: "M1"]], recheck.records, "any other read by key leaves exchange orders out itself, unflagged")
+        assertEquals([[orderId: "M1", isExchangeOrder: "N"]], recheck.records, "any other read by key leaves exchange orders out itself")
         assertEquals(["M2"], (recheck.exchangeManifest as List<Map>)*.omsOrderId)
         assertEquals(1, recheck.requestMetadata.filters.excludedExchangeOrderCount)
         assertEquals(0, recheck.requestMetadata.filters.flaggedExchangeOrderCount)
+    }
+
+    /**
+     * Fix round 1 (I1): isExchangeOrder is a selectable field, and a side read by the other side's keys still runs Keep, so a
+     * keyed read says N on every order it keeps, whatever it is asked to keep; and a unit of a scanned read says N.
+     */
+    @Test
+    void aKeyedReadWritesIsExchangeOrderNOnWhatItKeeps() {
+        List<Map> raw = [salesOrder("M1", "WEB"), salesOrder("M3", "POS"), exchangeOrder("M2", "M0")]
+        Map keyed = extract(raw, ["orderId"], ["isExchangeOrder"], OmsExtractSupport.lookupExtractOptions(["M1", "M2", "M3"], null))
+        assertEquals([[orderId: "M1", isExchangeOrder: "N"], [orderId: "M3", isExchangeOrder: "N"]], keyed.records)
+        assertEquals(0, keyed.requestMetadata.filters.flaggedExchangeOrderCount, "no exchange order is written")
+
+        Map whole = extract(raw, null, null, OmsExtractSupport.lookupExtractOptions(["M1"], null))
+        assertTrue((whole.records as List<Map>).every { it.isExchangeOrder == "N" }, "without a projection too")
+
+        Map scannedUnits = OmsExtractSupport.shapePageRecords([unitOrder(), unitOrder(orderId: "O2") + [orderItemAssocs: exchangeOrder("x", "O1").orderItemAssocs]],
+                [emitGrain: "ORDER_LINE_UNIT", requireShopifyLineId: false], null, null)
+        List<Map> scanned = (List<Map>) new JsonSlurper().parseText("[" + scannedUnits.serializedRecords + "]")
+        assertEquals(["O1", "O1"], scanned*.omsOrderId, "unit grain leaves the exchange order's units out itself")
+        assertEquals(["N", "N"], scanned*.isExchangeOrder)
+        assertFalse(units(unitOrder(), null)[0].containsKey("isExchangeOrder"), "a unit read with the exclusion off says nothing")
     }
 
     private static Map unitOrder(Map extra = [:]) {

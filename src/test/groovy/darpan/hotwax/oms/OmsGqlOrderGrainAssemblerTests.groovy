@@ -86,7 +86,8 @@ class OmsGqlOrderGrainAssemblerTests {
         Map keyed = OmsExtractSupport.shapePageRecords(assembled, [exchangeExclusionAtRead: true], null, null)
         assertEquals(1, keyed.excludedExchangeOrderCount)
         assertTrue(!(keyed.serializedRecords as String).contains("\"orderId\":\"M2\""))
-        assertTrue(!(keyed.serializedRecords as String).contains("isExchangeOrder"))
+        assertTrue((keyed.serializedRecords as String).contains("\"isExchangeOrder\":\"N\""), "a read by key says N on what it keeps")
+        assertTrue(!(keyed.serializedRecords as String).contains("\"isExchangeOrder\":\"Y\""))
     }
 
     @Test
