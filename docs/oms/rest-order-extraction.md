@@ -128,7 +128,7 @@ knowledge of tenant exclusion rules.
 Tenant exclusion rules are not applied by the extract (DAR-BE-318). `extract#HotWaxOmsOrders` takes no `sourceFilters`
 parameter: it writes every sales order, each flagged `isExchangeOrder` `Y` or `N`, and darpan's Spark Keep (component
 `darpan`, `KeepPlanSupport`) sets aside the exchange orders (the `OMS_GQL` row's `keepLinesJson`) and what the run's rules
-reject, counts them in its Keep summary and writes the excluded-records sidecar. The rule semantics (case-sensitive field
+reject, counts them in its Keep summary and keeps the set-aside rows for the conclusions (the row's `excludedRecordsSidecar` is `N`, so no excluded-records side file is written). The rule semantics (case-sensitive field
 names against top-level keys, case-insensitive values, `EXCLUDE_IN` keeping a record that lacks the field, `INCLUDE_IN`
 dropping it as field-absent) live in darpan core, not here.
 

@@ -120,7 +120,7 @@ The REST order pipeline runs unchanged; only the pages come from GraphQL. Projec
 and the exchange manifest are the REST code (`OmsRestSourceSupport.extractOrdersToFile` with a GraphQL
 page fetcher). The read applies no tenant filter (DAR-BE-318): it writes every sales order flagged
 `isExchangeOrder` Y or N, and darpan's Spark Keep sets aside the exchange orders (the `OMS_GQL` row's
-`keepLinesJson`) and what the run's rules reject, then writes the excluded-records sidecar.
+`keepLinesJson`) and what the run's rules reject, and counts them in its Keep summary. Both rows have `excludedRecordsSidecar` `N`, so no excluded-records side file is written.
 
 Per page:
 

@@ -115,7 +115,7 @@ There is no built-in `SALES_ORDER`/`EXCHANGE`-style filter for returns, and the 
 The extract takes no `sourceFilters`: it writes every return, and on a window read stamps each with `omsReturnClass`
 (KEEP, CANCELLED or NO_SHOPIFY_REF). Darpan's Spark Keep (component `darpan`) sets the CANCELLED and NO_SHOPIFY_REF
 returns aside through the `OMS_RETURNS_GQL` row's `keepLinesJson`, applies the tenant's per-field rules on top, counts
-them in its Keep summary and writes the excluded-records sidecar. The expected rule sets aside returns whose
+them in its Keep summary and keeps the set-aside rows for the conclusions (the row's `excludedRecordsSidecar` is `N`, so no excluded-records side file is written). The expected rule sets aside returns whose
 `returnChannelEnumId` never has a Shopify counterpart.
 
 Rule semantics match the orders contract and live in darpan core: field names are matched case-sensitively against
