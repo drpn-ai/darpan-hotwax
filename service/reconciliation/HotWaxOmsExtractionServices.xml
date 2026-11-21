@@ -29,21 +29,9 @@
             <parameter name="keepRecordFields" type="List">
                 <parameter name="fieldName"/>
                 <description>Optional projection: top-level record fields to keep in the output file. When
-                    present, each order is trimmed to these fields after reconciliation filtering and before
-                    writing (callers compute the list from the rule set's join-key and rule fields plus the
-                    display fields). Absent means full untrimmed records (backward compatible).</description>
-            </parameter>
-            <parameter name="sourceFilters" type="List">
-                <parameter name="filterRule" type="Map">
-                    <parameter name="sequenceNum" type="Integer"/>
-                    <parameter name="fieldExpression"/>
-                    <parameter name="operator"/>
-                    <parameter name="filterValues"/>
-                </parameter>
-                <description>Optional record-exclusion rules. Each rule names a top-level record field and a
-                    comma-separated list of exact values; matching orders are dropped before the extract file is
-                    written and counted per rule in requestMetadata.filters.configuredExclusions. Absent or empty
-                    means no configured exclusions (backward compatible).</description>
+                    present, each order is trimmed to these fields before writing (callers compute the list from
+                    the rule set's join-key and rule fields plus the display fields). Absent means full untrimmed
+                    records (backward compatible).</description>
             </parameter>
             <parameter name="reconciliationRunResultId">
                 <description>Optional observability run id. On its own it is enough for the extractor to
@@ -80,10 +68,20 @@
     <service verb="extract" noun="HotWaxOmsGqlOrders" type="script" transaction="ignore" allow-remote="false" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsGqlOrders.groovy">
         <description>Extract HotWax OMS sales orders at ORDER grain over the GraphQL endpoint (/rest/s1/graphql), pages
-            from OmsGqlOrderPageSource shaped by OmsExtractSupport (exclusions, filters, projection). Adds hasPaymentPreference / paymentMethodTypeIds for the presence OPP rule
-            (DAR-BE-064). A DISTINCT service name is required: the connector registry resolves rows by it.</description>
+            from OmsGqlOrderPageSource shaped by OmsExtractSupport (sales orders, exchange scan, projection). Adds hasPaymentPreference / paymentMethodTypeIds for the presence OPP rule
+            (DAR-BE-064). DAR-BE-318 (plan 3b-2b): it takes no source filters, so darpan keeps in Spark over its file: a window
+            read writes every sales order, each flagged isExchangeOrder Y or N, and the OMS_GQL row's keepLinesJson sets the
+            exchange orders aside; a read by key leaves them out itself, as before. A DISTINCT service name is required: the
+            connector registry resolves rows by it.</description>
         <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrdersContract"/>
         <in-parameters>
+            <parameter name="keepRuleFields" type="List">
+                <description>DAR-BE-318 (plan 3b-2b). The record fields the side's Keep reads in Spark (darpan's
+                    KeepPlanSupport.KEEP_FIELDS_PARAMETER). Asked of the OMS as a source filter's field was, so the file
+                    carries them; isExchangeOrder is written by the extract itself. A caller checks this parameter is
+                    declared before sending it.</description>
+                <parameter name="fieldName"/>
+            </parameter>
             <parameter name="lookupKeys" type="List">
                 <description>DAR-BE-120. Read only these orders by orderId, whatever their date, instead of the window: a
                     conclusion lookup. A caller checks this parameter is declared before sending keys, so a connector
@@ -142,6 +140,18 @@
                 <parameter name="lookupKey"/>
             </parameter>
             <parameter name="lookupKeyField"><description>The record field lookupKeys are values of: productId.</description></parameter>
+            <parameter name="sourceFilters" type="List">
+                <parameter name="filterRule" type="Map">
+                    <parameter name="sequenceNum" type="Integer"/>
+                    <parameter name="fieldExpression"/>
+                    <parameter name="operator"/>
+                    <parameter name="filterValues"/>
+                </parameter>
+                <description>Optional record-exclusion rules. Each rule names a top-level record field and a
+                    comma-separated list of exact values; matching products are dropped before the extract file is
+                    written and counted per rule in requestMetadata.filters.configuredExclusions. Its own, not
+                    HotWaxOmsOrdersContract's: the orders read takes none since DAR-BE-318.</description>
+            </parameter>
         </in-parameters>
     </service>
 
@@ -309,15 +319,12 @@
             <parameter name="fileName">
                 <description>Optional output file name.</description>
             </parameter>
-            <parameter name="sourceFilters" type="List">
-                <parameter name="filterRule" type="Map">
-                    <parameter name="sequenceNum" type="Integer"/>
-                    <parameter name="fieldExpression"/>
-                    <parameter name="operator"/>
-                    <parameter name="filterValues"/>
-                </parameter>
-                <description>Optional record-exclusion rules, same semantics as extract#HotWaxOmsOrders.
-                    Applied to ORDERS before flattening, because the exchange scan needs the full record.</description>
+            <parameter name="keepRuleFields" type="List">
+                <parameter name="fieldName"/>
+                <description>DAR-BE-318 (plan 3b-2b, Ruling 3b2b-10). The record fields the side's Keep reads in Spark. The
+                    unit-grain extract takes no source filters: each unit carries a copy of every order scalar named here
+                    that the unit itself lacks (the unit's own field wins), so Keep sees the order-over-unit view the read's
+                    filters saw. A field a unit cannot carry fails the extract.</description>
             </parameter>
             <parameter name="reconciliationRunResultId">
                 <description>Optional observability run id for progress heartbeats. Advisory only.</description>
@@ -355,8 +362,8 @@
             parallel day slices on the endpoint's one cost bucket. A distinct service name because the connector registry
             resolves a connector row by its extract service name; this one is gated on the OMS_ORDER_ITEMS_GQL endpoint.
 
-            NOT carried: salesChannelEnumId, which gorjana's GraphQL Order type does not have (SDL 2026-10-23). A source
-            filter on it is refused rather than ignored.</description>
+            NOT carried: salesChannelEnumId, which gorjana's GraphQL Order type does not have (SDL 2026-10-23). A Keep field
+            (keepRuleFields) on it is refused rather than ignored.</description>
         <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrderUnitsContract"/>
         <in-parameters>
             <parameter name="lookupKeys" type="List">
@@ -373,10 +380,6 @@
             <parameter name="windowFieldName">
                 <description>Only orderDate (or empty): the GraphQL order extract windows on orderDate and refuses any
                     other field rather than widening the extract.</description>
-            </parameter>
-            <parameter name="sourceFilters">
-                <description>Optional include/exclude rules evaluated per UNIT, as on extract#HotWaxOmsOrderItems. A rule
-                    on a field the GraphQL unit does not carry (salesChannelEnumId) fails the extract.</description>
             </parameter>
         </in-parameters>
         <out-parameters>

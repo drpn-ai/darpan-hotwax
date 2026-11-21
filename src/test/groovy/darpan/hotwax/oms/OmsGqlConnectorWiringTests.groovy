@@ -3,6 +3,7 @@ package darpan.hotwax.oms
 import groovy.xml.XmlSlurper
 import org.junit.jupiter.api.Test
 
+import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
@@ -80,9 +81,10 @@ class OmsGqlConnectorWiringTests {
         // would surface only in a live run. Parsing resolves every import against the test classpath.
         String script = read("src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsGqlOrders.groovy")
         new GroovyShell().parse(script, "extractOmsGqlOrders.groovy")
-        // The sidecar write itself lives in the shared service edge; the script opts in.
-        assertTrue((script =~ /excludedRecordsSidecar\s*:\s*true/).find(), "the GraphQL orders extract must write the excluded-records sidecar")
-        assertTrue(read("src/main/groovy/darpan/hotwax/oms/OmsScriptServiceSupport.groovy").contains("ExcludedRecordsSidecar.writeBeside("))
+        // DAR-BE-318 (Task 17): the read sets nothing aside, so it writes no excluded-records side file (Spark Keep's is
+        // the connector row's to ask for, ExcludedRecordsSidecarTieTests); it sends its Keep fields on.
+        assertFalse((script =~ /excludedRecordsSidecar\s*:\s*true/).find(), "the GraphQL orders extract writes no excluded-records side file")
+        assertTrue(script.contains("keepRuleFields"))
     }
 
     private static final String FIELDS = "../darpan/data/SourceSystemConnectorSeedDataFields.xml"

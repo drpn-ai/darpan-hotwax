@@ -5,8 +5,6 @@ import groovy.json.JsonSlurper
 
 import darpan.facade.common.SharedConfigAccessSupport
 import darpan.reconciliation.automation.SourceEndpointAccessSupport
-import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
-import darpan.reconciliation.source.SourceFilterSupport
 
 import static darpan.common.ValueSupport.normalize
 import static darpan.common.ValueSupport.normalizeBool
@@ -23,9 +21,14 @@ import java.time.ZonedDateTime
 
 /**
  * The OMS order extract pipeline and the OMS config helpers. HotWax OMS is read over GraphQL only (DAR-BE-052): a page
- * source (OmsGqlOrderPageSource) fetches, and everything here — the built-in sales-order and exchange exclusions, the
- * configured source filters, the unit flattener, projection, counts, the exchange manifest and the streaming file
- * sink — shapes what it hands over.
+ * source (OmsGqlOrderPageSource) fetches, and everything here — the sales-order limit, the exchange scan, the unit
+ * flattener, projection, counts, the exchange manifest and the streaming file sink — shapes what it hands over.
+ *
+ * DAR-BE-318 (plan 3b-2b, Task 17): the extract no longer filters. A tenant's source filters and the exchange exclusion are
+ * Keep, which darpan runs in Spark over the written file: a window read writes every sales order, an exchange order flagged
+ * isExchangeOrder = Y (the connector row declares the Keep line that sets it aside, data/HotWaxConnectorSeedData.xml), and
+ * a unit carries copies of the order fields its Keep reads (keepRuleFields). A read by key still leaves exchanges out
+ * itself, so a lookup or a re-check answers exactly as before.
  */
 class OmsExtractSupport {
     static final String DEFAULT_FILE_NAME_PREFIX = "oms-orders"
@@ -36,6 +39,11 @@ class OmsExtractSupport {
     static final int EXCHANGE_MANIFEST_MAX_ENTRIES = 500
     static final String ORDER_TYPE_ID_FIELD = "orderTypeId"
     static final String ORDER_ITEM_ASSOC_TYPE_ID_FIELD = "orderItemAssocTypeId"
+    /**
+     * DAR-BE-318 (Ruling 3b2b-12): Y on an exchange order, N on every other sales order of a read that leaves the exchange to
+     * Keep. Written after the projection, so whatever the read keeps; never selected from the OMS.
+     */
+    static final String IS_EXCHANGE_ORDER_FIELD = "isExchangeOrder"
     static final int MAX_ORDERS_PAGE_COUNT = 20000
 
     private static final JsonSlurper JSON_SLURPER = new JsonSlurper()
@@ -70,11 +78,14 @@ class OmsExtractSupport {
     /**
      * Extract the window's orders through {@code pageFetcher} (OmsGqlOrderPageSource.fetcher) into {@code targetFile} as
      * {"records":[...],"metadata":{...}}. The fetcher is required: there is no other transport.
+     *
+     * @param keepRuleFields the record fields the side's Keep reads (darpan's keepRuleFields): selected like a projection's,
+     *        and at unit grain copied onto each unit from its order when the unit lacks them
      */
     static Map<String, Object> extractOrdersToFile(Object rawConfig, Object windowStart, Object windowEnd,
                                                    File targetFile, List keepRecordFields,
                                                    Closure pageProgressListener,
-                                                   List excludeFilters, Map extractOptions,
+                                                   List keepRuleFields, Map extractOptions,
                                                    Closure pageFetcher,
                                                    int exchangeManifestMaxEntries = EXCHANGE_MANIFEST_MAX_ENTRIES) {
         OrdersDocumentSink sink = new OrdersDocumentSink({ ->
@@ -84,7 +95,7 @@ class OmsExtractSupport {
         Map<String, Object> result
         try {
             result = extractOrdersInternal(rawConfig, windowStart, windowEnd, sink, keepRecordFields,
-                    pageProgressListener, excludeFilters, extractOptions, pageFetcher, exchangeManifestMaxEntries)
+                    pageProgressListener, keepRuleFields, extractOptions, pageFetcher, exchangeManifestMaxEntries)
         } catch (Exception e) {
             sink.abort()
             targetFile.delete()
@@ -100,10 +111,10 @@ class OmsExtractSupport {
     /** In-memory variant for tests: the same pipeline written to a buffer, with the parsed records added. */
     static Map<String, Object> extractOrders(Object rawConfig, Object windowStart, Object windowEnd,
                                              List keepRecordFields, Closure pageProgressListener,
-                                             List excludeFilters, Map extractOptions, Closure pageFetcher) {
+                                             List keepRuleFields, Map extractOptions, Closure pageFetcher) {
         StringWriter buffer = new StringWriter()
         Map<String, Object> result = extractOrdersInternal(rawConfig, windowStart, windowEnd,
-                new OrdersDocumentSink({ -> buffer }), keepRecordFields, pageProgressListener, excludeFilters,
+                new OrdersDocumentSink({ -> buffer }), keepRecordFields, pageProgressListener, keepRuleFields,
                 extractOptions, pageFetcher)
         if (!(result.errors as List)) {
             result.records = ((JSON_SLURPER.parseText(buffer.toString()) as Map).records as List) ?: []
@@ -114,23 +125,16 @@ class OmsExtractSupport {
     private static Map<String, Object> extractOrdersInternal(Object rawConfig, Object windowStart, Object windowEnd,
                                                              OrdersDocumentSink sink, List keepRecordFields,
                                                              Closure pageProgressListener,
-                                                             List excludeFilters, Map extractOptions,
+                                                             List keepRuleFields, Map extractOptions,
                                                              Closure pageFetcher,
                                                              int exchangeManifestMaxEntries = EXCHANGE_MANIFEST_MAX_ENTRIES) {
         Set<String> keepFieldSet = normalizeKeepFields(keepRecordFields)
+        Set<String> keepRuleFieldSet = normalizeKeepFields(keepRuleFields)
         Map config = toPlainMap(rawConfig)
         // Synchronized: the page source shapes pages on its slice threads.
         List<String> warnings = Collections.synchronizedList(new ArrayList<String>())
         List<String> errors = []
         if (pageFetcher == null) errors.add("An OMS extract needs its GraphQL page source.")
-        List<Map<String, Object>> excludeRules
-        try {
-            // Parsed once, before any page is fetched: a malformed rule fails here, once.
-            excludeRules = SourceFilterSupport.parseRules(excludeFilters)
-        } catch (IllegalArgumentException e) {
-            excludeRules = Collections.emptyList()
-            errors.add(e.message)
-        }
 
         // parseWindowMillis returns null both for "nothing supplied" and for "would not parse" (it adds the error),
         // so a missing bound is reported here and a malformed one there, never as each other.
@@ -176,6 +180,7 @@ class OmsExtractSupport {
         Map<String, Object> options = normalizeExtractOptions(extractOptions)
         int excludedNonSalesOrderCount = 0
         int excludedExchangeOrderCount = 0
+        int flaggedExchangeOrderCount = 0
         // DAR-BE-050. Totals across every page, reported even when zero, so "the key is absent" never has to be told
         // apart from "nothing was dropped".
         int droppedNullLineIdCount = 0
@@ -185,21 +190,11 @@ class OmsExtractSupport {
         int consumedRawCount = 0
         List exchangeManifest = []
         boolean exchangeManifestTruncated = false
-        Map<Integer, Integer> excludedByRuleCounts = [:]
-        Map<Integer, Integer> fieldAbsentByRuleCounts = [:]
-        // DAR-UI-044: every page's dropped units, for the conclude pass's sidecar.
-        Map excludedCollector = ExcludedRecordsSidecar.newCollector()
         Closure pageConsumer = { Map<String, Object> pageBundle ->
-            ExcludedRecordsSidecar.merge(excludedCollector, (Map) pageBundle.excludedCollector)
-            // Pages arrive pre-filtered and pre-serialized, so consuming one is an append plus counter bumps.
+            // Pages arrive pre-shaped and pre-serialized, so consuming one is an append plus counter bumps.
             excludedNonSalesOrderCount += (int) pageBundle.excludedNonSalesOrderCount
             excludedExchangeOrderCount += (int) pageBundle.excludedExchangeOrderCount
-            ((Map<Integer, Integer>) pageBundle.excludedByRuleCounts ?: [:]).each { Integer sequenceNum, Integer count ->
-                excludedByRuleCounts.put(sequenceNum, (excludedByRuleCounts.get(sequenceNum) ?: 0) + count)
-            }
-            ((Map<Integer, Integer>) pageBundle.fieldAbsentByRuleCounts ?: [:]).each { Integer sequenceNum, Integer count ->
-                fieldAbsentByRuleCounts.put(sequenceNum, (fieldAbsentByRuleCounts.get(sequenceNum) ?: 0) + count)
-            }
+            flaggedExchangeOrderCount += (int) (pageBundle.flaggedExchangeOrderCount ?: 0)
             for (Object entry : (List) (pageBundle.excludedExchangeOrders ?: [])) {
                 if (exchangeManifest.size() >= exchangeManifestMaxEntries) { exchangeManifestTruncated = true; break }
                 exchangeManifest.add(entry)
@@ -228,7 +223,7 @@ class OmsExtractSupport {
             // extractOptions, not options: the page source and shapePageRecords each normalize their own copy.
             extraction = (Map<String, Object>) pageFetcher.call([config      : config, headers: headers,
                                                                 fromMillis  : fromMillis, thruMillis: thruMillis,
-                                                                keepFieldSet: keepFieldSet, excludeRules: excludeRules,
+                                                                keepFieldSet: keepFieldSet, keepRuleFields: keepRuleFieldSet,
                                                                 extractOptions: extractOptions, warnings: warnings,
                                                                 pageConsumer: pageConsumer])
         } catch (IOException e) {
@@ -246,8 +241,8 @@ class OmsExtractSupport {
             return baseResult
         }
 
-        // Unit-grain drop counters ride beside filters rather than inside them: a filter EXCLUDED a record on purpose,
-        // while these record units the extract could not key and therefore LOST.
+        // Unit-grain drop counters ride beside the filter counts rather than inside them: those name records left out on
+        // purpose, while these record units the extract could not key and therefore LOST.
         if (options.get("emitGrain") == "ORDER_LINE_UNIT") {
             requestMetadata.droppedNullLineIdCount = droppedNullLineIdCount
             requestMetadata.nonUnitQuantityCount = nonUnitQuantityCount
@@ -256,7 +251,7 @@ class OmsExtractSupport {
             }
         }
         requestMetadata.filters = buildFilterMetadata(excludedNonSalesOrderCount, excludedExchangeOrderCount,
-                exchangeManifestTruncated, excludeRules, excludedByRuleCounts, fieldAbsentByRuleCounts)
+                exchangeManifestTruncated, flaggedExchangeOrderCount)
         Map documentMetadata = requestMetadata + [
                 sourceType            : "HOTWAX_OMS_ORDERS",
                 omsRestSourceConfigId : normalize(config?.omsRestSourceConfigId),
@@ -272,7 +267,6 @@ class OmsExtractSupport {
             return baseResult
         }
         return baseResult + [
-                excludedCollector        : excludedCollector,
                 dataAvailable            : extractedRecordCount > 0,
                 recordCount              : extractedRecordCount,
                 warnings                 : warnings,
@@ -641,35 +635,40 @@ class OmsExtractSupport {
     }
 
     /**
-     * Filter -> (flatten) -> project -> serialize for one page of assembled order documents.
+     * Sales orders -> exchange scan -> (flatten) -> project -> serialize for one page of assembled order documents.
      *
-     * Order of operations is load-bearing: the EXCHANGE scan needs the FULL record, so the built-in exclusions
-     * precede both flattening and projection.
+     * Order of operations is load-bearing: the EXCHANGE scan needs the FULL record, so it precedes both flattening and
+     * projection.
      *
-     * Configured source filters run at the grain that is emitted. At order grain that is the order document. At unit
-     * grain (tri-system D3) they run per UNIT, against the order's top-level scalar fields overlaid by the unit row, so
-     * a rule on unitState or item statusId can match while an order-level rule still drops every unit of its order.
-     * Per-rule counts are then UNITS, not orders.
+     * DAR-BE-318 (plan 3b-2b, Task 17): nothing here applies a tenant's source filters any more; darpan's Spark Keep does,
+     * over the written file. What the shaper keeps for Keep:
+     * <ul>
+     * <li>Order grain, a read that leaves the exchange to Keep (a window read with the exchange exclusion on): every sales
+     *     order is written, with isExchangeOrder Y or N written after the projection; an exchange order is still listed on the
+     *     exchange manifest. A read by key, or unit grain, still leaves exchange orders out here (exchangeExclusionAtRead).</li>
+     * <li>Unit grain (Ruling 3b2b-10): the old filters saw the order's top-level scalar fields overlaid by the unit row. Each
+     *     unit now carries a copy of every order scalar its Keep reads (keepRuleFields) that the unit itself lacks, so Spark
+     *     sees that same view; the unit's own field wins, and no field outside keepRuleFields is added.</li>
+     * </ul>
      */
     static Map<String, Object> shapePageRecords(List rawRecords, Map extractOptions,
-                                                List excludeRules = null,
+                                                Collection keepRuleFields = null,
                                                 Set<String> keepFieldSet = null) {
         Map<String, Object> options = normalizeExtractOptions(extractOptions)
         boolean unitGrain = options.get("emitGrain") == "ORDER_LINE_UNIT"
-        Map<String, Object> pageFilter = filterComparableOrderRecords(rawRecords,
-                unitGrain ? null : (List<Map<String, Object>>) excludeRules, extractOptions)
+        Map<String, Object> pageFilter = filterComparableOrderRecords(rawRecords, extractOptions)
         List filtered = (List) pageFilter.records
-        Map<Integer, Integer> excludedByRuleCounts = (Map<Integer, Integer>) pageFilter.excludedByRuleCounts
-        Map<Integer, Integer> fieldAbsentByRuleCounts = (Map<Integer, Integer>) pageFilter.fieldAbsentByRuleCounts
+        Set exchangeOrders = (Set) pageFilter.flaggedExchangeOrders
+        boolean flagExchanges = pageFilter.exchangeLeftToKeep == true
 
         List outputRecords
         int droppedNullLineIdCount = 0
         int nonUnitQuantityCount = 0
         int keptNullShopifyIdCount = 0
-        Map excludedCollector = ExcludedRecordsSidecar.newCollector()
         if (unitGrain) {
             // Unit grain does NOT take keepFieldSet: the unit record IS the projection.
             Map flattenOptions = [requireShopifyLineId: options.get("requireShopifyLineId")]
+            Set<String> overlay = normalizeKeepFields(keepRuleFields as List) ?: ([] as Set<String>)
             outputRecords = []
             for (Object record : filtered) {
                 if (!(record instanceof Map)) continue
@@ -677,31 +676,21 @@ class OmsExtractSupport {
                 droppedNullLineIdCount += (flattened.droppedNullLineId as int)
                 nonUnitQuantityCount += (flattened.nonUnitQuantityCount as int)
                 keptNullShopifyIdCount += (flattened.keptNullShopifyIdCount as int)
-                if (!excludeRules) {
-                    outputRecords.addAll((List) flattened.units)
-                    continue
-                }
-                Map<String, Object> orderScalars = topLevelScalars((Map) record)
+                Map<String, Object> orderScalars = overlay ? topLevelScalars((Map) record) : null
                 for (Object unit : (List) flattened.units) {
-                    // The merged map decides; the UNIT is what gets written, so order header fields never leak.
-                    Map<String, Object> view = new LinkedHashMap<String, Object>(orderScalars)
-                    view.putAll((Map) unit)
-                    Map<String, Object> verdict = SourceFilterSupport.evaluate(view, (List<Map<String, Object>>) excludeRules)
-                    if (verdict == null) {
-                        outputRecords.add(unit)
-                        continue
-                    }
-                    ExcludedRecordsSidecar.collect(excludedCollector, (Map) unit, (Map) verdict.get("rule"))
-                    Integer sequenceNum = (Integer) ((Map) verdict.get("rule")).get("sequenceNum")
-                    Map<Integer, Integer> bucket = SourceFilterSupport.REASON_FIELD_ABSENT == verdict.get("reason")
-                            ? fieldAbsentByRuleCounts
-                            : excludedByRuleCounts
-                    bucket.put(sequenceNum, (bucket.get(sequenceNum) ?: 0) + 1)
+                    // The flattener builds each unit afresh, so the copies never reach the order or another unit.
+                    if (orderScalars) carryOrderScalars((Map) unit, orderScalars, overlay)
+                    outputRecords.add(unit)
                 }
             }
         } else {
-            // Projection happens after filtering (the EXCHANGE scan needs the full record) and before serialization.
-            outputRecords = keepFieldSet ? filtered.collect { Object record -> trimRecord(record, keepFieldSet) } : filtered
+            // Projection happens after the exchange scan (it needs the full record) and before serialization; the flag is
+            // written after the projection, on a copy, so a shared read's record is never changed.
+            outputRecords = filtered.collect { Object record ->
+                Map out = keepFieldSet ? trimRecord(record, keepFieldSet) : (flagExchanges ? new LinkedHashMap((Map) record) : (Map) record)
+                if (flagExchanges) out.put(IS_EXCHANGE_ORDER_FIELD, exchangeOrders.contains(record) ? "Y" : "N")
+                return out
+            }
         }
 
         StringBuilder serialized = new StringBuilder(Math.max(16, outputRecords.size() * 512))
@@ -716,15 +705,23 @@ class OmsExtractSupport {
                 outputCount               : outputRecords.size(),
                 excludedNonSalesOrderCount: pageFilter.excludedNonSalesOrderCount,
                 excludedExchangeOrderCount: pageFilter.excludedExchangeOrderCount,
+                flaggedExchangeOrderCount : exchangeOrders.size(),
                 excludedExchangeOrders    : pageFilter.excludedExchangeOrders,
-                excludedByRuleCounts      : excludedByRuleCounts,
-                fieldAbsentByRuleCounts   : fieldAbsentByRuleCounts,
                 droppedNullLineIdCount    : droppedNullLineIdCount,
                 nonUnitQuantityCount      : nonUnitQuantityCount,
                 keptNullShopifyIdCount    : keptNullShopifyIdCount,
-                excludedCollector         : excludedCollector,
                 serializedRecords         : serialized.toString(),
         ]
+    }
+
+    /**
+     * Ruling 3b2b-10: onto one unit, the order scalars named in {@code fields} that the unit has no key for. A key the unit
+     * holds (null included) is its own and is never overwritten, exactly as the unit row won in the old filter view.
+     */
+    protected static void carryOrderScalars(Map unit, Map<String, Object> orderScalars, Set<String> fields) {
+        for (String field : fields) {
+            if (!unit.containsKey(field) && orderScalars.containsKey(field)) unit.put(field, orderScalars.get(field))
+        }
     }
 
     /** Top-level fields of an order document that are not nested lists or maps. */
@@ -824,39 +821,35 @@ class OmsExtractSupport {
                 .sort()
     }
 
-    protected static Map<String, Object> filterComparableOrderRecords(Collection records,
-                                                                      List<Map<String, Object>> excludeRules = null,
-                                                                      Map<String, Object> extractOptions = null) {
+    /**
+     * The sales orders of a page, and its exchange orders. A non-sales order is always left out (a read-side limit, not Keep:
+     * the GraphQL read already asks for sales orders only). With the exchange exclusion on, every exchange order is counted
+     * and listed for the manifest; it is left out here only when the read keeps the exclusion itself
+     * (exchangeExclusionAtRead), and otherwise kept and returned in flaggedExchangeOrders (an identity set) for the
+     * isExchangeOrder flag.
+     */
+    protected static Map<String, Object> filterComparableOrderRecords(Collection records, Map<String, Object> extractOptions = null) {
         Map<String, Object> options = normalizeExtractOptions(extractOptions)
         boolean applyExchangeExclusion = options.applyExchangeExclusion as boolean
+        boolean exchangeLeftToKeep = applyExchangeExclusion && !(options.exchangeExclusionAtRead as boolean)
 
         List filteredRecords = []
         List excludedExchangeOrders = []
+        Set flaggedExchangeOrders = Collections.newSetFromMap(new IdentityHashMap())
         int excludedNonSalesOrderCount = 0
         int excludedExchangeOrderCount = 0
-        Map<Integer, Integer> excludedByRuleCounts = [:]
-        Map<Integer, Integer> fieldAbsentByRuleCounts = [:]
         (records ?: []).each { Object record ->
-            // Order is load-bearing: the two built-in exclusions keep priority so their counts never shift when a
-            // tenant adds a configured rule, and a record excluded for more than one reason lands in one bucket.
             if (!isSalesOrder(record)) {
                 excludedNonSalesOrderCount++
             } else if (applyExchangeExclusion && containsExchangeOrderAssociation(record)) {
                 excludedExchangeOrderCount++
                 excludedExchangeOrders.add(exchangeManifestEntry((Map) record))
-            } else {
-                Map<String, Object> verdict = SourceFilterSupport.evaluate(record, excludeRules)
-                if (verdict != null) {
-                    Integer sequenceNum = (Integer) ((Map) verdict.get("rule")).get("sequenceNum")
-                    // Two buckets, one rejection: an include rule that drops a whole row class for want of the
-                    // field must not read as "the rule matched a lot of values".
-                    Map<Integer, Integer> bucket = SourceFilterSupport.REASON_FIELD_ABSENT == verdict.get("reason")
-                            ? fieldAbsentByRuleCounts
-                            : excludedByRuleCounts
-                    bucket.put(sequenceNum, (bucket.get(sequenceNum) ?: 0) + 1)
-                } else {
+                if (exchangeLeftToKeep) {
+                    flaggedExchangeOrders.add(record)
                     filteredRecords.add(record)
                 }
+            } else {
+                filteredRecords.add(record)
             }
         }
         return [
@@ -864,40 +857,29 @@ class OmsExtractSupport {
                 excludedNonSalesOrderCount: excludedNonSalesOrderCount,
                 excludedExchangeOrderCount: excludedExchangeOrderCount,
                 excludedExchangeOrders    : excludedExchangeOrders,
-                excludedByRuleCounts      : excludedByRuleCounts,
-                fieldAbsentByRuleCounts   : fieldAbsentByRuleCounts,
+                flaggedExchangeOrders     : flaggedExchangeOrders,
+                exchangeLeftToKeep        : exchangeLeftToKeep,
         ]
     }
 
-    /** Request-metadata filter block. Existing keys keep their names and meanings exactly. */
+    /**
+     * Request-metadata filter block. excludedExchangeOrderCount is every exchange order the read found and listed on the
+     * manifest: left out here on a read by key, or written flagged isExchangeOrder = Y for Keep to set aside
+     * (flaggedExchangeOrderCount). No configuredExclusions: the read applies no tenant filter, so darpan reads the side as
+     * not filtered at the read (KeepArtifacts.filteredAtRead) and its Keep summary is what counts.
+     */
     protected static Map<String, Object> buildFilterMetadata(int excludedNonSalesOrderCount,
                                                              int excludedExchangeOrderCount,
                                                              boolean exchangeManifestTruncated,
-                                                             List<Map<String, Object>> excludeRules,
-                                                             Map<Integer, Integer> excludedByRuleCounts,
-                                                             Map<Integer, Integer> fieldAbsentByRuleCounts) {
-        Map<String, Object> filters = [
+                                                             int flaggedExchangeOrderCount = 0) {
+        return [
                 requiredOrderTypeId          : SALES_ORDER_TYPE_ID,
                 excludedNonSalesOrderCount   : excludedNonSalesOrderCount,
                 excludedOrderItemAssocTypeIds: [EXCHANGE_ORDER_ASSOC_TYPE_ID],
                 excludedExchangeOrderCount   : excludedExchangeOrderCount,
+                flaggedExchangeOrderCount    : flaggedExchangeOrderCount,
                 exchangeManifestTruncated    : exchangeManifestTruncated,
         ]
-        if (excludeRules) {
-            // Every configured rule is reported, including ones that matched nothing: a rule that vanished from
-            // metadata would read as "not applied".
-            filters.configuredExclusions = excludeRules.collect { Map<String, Object> rule ->
-                [
-                        sequenceNum     : rule.get("sequenceNum"),
-                        fieldExpression : rule.get("fieldExpression"),
-                        operator        : rule.get("operator"),
-                        values          : new ArrayList<String>((List) rule.get("values")),
-                        excludedCount   : (excludedByRuleCounts?.get(rule.get("sequenceNum")) ?: 0),
-                        fieldAbsentCount: (fieldAbsentByRuleCounts?.get(rule.get("sequenceNum")) ?: 0),
-                ]
-            }
-        }
-        return filters
     }
 
     /** Identity summary of an excluded exchange order — ids and amounts only, no customer fields. */
@@ -969,8 +951,13 @@ class OmsExtractSupport {
         // DAR-BE-050. ORDER_LINE_UNIT is the only non-default grain. Anything else - a typo included - falls back to
         // order grain rather than emitting NOTHING, which would read downstream as "the source is empty".
         boolean unitGrain = "ORDER_LINE_UNIT".equalsIgnoreCase(normalize(raw.get("emitGrain")) ?: "")
+        // DAR-BE-318: who leaves exchange orders out. A window read at order grain writes them flagged for Keep; a read by
+        // key (lookupExtractOptions) and unit grain, always (no connector declares the Keep line there, and a unit carries
+        // no flag), leave them out themselves.
+        boolean exchangeExclusionAtRead = unitGrain || normalizeBool(raw.get("exchangeExclusionAtRead"), false)
         return [
                 applyExchangeExclusion: applyExchangeExclusion,
+                exchangeExclusionAtRead: exchangeExclusionAtRead,
                 emitGrain             : unitGrain ? "ORDER_LINE_UNIT" : null,
                 // Tri-system D4. Unit grain only; defaults to true (DAR-BE-050). Only an explicit false turns it off.
                 requireShopifyLineId  : !(raw.get("requireShopifyLineId") == Boolean.FALSE
@@ -981,11 +968,14 @@ class OmsExtractSupport {
     /**
      * DAR-BE-205. The extract options of an orders read. A conclusion lookup asks for orders by id and must answer for
      * every id it names, exchange orders included: the exchange exclusion keeps exchanges out of a sales-order
-     * COMPARISON, and a lookup compares nothing. Every other read, an audit re-check by key included, keeps the default.
+     * COMPARISON, and a lookup compares nothing. Any other read by key (an audit re-check, a side read by the other side's
+     * keys) leaves exchange orders out itself, as it always has (DAR-BE-318: keyed reads answer exactly as before). A window
+     * read keeps the default: its exchange orders are written flagged for Keep.
      */
     static Map<String, Object> lookupExtractOptions(Object lookupKeys, Object conclusionLookup) {
         boolean keyed = lookupKeys instanceof Collection && !((Collection) lookupKeys).isEmpty()
-        return keyed && normalizeBool(conclusionLookup) ? [applyExchangeExclusion: false] as Map<String, Object> : null
+        if (!keyed) return null
+        return (normalizeBool(conclusionLookup) ? [applyExchangeExclusion: false] : [exchangeExclusionAtRead: true]) as Map<String, Object>
     }
 
     protected static boolean isSalesOrder(Object record) {

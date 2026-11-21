@@ -18,8 +18,9 @@ class OmsKeptFieldsProjectionTests {
 
     @Test
     void eachExtractorTrimsToWhatItWasAskedPlusItsOwnFields() {
-        assertEquals(["orderId", "statusId"] as Set, OmsKeptFieldsProjection.keptBy(ORDERS, [" orderId", "statusId", "", "orderId"]))
-        assertEquals(["orderId", "paymentPreferences", "paymentPreferenceSlotsFull"] as Set,
+        // DAR-BE-318: the order read writes isExchangeOrder after its projection, so every projection keeps it, last
+        assertEquals(["orderId", "statusId", "isExchangeOrder"], OmsKeptFieldsProjection.keptBy(ORDERS, [" orderId", "statusId", "", "orderId"]) as List)
+        assertEquals(["orderId", "paymentPreferences", "paymentPreferenceSlotsFull", "isExchangeOrder"] as Set,
                 OmsKeptFieldsProjection.keptBy(ORDERS, ["orderId", "paymentPreferences"]), "raw payment rows bring their slots-full flag")
         assertNull(OmsKeptFieldsProjection.keptBy(ORDERS, ["  "]), "an order read sent only blanks keeps whole records")
         assertNull(OmsKeptFieldsProjection.keptBy(ORDERS, null))
@@ -31,6 +32,20 @@ class OmsKeptFieldsProjectionTests {
         assertEquals(["statusId", "orderId"], OmsKeptFieldsProjection.project(record, ["orderId", "statusId"] as Set).keySet() as List,
                 "the record's own order, as the extractor writes it")
         assertEquals([:], OmsKeptFieldsProjection.project("not a record", ["orderId"] as Set))
+    }
+
+    /**
+     * DAR-BE-318 (Task 17): a Spark side's Keep reads isExchangeOrder, which joins its keep, filter and read fields. No read asks
+     * for it (the extract writes it), so no copy is asked to hold it: a copy read before it existed holds no exchange order.
+     */
+    @Test
+    void theExchangeFlagIsNeverAskedOfACopy() {
+        Map side = [keepFields: BASE + ["isExchangeOrder"], filterFields: ["isExchangeOrder"], readFields: ["isExchangeOrder"],
+                    windowField: "orderDate"]
+        assertNull(problem([keptFields: BASE], side), "a projected copy that never kept it")
+        assertNull(problem([keptFields: null, heldFields: BASE], side + [keepFields: null]), "a whole copy whose records lack it")
+        Map lacking = problem([keptFields: BASE], side + [filterFields: ["isExchangeOrder", "productStoreId"]])
+        assertEquals(["productStoreId"] as Set, lacking.missing, "only fields a read asks for are missing")
     }
 
     @Test

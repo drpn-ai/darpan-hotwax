@@ -13,6 +13,8 @@ import darpan.reconciliation.automation.SourceSystemConnectorSupport
 import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
 import darpan.reconciliation.conclusion.RunConclusionSupport
 import darpan.reconciliation.core.ReconciliationServices
+import darpan.reconciliation.source.KeepArtifacts
+import darpan.reconciliation.source.KeepStepSupport
 import darpan.reconciliation.source.SourceFilterSupport
 import darpan.reconciliation.support.ReconciliationSmokeTestSupport
 import groovy.json.JsonOutput
@@ -406,9 +408,11 @@ class HotWaxRollingCopyParityTests {
             Map run = ordersRun(lacking, "lack-live", conn, "RCP_OLACK")
             assertEquals([], run.errors)
             assertEquals(1, lacking.size(), "the side reads live: the copy lacks salesChannelEnumId")
-            assertFalse((lacking[0].params.keepRecordFields as List).contains("salesChannelEnumId"), "a filter field, not a kept one")
-            assertEquals(["salesChannelEnumId"], (lacking[0].params.sourceFilters as List)*.fieldExpression)
-            assertFalse(json(new File(run.result.fileLocation as String)).records*.orderId.contains("O008"), "the POS order is set aside")
+            // DAR-BE-318 (Task 17): a Spark side's Keep fields join its projection and go as keepRuleFields; no filters are sent
+            assertTrue((lacking[0].params.keepRecordFields as List).contains("salesChannelEnumId"), "a Keep field is kept (Ruling 3b2b-4)")
+            assertEquals(["isExchangeOrder", "salesChannelEnumId"], lacking[0].params.keepRuleFields)
+            assertTrue(json(new File(run.result.fileLocation as String)).records*.orderId.contains("O008"), "the read drops nothing")
+            assertFalse(keptOrderIds(run).contains("O008"), "Spark Keep sets the POS order aside")
             assertTrue((datasetRow(id).nextReadDate as Timestamp).time <= System.currentTimeMillis(), "the dataset is due now")
 
             // the next scan's read keeps the field, and the side is served again: its filter sees the field
@@ -419,8 +423,9 @@ class HotWaxRollingCopyParityTests {
             assertEquals(0, after.size(), "served once the copy keeps the field")
             Map servedDoc = json(new File(served.result.fileLocation as String))
             assertEquals(json(new File(run.result.fileLocation as String)).records, servedDoc.records, "the live read's records")
-            assertEquals([1, 0], [servedDoc.metadata.filters.configuredExclusions[0].excludedCount,
-                                  servedDoc.metadata.filters.configuredExclusions[0].fieldAbsentCount], "O008 set aside on its field")
+            assertEquals(keptOrderIds(run), keptOrderIds(served), "Spark Keep keeps the same orders of both")
+            Map rule = KeepArtifacts.readSummary(new File(served.result.fileLocation as String)).configuredExclusions[0] as Map
+            assertEquals([1, 0], [rule.excludedCount, rule.fieldAbsentCount], "O008 set aside on its field")
         } finally {
             ec.entity.find("darpan.rule.RuleSetCompareSourceFilter").condition("compareScopeId", "RCP_OLACK").disableAuthz().deleteAll()
         }
@@ -454,15 +459,19 @@ class HotWaxRollingCopyParityTests {
         }
         assertEquals([], live.errors)
         assertEquals(1, liveCalls.size())
-        assertEquals(ORDER_BASE, liveCalls[0].params.keepRecordFields, "the side keeps fewer fields than the copy")
+        assertEquals(ORDER_BASE + ["isExchangeOrder"], liveCalls[0].params.keepRecordFields,
+                "the side keeps fewer fields than the copy (its Keep fields join them: statusId is one already)")
 
         Map servedDoc = json(new File(served.result.fileLocation as String))
         Map liveDoc = json(new File(live.result.fileLocation as String))
         assertEquals(true, servedDoc.metadata.servedFromCopy)
         List<String> ids = servedDoc.records*.orderId
         assertTrue(ids.contains("O004") && !ids.contains("O017"), "half-open on orderDate: ${ids}")
-        assertFalse(ids.contains("O003"), "the cancelled order is filtered")
-        assertFalse(ids.contains("O006") || ids.contains("O009"), "exchange orders are set aside")
+        // DAR-BE-318 (Task 17): the read drops nothing; the exchanges are flagged, and Spark Keep sets them and O003 aside
+        assertTrue(ids.containsAll(["O003", "O006", "O009"]), "every order of the window is written: ${ids}")
+        assertEquals(["O006", "O009"], servedDoc.records.findAll { it.isExchangeOrder == "Y" }*.orderId.sort())
+        assertFalse(keptOrderIds(served).any { it in ["O003", "O006", "O009"] }, "the cancelled order and the exchanges are set aside")
+        assertEquals(keptOrderIds(live), keptOrderIds(served), "Spark Keep keeps the same orders of both")
         assertTrue(servedDoc.records.every { !it.containsKey("productStoreId") }, "projected to the side's own fields")
         assertEquals(JsonOutput.toJson(liveDoc.records), JsonOutput.toJson(servedDoc.records))
 
@@ -490,7 +499,7 @@ class HotWaxRollingCopyParityTests {
         Map artifact = [location: DataManagerSupport.resolveReconciliationRunLocation(ec, "rcp-${token}-${runToken}", STAMP), runToken: "parity"]
         ec.message.clearAll()
         Map result = RunExtractSupport.extractApiSource(ec, source, "FILE_1", "File 1", artifact,
-                [windowStartDate: START, windowEndDate: END, timeZone: "UTC"], null, liveExtractor(calls))
+                [windowStartDate: START, windowEndDate: END, timeZone: "UTC"], null, liveExtractor(calls), null, sideKeepOf(source))
         List<String> errors = ec.message.errors.collect { it.toString() }
         ec.message.clearAll()
         return [result: result, artifact: artifact, source: source, errors: errors]
@@ -703,17 +712,29 @@ class HotWaxRollingCopyParityTests {
         Map source = new LinkedHashMap(row.getMap())
         Map artifact = [location: DataManagerSupport.resolveReconciliationRunLocation(ec, "rcp-${token}-p${++seq}", STAMP), runToken: "parity"]
         ec.message.clearAll()
+        Map sideKeep = sideKeepOf(source)
         Map result = RunExtractSupport.extractApiSource(ec, source, "FILE_1", "File 1", artifact,
-                [windowStartDate: START, windowEndDate: END, timeZone: "UTC"], null, omsStub(calls))
+                [windowStartDate: START, windowEndDate: END, timeZone: "UTC"], null, omsStub(calls), null, sideKeep)
         List<String> errors = ec.message.errors.collect { it.toString() }
         ec.message.clearAll()
-        return [result: result, errors: errors]
+        return [result: result, errors: errors, sideKeep: sideKeep]
+    }
+
+    /** The side's Keep plan as an interactive run builds it (RunExtractSupport.sideKeep, for the active tenant). */
+    private Map sideKeepOf(Map source) {
+        return RunExtractSupport.sideKeep(ec, source, "FILE_1", RunExtractSupport.resolveExtractConnector(ec, source))
+    }
+
+    /** Spark Keep over one extract, as ingest runs it: the kept orderIds (KeepStepSupport.keptValues writes the artifact). */
+    private Set<String> keptOrderIds(Map run) {
+        return KeepStepSupport.keptValues(ec, new File(run.result.fileLocation as String), (Map) run.sideKeep, "orderId")
     }
 
     /**
      * The OMS as extract#HotWaxOmsGqlOrders answers, for the refresh and for the live read alike: orders with orderDate in
-     * [windowStart, windowEnd), exchange orders set aside into the exchange manifest (at most exchangeManifestMaxEntries,
-     * 500 by default), the side's filters applied, then each record trimmed with the extractor's projection.
+     * [windowStart, windowEnd), each record trimmed with the extractor's projection, then flagged isExchangeOrder Y or N;
+     * exchange orders also listed in the exchange manifest (at most exchangeManifestMaxEntries, 500 by default). DAR-BE-318
+     * (Task 17): the read takes no source filters, so it drops nothing; Spark Keep sets records aside at the compare.
      */
     private Closure omsStub(List<Map> calls) {
         return { String service, Map params ->
@@ -724,13 +745,14 @@ class HotWaxRollingCopyParityTests {
                 Instant d = Instant.ofEpochMilli(o.orderDate as long)
                 !d.isBefore(from) && d.isBefore(to)
             }
+            assertFalse(params.containsKey("sourceFilters"), "the orders read takes no source filters")
             List<Map> exchanges = inWindow.findAll { it.orderItemAssocs }
-            Map applied = SourceFilterSupport.applyToRecords(inWindow - exchanges, SourceFilterSupport.parseRules(params.sourceFilters as List))
-            ExcludedRecordsSidecar.discard((Map) applied.excludedCollector)
             // as extract#HotWaxOmsGqlOrders trims: the asked fields (raw payment rows bring their slots-full flag), record order
             Set<String> keep = (params.keepRecordFields as List)?.collect { it.toString().trim() }?.findAll { it } as Set<String>
             if (keep?.contains("paymentPreferences")) keep.add("paymentPreferenceSlotsFull")
-            List<Map> records = ((List<Map>) applied.records).collect { Map r -> keep ? r.findAll { k, v -> (k as String) in keep } : r }
+            List<Map> records = inWindow.collect { Map r ->
+                (keep ? r.findAll { k, v -> (k as String) in keep } : new LinkedHashMap(r)) + [isExchangeOrder: r.orderItemAssocs ? "Y" : "N"]
+            }
             File dir = DataManagerSupport.resolveDirectoryFile(ec, params.outputLocation as String, true)
             new File(dir, fileName).setText(JsonOutput.toJson([records: records, metadata: [live: true]]), "UTF-8")
             String manifestLocation = null
@@ -759,7 +781,7 @@ class HotWaxRollingCopyParityTests {
         Map called = underFacadeGrant("reconciliation.ReconciliationCoreServices.reconcile#RuleSetCompareScope", [
                 ruleSetId: "RCP_ORS", compareScopeId: "RCP_OSCOPE", file1Location: run.result.fileLocation,
                 file2Location: new File(fixtures, "ns-orders.json").absolutePath, file1Name: "oms-orders.json",
-                file2Name: "ns-orders.json", sparkAppName: "HotWaxRollingCopyParityTests"])
+                file2Name: "ns-orders.json", sparkAppName: "HotWaxRollingCopyParityTests", keepBySide: [FILE_1: run.sideKeep]])
         assertEquals([], called.errors, tag)
         Map out = called.out
         try {

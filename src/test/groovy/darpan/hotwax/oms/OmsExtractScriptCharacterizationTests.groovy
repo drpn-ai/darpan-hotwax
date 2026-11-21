@@ -123,8 +123,10 @@ class OmsExtractScriptCharacterizationTests {
                                    "reconciliationRunResultId", "progressStageCode", "expectedRecordCount"]
         // DAR-BE-318: the returns contract declares windowFieldName (entryDate only) right after the window.
         List<String> returnsIn = windowedIn.take(5) + ["windowFieldName"] + windowedIn.drop(5)
+        // DAR-BE-318 (plan 3b-2b, Task 17): the orders reads take no source filters; they are sent the fields Spark Keep reads.
+        List<String> ordersIn = windowedIn - ["sourceFilters"]
         List<String> unitIn = ["omsRestSourceConfigId", "automationExecutionId", "companyUserGroupId", "windowStart",
-                               "windowEnd", "windowFieldName", "orderStatusIds", "outputLocation", "fileName", "sourceFilters",
+                               "windowEnd", "windowFieldName", "orderStatusIds", "outputLocation", "fileName", "keepRuleFields",
                                "reconciliationRunResultId", "progressStageCode", "expectedRecordCount"]
         List<String> ordersOut = ["dataAvailable", "fileLocation", "exchangeManifestFileLocation", "fileName", "recordCount",
                                   "requestMetadata", "warnings", "errors"]
@@ -132,8 +134,8 @@ class OmsExtractScriptCharacterizationTests {
         Map<String, List<List<String>>> expected = [
                 // DAR-BE-120: read by key, for a conclusion lookup (an order's notes behind R1's "never reached NetSuite").
                 // DAR-BE-318: windowFieldName (orderDate only) and the dataset read's exchange-manifest cap, its own (not the contract's).
-                "extract#HotWaxOmsGqlOrders"           : [windowedIn + ["lookupKeys", "lookupKeyField", "readFields", "conclusionLookup",
-                                                                        "windowFieldName", "exchangeManifestMaxEntries"], ordersOut],
+                "extract#HotWaxOmsGqlOrders"           : [ordersIn + ["keepRuleFields", "lookupKeys", "lookupKeyField", "readFields",
+                                                                      "conclusionLookup", "windowFieldName", "exchangeManifestMaxEntries"], ordersOut],
                 // DAR-BE-094 R8 / R16 added the two returns-scope switches.
                 // DAR-BE-119: lookupKeys / lookupKeyField, an audit's re-check of its older open findings by key.
                 "extract#HotWaxOmsGqlReturns"          : [returnsIn + ["lookupKeys", "lookupKeyField", "includeReturnsWithoutShopifyRef", "withReturnCredit", "onlyCancelledReturns"], plainOut],
@@ -246,21 +248,46 @@ class OmsExtractScriptCharacterizationTests {
                                                    orderItemAssocTypeId: "EXCHANGE"]]) },
         ])
 
-        Map result = extract("HotWaxOmsGqlOrders", baseParams(out) + [
-                sourceFilters: [[sequenceNum: 1, fieldExpression: "statusId", operator: "EXCLUDE_IN", filterValues: "ORDER_CANCELLED"]]])
+        // DAR-BE-318 (Task 17): the side's Keep fields, never its filters; the exchange order is written, flagged, for Keep.
+        Map result = extract("HotWaxOmsGqlOrders", baseParams(out) + [keepRuleFields: ["statusId", "isExchangeOrder"]])
 
         assertEquals([], result.errors, result.toString())
         assertEquals([], result.warnings)
-        assertEquals(1, result.recordCount, "the exchange order is excluded into the manifest")
-        assertEquals(["G1"], records(result)*.orderId)
+        assertEquals(2, result.recordCount, "the exchange order is written for Keep to set aside, and listed in the manifest")
+        assertEquals([["G1", "N"], ["G2", "Y"]], records(result).collect { [it.orderId, it.isExchangeOrder] })
         assertEquals(expectedOrdersFileName(), result.fileName)
         assertEquals("${out}/${result.fileName}".toString(), result.fileLocation)
         assertTrue(partialsSeen.every { it.startsWith("oms-gql-orders-extract-") }, partialsSeen.toString())
         assertFalse(partialsSeen.isEmpty())
         String manifestName = OmsExtractSupport.exchangeManifestFileName(result.fileName)
         assertEquals("${out}/${manifestName}".toString(), result.exchangeManifestFileLocation)
-        // The excluded-records sidecar is attempted but empty at order grain, so it writes nothing.
+        // No excluded-records side file: the read sets nothing aside.
         assertEquals([result.fileName, manifestName].sort(), listing(out))
+        assertEquals(["G2"], ((List<Map>) JSON.parseText(fileAt(result.exchangeManifestFileLocation as String)).manifest)*.omsOrderId)
+    }
+
+    /** DAR-BE-318 (Task 17, Ruling 3b2b-10): a unit carries the order fields its Keep reads; the read writes no side file. */
+    @Test
+    void gqlOrderItemsCarriesTheOrdersKeepFieldsAndWritesNoSideFile() {
+        String out = freshOut()
+        serveGql(out, [], [
+                orders    : { Map v -> conn([gqlOrder("U1") + [identifications: [],
+                                                               shipGroups: [edges: [[node: [shipGroupSeqId: "00001", facilityId: "F1"]]]]]]) },
+                orderItems: { Map v -> conn([[orderId: "U1", orderItemSeqId: "00101", externalId: "L1", productId: "P1", quantity: 1,
+                                              statusId: "ITEM_CANCELLED", shipGroupSeqId: "00001"]]) },
+                products  : { Map v -> conn([[productId: "P1", internalName: "SKU-1"]]) },
+                facilities: { Map v -> conn([[facilityId: "F1", facilityName: "Store F1"]]) },
+        ])
+
+        Map result = extract("HotWaxOmsGqlOrderItems", baseParams(out) + [keepRuleFields: ["unitState", "orderName"]])
+
+        assertEquals([], result.errors, result.toString())
+        assertEquals(1, result.recordCount, "the cancelled unit is written: Spark Keep sets it aside")
+        Map unit = records(result)[0]
+        assertEquals("CANCELLED", unit.unitState)
+        assertEquals("#U1", unit.orderName, "the order's name, which a unit lacks, rides on it for Keep")
+        assertFalse(unit.containsKey("grandTotal"), "an order field no Keep reads is not carried")
+        assertEquals([result.fileName], listing(out), "no excluded-records side file from the read")
     }
 
     @Test

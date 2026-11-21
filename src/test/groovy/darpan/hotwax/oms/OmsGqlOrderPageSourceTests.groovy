@@ -47,8 +47,9 @@ class OmsGqlOrderPageSourceTests {
         return [data: [orderItemAssocs: [edges: nodes.collect { [node: it] }, pageInfo: [hasNextPage: hasNext, endCursor: endCursor]]]]
     }
 
-    private static Map run(ScriptedClient client, File out, List keep = KEEP, List filters = null, Map options = null) {
-        return OmsExtractSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, keep, null, filters, options,
+    /** keepRuleFields: the fields the side's Spark Keep reads (DAR-BE-318), where its source filters went before. */
+    private static Map run(ScriptedClient client, File out, List keep = KEEP, List keepRuleFields = null, Map options = null) {
+        return OmsExtractSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, keep, null, keepRuleFields, options,
                 OmsGqlOrderPageSource.fetcher(client))
     }
 
@@ -277,8 +278,9 @@ class OmsGqlOrderPageSourceTests {
         } finally { out.delete() }
     }
 
+    /** DAR-BE-318: a Keep field on a unit field is asked, not refused as an order field, and every unit is written for Spark. */
     @Test
-    void aUnitLevelFilterIsAppliedToUnitsNotRefusedAsAnOrderField() {
+    void aUnitLevelKeepFieldIsAcceptedAndEveryUnitWritten() {
         ScriptedClient client = new ScriptedClient([
                 ordersPage([unitOrder("M1")], false),
                 itemsPage([item("M1", "00101", "00001"), item("M1", "00102", "00002", "ITEM_CANCELLED")]),
@@ -286,27 +288,27 @@ class OmsGqlOrderPageSourceTests {
                 facilitiesPage(["STORE_1", "WH"])])
         File out = File.createTempFile("gql-", ".json")
         try {
-            Map result = run(client, out, null, [[fieldExpression: "unitState", operator: "INCLUDE_IN", filterValues: "COMPLETED", sequenceNum: 1]], UNIT_OPTIONS)
+            Map result = run(client, out, null, ["unitState"], UNIT_OPTIONS)
             assertEquals([], result.errors)
             List<Map> recs = (List<Map>) (new JsonSlurper().parse(out) as Map).records
-            assertEquals(["00101"], recs*.orderItemSeqId)
+            assertEquals(["00101", "00102"], recs*.orderItemSeqId)
         } finally { out.delete() }
     }
 
     @Test
     void aFilterOnAFieldTheGraphqlUnitDoesNotCarryFailsTheExtract() {
-        ["salesChannelEnumId", '$.records[*].netsuiteOrderId'].each { String field ->
+        ["salesChannelEnumId", "netsuiteOrderId"].each { String field ->
             ScriptedClient client = new ScriptedClient([])
             File out = File.createTempFile("gql-", ".json"); out.delete()
-            Map result = run(client, out, null, [[fieldExpression: field, operator: "EXCLUDE_IN", filterValues: "X", sequenceNum: 1]], UNIT_OPTIONS)
-            assertTrue(((List) result.errors)[0].toString().contains(field.replace('$.records[*].', '')), "${result.errors}")
+            Map result = run(client, out, null, [field], UNIT_OPTIONS)
+            assertTrue(((List) result.errors)[0].toString().contains(field), "${result.errors}")
             assertEquals(0, client.calls.size())
         }
     }
 
     /** DAR-BE-116: R1/R3 and R15 read the same order items for the same days; with sharing on, OMS is asked once. */
     @Test
-    void twoUnitExtractsOfOneWindowShareOneReadAndKeepTheirOwnFilters() {
+    void twoUnitExtractsOfOneWindowShareOneReadAndEachWritesEveryUnit() {
         OmsGqlSharedRead.reset()
         OmsGqlLookupCache.reset()
         List<String> asked = Collections.synchronizedList([])
@@ -330,8 +332,8 @@ class OmsGqlOrderPageSourceTests {
         Map config = CONFIG
         def pool = java.util.concurrent.Executors.newFixedThreadPool(2)
         try {
-            List<List> filters = [[[fieldExpression: "unitState", operator: "INCLUDE_IN", filterValues: "COMPLETED", sequenceNum: 1]],
-                                  [[fieldExpression: "facilityId", operator: "EXCLUDE_IN", filterValues: "STORE_1", sequenceNum: 1]]]
+            // DAR-BE-318: each side's Keep fields (its filters run in Spark now), so both write every unit
+            List<List> filters = [["unitState"], ["facilityId", "orderName"]]
             List<File> outs = filters.collect { File.createTempFile("gql-", ".json") }
             List futures = (0..1).collect { int i ->
                 pool.submit({ ->
@@ -343,8 +345,11 @@ class OmsGqlOrderPageSourceTests {
             futures.each { assertEquals([], ((Map) it.get(10, java.util.concurrent.TimeUnit.SECONDS)).errors) }
             assertEquals(["exchange", "facilities", "items", "orders", "products"], asked.sort(),
                     "one orders page, its exchange pass and one items, products and facilities pass, for both extracts")
-            assertEquals(["00101"], ((List<Map>) (new JsonSlurper().parse(outs[0]) as Map).records)*.orderItemSeqId)
-            assertEquals(["00102"], ((List<Map>) (new JsonSlurper().parse(outs[1]) as Map).records)*.orderItemSeqId)
+            assertEquals(["00101", "00102"], ((List<Map>) (new JsonSlurper().parse(outs[0]) as Map).records)*.orderItemSeqId)
+            List<Map> second = (List<Map>) (new JsonSlurper().parse(outs[1]) as Map).records
+            assertEquals(["00101", "00102"], second*.orderItemSeqId)
+            assertEquals(["#M1", "#M1"], second*.orderName, "each extract carries only its own Keep fields")
+            assertTrue(((List<Map>) (new JsonSlurper().parse(outs[0]) as Map).records).every { !it.containsKey("orderName") })
             outs*.delete()
         } finally {
             pool.shutdownNow()
@@ -421,7 +426,8 @@ class OmsGqlOrderPageSourceTests {
         File out = File.createTempFile("gql-", ".json")
         try {
             Map result = run(client, out)
-            assertEquals(1, result.recordCount)
+            assertEquals(2, result.recordCount, "DAR-BE-318: the exchange order is written, flagged, for Keep to set aside")
+            assertEquals(["N", "Y"], ((List<Map>) (new JsonSlurper().parse(out) as Map).records)*.isExchangeOrder)
             assertEquals("M0", ((Map) ((List) result.exchangeManifest)[0]).toOrderId)
             assertEquals(1, ((Map) ((Map) (new JsonSlurper().parse(out) as Map).metadata).filters).excludedExchangeOrderCount)
         } finally { out.delete() }
@@ -435,7 +441,8 @@ class OmsGqlOrderPageSourceTests {
                 assocsPage([[orderId: "M2", toOrderId: "M0", orderItemAssocTypeId: "EXCHANGE"]], false)])
         File out = File.createTempFile("gql-", ".json")
         try {
-            assertEquals(0, run(client, out).recordCount)
+            assertEquals(2, run(client, out).recordCount)
+            assertEquals(["Y", "Y"], ((List<Map>) (new JsonSlurper().parse(out) as Map).records)*.isExchangeOrder, "both pages' exchanges found")
             assertEquals("A1", ((Map) client.calls[2].variables).after)
         } finally { out.delete() }
     }
@@ -458,8 +465,7 @@ class OmsGqlOrderPageSourceTests {
         ScriptedClient client = new ScriptedClient([])
         File out = File.createTempFile("gql-", ".json")
         out.delete()
-        Map result = run(client, out, KEEP, [[fieldExpression: "netsuiteOrderId", operator: "EXCLUDE_IN",
-                                              filterValues: "X", sequenceNum: 1]])
+        Map result = run(client, out, KEEP, ["netsuiteOrderId"])
         assertTrue(((List) result.errors)[0].toString().contains("netsuiteOrderId"))
         assertEquals(0, client.calls.size())
     }
@@ -564,8 +570,7 @@ class OmsGqlOrderPageSourceTests {
     void anUnsupportedFilterFieldFailsEvenWithNoProjection() {
         ScriptedClient client = new ScriptedClient([])
         File out = File.createTempFile("gql-", ".json"); out.delete()
-        Map result = run(client, out, null, [[fieldExpression: "netsuiteOrderId", operator: "EXCLUDE_IN",
-                                              filterValues: "X", sequenceNum: 1]])
+        Map result = run(client, out, null, ["netsuiteOrderId"])
         assertTrue(((List) result.errors)[0].toString().contains("netsuiteOrderId"))
         assertEquals(0, client.calls.size())
     }
@@ -575,25 +580,28 @@ class OmsGqlOrderPageSourceTests {
         ScriptedClient client = new ScriptedClient([ordersPage([], false)])
         File out = File.createTempFile("gql-", ".json")
         try {
-            run(client, out, null, [[fieldExpression: "productStoreId", operator: "EXCLUDE_IN", filterValues: "X", sequenceNum: 1]])
+            run(client, out, null, ["productStoreId", "isExchangeOrder"])
             assertTrue((client.calls[0].document as String).contains("productStoreId"))
+            assertFalse((client.calls[0].document as String).contains("isExchangeOrder"), "the extract writes the flag; it never asks for it")
         } finally { out.delete() }
     }
 
-    /** DAR-BE-153: Steve Madden's run drops POS orders on the HotWax side; its Shopify store holds none to drop. */
+    /**
+     * DAR-BE-153: Steve Madden's run drops POS orders on the HotWax side; its Shopify store holds none to drop. DAR-BE-318: the
+     * channel is asked and written, and Spark Keep sets the POS orders aside.
+     */
     @Test
-    void aSalesChannelExclusionIsSelectedAndDropsTheChannelsOrders() {
+    void aSalesChannelKeepFieldIsSelectedAndEveryOrderWritten() {
         Map pos = order("M2") + [salesChannelEnumId: "POS_SALES_CHANNEL"]
         ScriptedClient client = new ScriptedClient([ordersPage([order("M1") + [salesChannelEnumId: "WEB_SALES_CHANNEL"], pos], false),
                                                     assocsPage([])])
         File out = File.createTempFile("gql-", ".json")
         try {
-            Map result = run(client, out, KEEP, [[fieldExpression: "salesChannelEnumId", operator: "EXCLUDE_IN",
-                                                  filterValues: "POS_SALES_CHANNEL", sequenceNum: 1]])
+            Map result = run(client, out, KEEP, ["salesChannelEnumId"])
             assertEquals([], result.errors ?: [])
             assertTrue((client.calls[0].document as String).contains("salesChannelEnumId"))
             List<Map> recs = (List<Map>) (new JsonSlurper().parse(out) as Map).records
-            assertEquals(["#M1"], recs*.orderName)
+            assertEquals(["#M1", "#M2"], recs*.orderName)
         } finally { out.delete() }
     }
 

@@ -6,12 +6,12 @@ import darpan.hotwax.oms.OmsScriptServiceSupport
 // Service edge for OMS order items at UNIT grain over GraphQL (DAR-BE-116): the GraphQL twin of
 // extractOmsOrderItems.groovy. Same extract options, same REST flattener and unit record; the pages come from
 // OmsGqlOrderPageSource (orders with their ship groups, items by orderId in
-// batches). The shared gate, work file, progress heartbeat, final move and excluded-records sidecar live in
-// OmsScriptServiceSupport.runExtract.
+// batches). The shared gate, work file, progress heartbeat and final move live in OmsScriptServiceSupport.runExtract.
+// DAR-BE-318: no source filters and so no excluded-records side file here; Keep runs in Spark over the file, and darpan
+// writes the side file (the connector row's excludedRecordsSidecar).
 OmsScriptServiceSupport.runExtract(ec, context, [
         requiredSystemEnumId  : "OMS_ORDER_ITEMS_GQL",
         workFilePrefix        : "oms-gql-order-items-extract-",
-        excludedRecordsSidecar: true,
         extract               : { Map a ->
             // As extractOmsOrderItems: exchange exclusion OFF and items without a Shopify id KEPT, because the
             // NetSuite hops key on the OMS order. orderStatusIds and other window fields are refused by the
@@ -23,8 +23,9 @@ OmsScriptServiceSupport.runExtract(ec, context, [
                     requireShopifyLineId  : false,
                     orderStatusIds        : (orderStatusIds instanceof List) ? (List) orderStatusIds : null,
             ]
+            // DAR-BE-318 (Ruling 3b2b-10): each unit carries the order fields its Keep reads that it lacks.
             OmsExtractSupport.extractOrdersToFile(a.sourceConfig, windowStart, windowEnd, a.workFile,
-                    null, a.pageProgressListener, a.sourceFilters, extractOptions,
+                    null, a.pageProgressListener, (keepRuleFields instanceof List) ? (List) keepRuleFields : null, extractOptions,
                     OmsGqlOrderPageSource.fetcher(new OmsGqlClient(OmsExtractSupport.toPlainMap(a.sourceConfig)),
                             // DAR-BE-119: an audit re-checking older open findings reads their orders by orderId.
                             [lookupKeys: (lookupKeys instanceof List) ? (List) lookupKeys : null, lookupKeyField: lookupKeyField]))

@@ -40,6 +40,12 @@ class OmsKeptFieldsProjection {
          * writes no such file.
          */
         final Integer exchangeManifestMax
+        /**
+         * Fields the extractor writes on every record after its projection, whatever it is asked to keep, and never selects
+         * (DAR-BE-318: OMS orders' isExchangeOrder). A projection keeps them, and serving never asks a copy for them: a copy
+         * read before they existed holds none of the records they mark (its read left the exchange orders out).
+         */
+        final Set<String> appended
 
         Spec(Map args) {
             alwaysKept = ((args.alwaysKept ?: []) as Set<String>).asImmutable()
@@ -49,6 +55,7 @@ class OmsKeptFieldsProjection {
             shapedFields = ((args.shapedFields ?: []) as Set<String>).asImmutable()
             recordFollowsAskedFields = args.recordFollowsAskedFields == true
             exchangeManifestMax = args.exchangeManifestMax as Integer
+            appended = ((args.appended ?: []) as Set<String>).asImmutable()
         }
     }
 
@@ -58,7 +65,8 @@ class OmsKeptFieldsProjection {
             readShapers: ["paymentRefNums", "paymentPreferences", "paymentMethodTypeIds"],
             shapedFields: ["paymentRefNums", "paymentPreferences", "paymentMethodTypeIds", "paymentPreferenceSlotsFull"],
             recordFollowsAskedFields: true,
-            exchangeManifestMax: 500)
+            exchangeManifestMax: 500,
+            appended: [OmsExtractSupport.IS_EXCHANGE_ORDER_FIELD])
 
     /** HotWax OMS returns (extract#HotWaxOmsGqlReturns): items[] always kept (RQ-21). */
     static final Spec OMS_RETURNS = new Spec(alwaysKept: ["items"], projectsOnAnyList: true)
@@ -99,7 +107,13 @@ class OmsKeptFieldsProjection {
             return keep
         }
         Set<String> keep = withCompanions(keepSet(rawFields), spec.companions)
-        return keep == null || !spec.alwaysKept ? keep : new LinkedHashSet<String>(keep) + spec.alwaysKept
+        if (keep == null || !(spec.alwaysKept || spec.appended)) return keep
+        return new LinkedHashSet<String>(keep) + spec.alwaysKept + spec.appended
+    }
+
+    /** {@code fields} without the spec's appended fields, which no read asks for; null stays null. */
+    private static Set<String> asked(Spec spec, Set<String> fields) {
+        return fields == null || !spec.appended ? fields : (fields.findAll { !spec.appended.contains(it) } as LinkedHashSet<String>)
     }
 
     /** The record's fields named in {@code keep}, in the record's own order; a record that is not a map is empty. */
@@ -123,11 +137,11 @@ class OmsKeptFieldsProjection {
      */
     static Map servingProblem(Spec spec, Map copy, Map side) {
         Set<String> copyKeep = keepSet(copy?.keptFields)
-        Set<String> copyKept = copyKeep == null ? null : keptBy(spec, copyKeep)
+        Set<String> copyKept = copyKeep == null ? null : asked(spec, keptBy(spec, copyKeep))
         Set<String> held = copy?.heldFields instanceof Collection ? (copy.heldFields as Set<String>) : null
-        Set<String> sideKept = keptBy(spec, side?.keepFields)
-        Set<String> filterFields = (side?.filterFields ?: []) as Set<String>
-        Set<String> readFields = (side?.readFields ?: []) as Set<String>
+        Set<String> sideKept = asked(spec, keptBy(spec, side?.keepFields))
+        Set<String> filterFields = asked(spec, (side?.filterFields ?: []) as Set<String>)
+        Set<String> readFields = asked(spec, (side?.readFields ?: []) as Set<String>)
         String windowField = normalize(side?.windowField)
 
         if (sideKept == null && copyKept != null) {

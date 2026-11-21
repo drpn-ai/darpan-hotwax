@@ -135,16 +135,45 @@ class OmsGqlOrderItemsDataDefinitionTests {
         return DataSourceDefinitionSupport.parse(row.protocol as String, row.json as String, CONNECTION_FIELDS)
     }
 
-    /** The coded path: extract#HotWaxOmsGqlOrderItems's own call, through a real OmsGqlClient on the scripted server. */
+    /**
+     * The coded path: extract#HotWaxOmsGqlOrderItems's own call, through a real OmsGqlClient on the scripted server, then the
+     * Keep a run puts on its file. DAR-BE-318 (plan 3b-2b): the coded read takes no filters; it is sent the fields its Keep
+     * reads and each unit carries the order fields among them it lacks (Ruling 3b2b-10). Spark Keep then sets aside what the
+     * tenant's rules drop, stated here as front-end A states it (SourceFilterSupport; OmsOrdersKeepParityTests runs it in
+     * Spark). The copies are taken off again, so the units are compared with the data-defined read's, which still filters at
+     * its read (Ruling 3b2b-16).
+     */
     static Map coded(Server server, Map fetchOptions = [:], List rawFilters = null) {
         OmsGqlClient client = new OmsGqlClient(CONFIG, server.sender())
         File out = File.createTempFile("coded-items-", ".json")
         try {
-            Map result = OmsExtractSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, null, null, rawFilters, UNIT_OPTIONS,
+            List<Map<String, Object>> rules = SourceFilterSupport.parseRules(rawFilters)
+            List<String> keepRuleFields = rules.collect { it.fieldExpression as String }.unique()
+            // the same read without Keep fields (only when there are some), for the fields a unit carries only for Keep
+            Map plain = keepRuleFields ? codedFile(new OmsGqlClient(CONFIG, server.sender()), fetchOptions, null) : null
+            Map result = OmsExtractSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, null, null, keepRuleFields, UNIT_OPTIONS,
                     OmsGqlOrderPageSource.fetcher(client, fetchOptions))
             assertEquals([], result.errors, "coded extract errors")
             Map file = (Map) new JsonSlurper().parse(out)
-            return [records: file.records, metadata: file.metadata]
+            Map applied = SourceFilterSupport.applyToRecords((List) file.records, rules)
+            darpan.reconciliation.conclusion.ExcludedRecordsSidecar.discard((Map) applied.excludedCollector)
+            Set<String> ownFields = plain == null ? null : ((List<Map>) plain.records).collectMany { it.keySet() as List } as Set<String>
+            Map metadata = (Map) file.metadata
+            if (applied.configuredExclusions != null) ((Map) metadata.filters).configuredExclusions = applied.configuredExclusions
+            return [records : ((List<Map>) applied.records).collect { Map r -> ownFields == null ? r : r.findAll { k, v -> ownFields.contains(k) } },
+                    metadata: metadata]
+        } finally {
+            out.delete()
+        }
+    }
+
+    private static Map codedFile(OmsGqlClient client, Map fetchOptions, List keepRuleFields) {
+        File out = File.createTempFile("coded-items-plain-", ".json")
+        try {
+            Map result = OmsExtractSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, null, null, keepRuleFields, UNIT_OPTIONS,
+                    OmsGqlOrderPageSource.fetcher(client, fetchOptions))
+            assertEquals([], result.errors, "coded extract errors")
+            return (Map) new JsonSlurper().parse(out)
         } finally {
             out.delete()
         }

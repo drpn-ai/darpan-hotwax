@@ -78,16 +78,18 @@ class OmsGqlQueries {
     ]
 
     /**
-     * The fields the run reads: the projection plus every source-filter field. Filter fields are added
-     * EVEN WITHOUT a projection (review C1): a filter on a field the document never selected excludes
-     * nothing. Null only when there is neither a projection nor a filter.
+     * The fields the run reads: the projection plus every field the side's Keep reads (DAR-BE-318: darpan's keepRuleFields,
+     * where the source-filter fields were). Keep fields are added EVEN WITHOUT a projection (review C1): Spark's Keep on a
+     * field the document never selected sets nothing aside. The exchange flag (OmsExtractSupport.IS_EXCHANGE_ORDER_FIELD) is
+     * written by the extract after its read, so it is never asked. Null only when there is neither a projection nor a Keep
+     * field to ask.
      */
-    static Set<String> requiredFields(Set<String> keepFieldSet, List<Map> excludeRules) {
+    static Set<String> requiredFields(Set<String> keepFieldSet, Collection<String> keepRuleFields) {
         Set<String> required = new LinkedHashSet<String>(keepFieldSet ?: [])
-        (excludeRules ?: []).each { Map rule ->
-            String field = (rule?.get("fieldExpression") as String)?.trim()
-            if (field) required.add(field)
+        (keepRuleFields ?: []).each { String field ->
+            if (field?.trim()) required.add(field.trim())
         }
+        required.remove(OmsExtractSupport.IS_EXCHANGE_ORDER_FIELD)
         return (keepFieldSet == null && required.isEmpty()) ? null : required
     }
 

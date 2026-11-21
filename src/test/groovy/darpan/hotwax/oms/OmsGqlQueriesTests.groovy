@@ -63,10 +63,11 @@ class OmsGqlQueriesTests {
     }
 
     @Test
-    void requiredFieldsUnionsKeepFieldsWithFilterFields() {
-        Set<String> got = OmsGqlQueries.requiredFields(["orderId"] as Set,
-                [[fieldExpression: "productStoreId", operator: "EXCLUDE_IN", sequenceNum: 1]])
-        assertEquals(["orderId", "productStoreId"] as Set, got)
+    void requiredFieldsUnionsKeepFieldsWithTheKeepRuleFields() {
+        Set<String> got = OmsGqlQueries.requiredFields(["orderId"] as Set, ["productStoreId", OmsExtractSupport.IS_EXCHANGE_ORDER_FIELD])
+        assertEquals(["orderId", "productStoreId"] as Set, got, "DAR-BE-318: the extract writes the exchange flag; it never asks for it")
+        assertEquals(["orderId"] as Set, OmsGqlQueries.requiredFields(["orderId", OmsExtractSupport.IS_EXCHANGE_ORDER_FIELD] as Set, null))
+        assertNull(OmsGqlQueries.requiredFields(null, [OmsExtractSupport.IS_EXCHANGE_ORDER_FIELD]), "the flag alone asks nothing: the whole record")
     }
 
     @Test
@@ -102,11 +103,10 @@ class OmsGqlQueriesTests {
     }
 
     @Test
-    void requiredFieldsKeepsFilterFieldsWhenThereIsNoProjection() {
+    void requiredFieldsKeepsKeepRuleFieldsWhenThereIsNoProjection() {
         // Review C1: with no projection the filter fields were discarded, so a filter on a field the
-        // document never selected excluded nothing.
-        assertEquals(["productStoreId"] as Set, OmsGqlQueries.requiredFields(null,
-                [[fieldExpression: "productStoreId", operator: "EXCLUDE_IN", sequenceNum: 1]]))
+        // document never selected excluded nothing. DAR-BE-318: the same for the fields Spark Keep reads.
+        assertEquals(["productStoreId"] as Set, OmsGqlQueries.requiredFields(null, ["productStoreId"]))
     }
 
     /** DAR-BE-129: an order read the shared orders read covers joins it; one needing a field it lacks reads alone. */

@@ -8,7 +8,6 @@ import darpan.hotwax.oms.OmsScriptServiceSupport
 OmsScriptServiceSupport.runExtract(ec, context, [
         requiredSystemEnumId   : "OMS_GQL",
         workFilePrefix         : "oms-gql-orders-extract-",
-        excludedRecordsSidecar : true,
         exchangeManifestSidecar: true,
         extract                : { Map a ->
             // DAR-BE-318: the window is orderDate and nothing else. Absent or orderDate reads as today; any other field is
@@ -18,10 +17,11 @@ OmsScriptServiceSupport.runExtract(ec, context, [
                 return [errors: ["The OMS GraphQL order extract windows on orderDate only, not '${windowField}'.".toString()],
                         warnings: [], requestMetadata: [:], recordCount: 0, dataAvailable: false]
             }
-            // DAR-BE-064: same REST pipeline (exclusions, filters, projection, sink, manifest), GraphQL pages.
-            // DAR-BE-205: a conclusion lookup answers for every order it names, exchanges included.
+            // DAR-BE-064: same REST pipeline (sales orders, exchange scan, projection, sink, manifest), GraphQL pages.
+            // DAR-BE-318: no source filters; the fields the side's Keep reads (keepRuleFields) are read, and Keep runs in
+            // Spark over the file. DAR-BE-205: a conclusion lookup answers for every order it names, exchanges included.
             OmsExtractSupport.extractOrdersToFile(a.sourceConfig, windowStart, windowEnd, a.workFile,
-                    a.keepRecordFields, a.pageProgressListener, a.sourceFilters,
+                    a.keepRecordFields, a.pageProgressListener, (keepRuleFields instanceof List) ? (List) keepRuleFields : null,
                     OmsExtractSupport.lookupExtractOptions(context.lookupKeys, context.conclusionLookup),
                     OmsGqlOrderPageSource.fetcher(new OmsGqlClient(OmsExtractSupport.toPlainMap(a.sourceConfig)),
                             // DAR-BE-120: read by key for a conclusion lookup.

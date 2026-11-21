@@ -3,13 +3,19 @@
   DAR-BE-318 plan 3b-1 (ruling P3b1-9). What the HotWax endpoints do that darpan core must know without naming HotWax: set
   here, on the core connector rows by primary key (the other fields stay core's), never in core.
 
-  excludedRecordsSidecar: whether the extract writes the records its source filters set aside beside its file. A kept-copy
-  slice writes that side file exactly when this says Y. Tied to the extracts by ExcludedRecordsSidecarTieTests.
-    OMS_GQL N: its script asks runExtract for the side file, but at ORDER grain the shared OmsExtractSupport shaper never
-      feeds the collector (only the unit-grain branch collects), so the file is never written (DAR-BE-064).
+  excludedRecordsSidecar: whether the records Keep sets aside are written beside the extract (the excluded-records side
+  file). For an extract that still filters at its read, the extract writes it, and a kept-copy slice writes it exactly when
+  this says Y. For an extract that takes no source filters (DAR-BE-318 plan 3b-2b), darpan's Spark Keep writes it when this
+  says Y. Tied to the extracts by ExcludedRecordsSidecarTieTests.
+    OMS_GQL N: Keep runs in Spark (Task 17). Its read never wrote one (DAR-BE-064), so a run that sets orders aside still
+      reads them as unknown, as before.
     OMS_RETURNS_GQL N: the returns script writes no side file (DAR-BE-040 fix 3).
-    OMS_ORDER_ITEMS_GQL Y: the unit-grain shaper collects what it drops (DataDefinedOrderItemsServiceSmokeTests).
+    OMS_ORDER_ITEMS_GQL Y: Keep runs in Spark (Task 17), which writes the side file the unit-grain read used to.
     OMS_PRODUCTS_GQL Y: OmsGqlProductsConnectorWiringTests.
+  keepLinesJson (DAR-BE-318, Ruling 3b2b-12): built-in Keep lines, run in Spark before the tenant's rules.
+    OMS_GQL: an exchange order (isExchangeOrder = Y, written by the orders extract) is set aside, unless the side reads with
+      the exchange exclusion off. Its exchange manifest is still written for the exchange-pair verify pass.
+  isExchangeOrder is a field like any other (Aditi, 2026-11-21): offered on the rules board below.
   servingProjectionServiceName: the orders and returns extracts trim records to the keep fields they are sent; a kept copy
     is trimmed the same way by project#HotWaxOmsKeptRecords (OmsKeptRecordsServing).
   datasetReadParametersJson: a dataset read of 60 days lists every exchange order it sets aside (a run lists 500), so a
@@ -18,7 +24,11 @@
 <entity-facade-xml type="darpan-seed">
     <darpan.reconciliation.SourceSystemConnector systemEnumId="OMS_GQL" excludedRecordsSidecar="N"
             servingProjectionServiceName="reconciliation.HotWaxOmsExtractionServices.project#HotWaxOmsKeptRecords"
-            datasetReadParametersJson='{"exchangeManifestMaxEntries":50000}'/>
+            datasetReadParametersJson='{"exchangeManifestMaxEntries":50000}'
+            keepLinesJson='[{"sequenceNum":0,"label":"isExchangeOrder","appliesUnless":{"applyExchangeExclusion":false},"kinds":{"isExchangeOrder":"FVT_TEXT"},"lines":[{"conditionSeqId":"01","sequenceNum":1,"conditionTypeId":"RCT_COMPARE","fieldName":"isExchangeOrder","operatorEnumId":"ENTCO_EQUALS","compareValue":"Y"}]}]'/>
+    <darpan.reconciliation.SourceSystemConnectorField systemEnumId="OMS_GQL" fieldPath="$.records[*].isExchangeOrder"
+            label="Exchange order" fieldType="string" sequenceNum="14"
+            description="DAR-BE-318: Y when the order carries an EXCHANGE item association, else N. Written by the orders extract on every window read whatever it keeps; the built-in Keep line (keepLinesJson) sets the Y orders aside."/>
     <darpan.reconciliation.SourceSystemConnector systemEnumId="OMS_RETURNS_GQL" excludedRecordsSidecar="N"
             servingProjectionServiceName="reconciliation.HotWaxOmsExtractionServices.project#HotWaxOmsKeptRecords"/>
     <darpan.reconciliation.SourceSystemConnector systemEnumId="OMS_ORDER_ITEMS_GQL" excludedRecordsSidecar="Y"/>

@@ -163,15 +163,35 @@ class OmsGqlOrdersDataDefinitionTests {
         return DataSourceDefinitionSupport.parse(row.protocol as String, row.json as String, CONNECTION_FIELDS)
     }
 
-    /** The coded path: extract#HotWaxOmsGqlOrders's own call (extractOmsGqlOrders.groovy), on the scripted server. */
+    /**
+     * The coded path: extract#HotWaxOmsGqlOrders's own call (extractOmsGqlOrders.groovy), on the scripted server, then the
+     * Keep a run puts on its file. DAR-BE-318 (plan 3b-2b): the coded read takes no filters; it is sent the fields its Keep
+     * reads (keepRuleFields, joined to a projection as a run joins them) and writes exchange orders flagged, and Spark Keep
+     * then sets aside the flagged exchanges (the OMS_GQL row's built-in line) and what the tenant's rules drop. That Keep is
+     * stated here as front-end A states it (SourceFilterSupport, whose parity with Spark darpan's KeepColumnParityTests pins;
+     * OmsOrdersKeepParityTests runs it in Spark), so the data-defined read, which still filters at its read (Ruling 3b2b-16),
+     * is compared with what a coded run keeps.
+     */
     static Map coded(Server server, List keep = null, Map fetchOptions = [:], List rawFilters = null) {
         File out = File.createTempFile("coded-orders-", ".json")
         try {
-            Map result = OmsExtractSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, keep, null, rawFilters, null,
+            List<Map<String, Object>> rules = SourceFilterSupport.parseRules(rawFilters)
+            List<String> keepRuleFields = (rules.collect { it.fieldExpression as String } + [OmsExtractSupport.IS_EXCHANGE_ORDER_FIELD]).unique()
+            List sent = keep == null ? null : (keep + keepRuleFields).unique()
+            Map result = OmsExtractSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, sent, null, keepRuleFields,
+                    OmsExtractSupport.lookupExtractOptions(fetchOptions?.lookupKeys, null),
                     OmsGqlOrderPageSource.fetcher(new OmsGqlClient(CONFIG, server.sender()), fetchOptions))
             assertEquals([], result.errors, "coded extract errors")
             Map file = (Map) new JsonSlurper().parse(out)
-            return [records: file.records, metadata: file.metadata,
+            List<Map> records = ((List<Map>) file.records).findAll { it.get(OmsExtractSupport.IS_EXCHANGE_ORDER_FIELD) != "Y" }
+                    .collect { Map r -> r.findAll { k, v -> k != OmsExtractSupport.IS_EXCHANGE_ORDER_FIELD } }
+            Map applied = SourceFilterSupport.applyToRecords(records, rules)
+            darpan.reconciliation.conclusion.ExcludedRecordsSidecar.discard((Map) applied.excludedCollector)
+            Set<String> dropped = keep == null ? [] as Set<String> : (keepRuleFields - keep) as Set<String>
+            Map metadata = (Map) file.metadata
+            if (applied.configuredExclusions != null) ((Map) metadata.filters).configuredExclusions = applied.configuredExclusions
+            return [records : ((List<Map>) applied.records).collect { Map r -> r.findAll { k, v -> !dropped.contains(k) } },
+                    metadata: metadata,
                     manifest: new JsonSlurper().parseText(JsonOutput.toJson(result.exchangeManifest ?: [])),
                     truncated: result.exchangeManifestTruncated == true]
         } finally {

@@ -45,6 +45,12 @@ class KeptFieldsProjectionTieTests {
                 OmsGqlQueries.keepWithCompanions(["orderId", "paymentPreferences"] as Set))
         // the exchange manifest a live order read lists at most
         assertEquals(OmsExtractSupport.EXCHANGE_MANIFEST_MAX_ENTRIES, ORDERS.exchangeManifestMax)
+        // DAR-BE-318 (Task 17): the field the order read writes on every record after its projection, and never asks for
+        assertEquals([OmsExtractSupport.IS_EXCHANGE_ORDER_FIELD] as Set, ORDERS.appended)
+        Map shaped = OmsExtractSupport.shapePageRecords([[orderId: "O1", orderTypeId: "SALES_ORDER", statusId: "X"]], null, null,
+                ["statusId"] as Set)
+        assertEquals('{"statusId":"X","isExchangeOrder":"N"}', shaped.serializedRecords, "kept whatever is asked, last")
+        assertTrue(!OmsGqlQueries.orderFieldSelectable(OmsExtractSupport.IS_EXCHANGE_ORDER_FIELD), "never selected from the OMS")
         // the returns read keeps items[] whatever it is asked, and projects on any list it is sent
         Map ret = [returnId: "R1", items: [[returnItemSeqId: "1"]], statusId: "RETURN_COMPLETED"]
         assertEquals([returnId: "R1", items: ret.items], OmsReturnsSourceSupport.projectRecord(ret, ["returnId"]))

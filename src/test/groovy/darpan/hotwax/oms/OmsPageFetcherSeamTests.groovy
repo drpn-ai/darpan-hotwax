@@ -27,7 +27,7 @@ class OmsPageFetcherSeamTests {
             seenCtx?.add(ctx)
             pages.each { List<Map> page ->
                 Map bundle = OmsExtractSupport.shapePageRecords(page, (Map) ctx.extractOptions,
-                        (List) ctx.excludeRules, (Set) ctx.keepFieldSet) + [rawCount: page.size()]
+                        (Collection) ctx.keepRuleFields, (Set) ctx.keepFieldSet) + [rawCount: page.size()]
                 ((Closure) ctx.pageConsumer).call(bundle)
             }
             return [errors: [], statusCode: 200, attemptCount: pages.size(), transport: "GRAPHQL",
@@ -45,10 +45,11 @@ class OmsPageFetcherSeamTests {
                     [raw("M3", [orderTypeId: "TRANSFER_ORDER"]), raw("M4")]]))
 
             assertEquals([], result.errors)
-            assertEquals(2, result.recordCount)
+            assertEquals(3, result.recordCount, "DAR-BE-318: the exchange order is written, flagged, for Keep")
             assertEquals(1, ((List) result.exchangeManifest).size())
             Map doc = new JsonSlurper().parse(out) as Map
-            assertEquals(["M1", "M4"], ((List<Map>) doc.records)*.orderId)
+            assertEquals(["M1", "M2", "M4"], ((List<Map>) doc.records)*.orderId)
+            assertEquals(["N", "Y", "N"], ((List<Map>) doc.records)*.isExchangeOrder)
             Map filters = (Map) ((Map) doc.metadata).filters
             assertEquals(1, filters.excludedExchangeOrderCount)
             assertEquals(1, filters.excludedNonSalesOrderCount)
@@ -57,17 +58,17 @@ class OmsPageFetcherSeamTests {
     }
 
     @Test
-    void theFetcherReceivesTheParsedWindowRulesAndProjection() {
+    void theFetcherReceivesTheParsedWindowKeepFieldsAndProjection() {
         List seen = []
         File out = File.createTempFile("seam-", ".json")
         try {
             OmsExtractSupport.extractOrdersToFile(CONFIG, "2026-09-24T16:00:00Z", "2026-09-24T20:00:00Z", out,
-                    ["orderId"], null, [[fieldExpression: "productStoreId", operator: "EXCLUDE_IN", filterValues: "X", sequenceNum: 1]],
-                    null, fetcherOf([], seen))
+                    ["orderId"], null, ["productStoreId", " ", "isExchangeOrder"], null, fetcherOf([], seen))
             Map ctx = (Map) seen[0]
             assertEquals(java.time.Instant.parse("2026-09-24T16:00:00Z").toEpochMilli(), ctx.fromMillis)
             assertEquals(["orderId"] as Set, ctx.keepFieldSet)
-            assertEquals("productStoreId", ((Map) ((List) ctx.excludeRules)[0]).fieldExpression)
+            assertEquals(["productStoreId", "isExchangeOrder"] as Set, ctx.keepRuleFields, "trimmed, blanks dropped")
+            assertFalse(ctx.containsKey("excludeRules"), "no source filters reach the page source")
         } finally { out.delete() }
     }
 

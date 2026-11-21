@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * orderItemAssocs EXCHANGE query covers the buffer, then the assembler, then OmsExtractSupport's shaper — and the
  * bundle goes to its pageConsumer. A multi-day window runs as parallel day slices (DAR-BE-116: one call
  * at a time, ~350 ms each, was the whole cost of a month-to-date audit read). Nothing about counting,
- * manifests, filters, projection or writing is re-implemented here.
+ * manifests, the exchange flag, projection or writing is re-implemented here.
  *
  * Non-sales orders are filtered SERVER-side (orderTypeId:SALES_ORDER in the search string), so
  * excludedNonSalesOrderCount reads 0; pagination records orderTypeFilteredServerSide.
@@ -68,11 +68,12 @@ class OmsGqlOrderPageSource {
         Object exclusionFlag = extractOptions.applyExchangeExclusion
         boolean exchangePass = !(exclusionFlag == false || (exclusionFlag as String)?.trim()?.toLowerCase() in ["false", "n"])
         Map plan
+        // DAR-BE-318: the fields the side's Keep reads are asked as its filter fields were, so Spark finds them in the file.
         Set<String> required = OmsGqlQueries.withReadFields(
-                OmsGqlQueries.requiredFields((Set<String>) ctx.keepFieldSet, (List<Map>) ctx.excludeRules), ctx.readFields)
+                OmsGqlQueries.requiredFields((Set<String>) ctx.keepFieldSet, (Collection<String>) ctx.keepRuleFields), ctx.readFields)
         try {
             if (unitGrain) {
-                List<String> unknown = unitFilterFieldsNotCarried((List<Map>) ctx.excludeRules)
+                List<String> unknown = unitKeepFieldsNotCarried((Collection<String>) ctx.keepRuleFields)
                 if (unknown) {
                     return failed("The OMS GraphQL order-items extract cannot filter on ${unknown}: its units do not carry " +
                             "them (the shared orders read selects neither salesChannelEnumId nor netsuiteOrderId, to keep the page " +
@@ -209,7 +210,7 @@ class OmsGqlOrderPageSource {
         List<Map> batch = []
         Closure shapeBatch = {
             Map bundle = OmsExtractSupport.shapePageRecords(batch, (Map) shared.extractOptions,
-                    (List<Map<String, Object>>) ctx.excludeRules, (Set<String>) ctx.keepFieldSet) + [rawCount: batch.size()]
+                    (Collection<String>) ctx.keepRuleFields, (Set<String>) ctx.keepFieldSet) + [rawCount: batch.size()]
             fetched += batch.size()
             slotsFull += batch.count { it.paymentPreferenceSlotsFull == true }
             ((Closure) shared.pageConsumer).call(bundle)
@@ -342,7 +343,7 @@ class OmsGqlOrderPageSource {
             return
         }
         Map bundle = OmsExtractSupport.shapePageRecords(assembled, (Map) shared.extractOptions,
-                (List<Map<String, Object>>) ctx.excludeRules, (Set<String>) ctx.keepFieldSet) +
+                (Collection<String>) ctx.keepRuleFields, (Set<String>) ctx.keepFieldSet) +
                 [rawCount: assembled.size()]
         synchronized (pagination) {
             pagination.totalFetched = (pagination.totalFetched as int) + assembled.size()
@@ -357,8 +358,9 @@ class OmsGqlOrderPageSource {
             "orderItemSeqId", "productId", "statusId", "unitState", "stateOrdinal", "omsOrderStatusId",
             "facilityId", "orderId", "orderName", "externalId", "orderTypeId", "orderDate"]) as Set<String>
 
-    private static List<String> unitFilterFieldsNotCarried(List<Map> rules) {
-        return (rules ?: []).collect { Map r -> ((r?.fieldExpression ?: "") as String).trim().replaceFirst(/^\$\.records\[\*\]\./, "") }
+    /** The Keep fields a unit cannot carry, from the unit or (Ruling 3b2b-10) copied from its order: refused, never ignored. */
+    private static List<String> unitKeepFieldsNotCarried(Collection<String> keepRuleFields) {
+        return (keepRuleFields ?: []).collect { String f -> f?.trim() }
                 .findAll { String f -> f && !UNIT_FILTER_FIELDS.contains(f) }.unique().sort()
     }
 

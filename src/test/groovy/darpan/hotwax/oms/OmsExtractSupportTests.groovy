@@ -76,7 +76,9 @@ class OmsExtractSupportTests {
                 shipGroups: [[items: [[assocs: [[orderItemAssocTypeId: "exchange", toOrderId: "M900000"]]]]]]]
         Map keptOrder = [orderId: "M686331", externalId: "6941645013123", orderTypeId: "SALES_ORDER"]
 
-        Map result = OmsExtractSupport.filterComparableOrderRecords([topLevelAssoc, nestedAssocOnly, keptOrder])
+        // A read by key leaves them out itself; a window read keeps them for Keep (anExchangeOrderIsWritten...).
+        Map result = OmsExtractSupport.filterComparableOrderRecords([topLevelAssoc, nestedAssocOnly, keptOrder],
+                [exchangeExclusionAtRead: true])
 
         assertEquals(["M686331"], ((List) result.records).collect { it.orderId })
         assertEquals(2, result.excludedExchangeOrderCount)
@@ -89,6 +91,11 @@ class OmsExtractSupportTests {
         assertEquals("ORDER_COMPLETED", manifest[0].statusId)
         assertEquals(50.0, manifest[0].grandTotal)
         assertEquals("M900000", manifest[1].toOrderId)          // from nested shipGroups.items.assocs, case-insensitive type
+
+        Map window = OmsExtractSupport.filterComparableOrderRecords([topLevelAssoc, nestedAssocOnly, keptOrder])
+        assertEquals(["M750653", "M900001", "M686331"], ((List) window.records).collect { it.orderId })
+        assertEquals(manifest, window.excludedExchangeOrders, "the same manifest either way")
+        assertEquals(2, (window.flaggedExchangeOrders as Set).size())
     }
 
     @Test
@@ -123,251 +130,122 @@ class OmsExtractSupportTests {
         return [orderId: orderId, orderTypeId: "SALES_ORDER", salesChannelEnumId: channel, grandTotal: 10]
     }
 
-    private static List<Map<String, Object>> posChannelRule() {
-        return darpan.reconciliation.source.SourceFilterSupport.parseRules([[
-                sequenceNum    : 1,
-                fieldExpression: "salesChannelEnumId",
-                filterValues   : "POS_SALES_CHANNEL",
-        ]])
+    private static Map exchangeOrder(String orderId, String toOrderId) {
+        return [orderId: orderId, orderTypeId: "SALES_ORDER", statusId: "ORDER_COMPLETED", grandTotal: 20,
+                orderItemAssocs: [[orderItemAssocTypeId: "EXCHANGE", toOrderId: toOrderId]]]
     }
 
+    /** A page source that hands the given raw records to the real shaper, as OmsGqlOrderPageSource does. */
+    private static Closure pagesOf(List<Map> raw, List seen = null) {
+        return { Map ctx ->
+            seen?.add(ctx)
+            ((Closure) ctx.pageConsumer).call(OmsExtractSupport.shapePageRecords(raw, (Map) ctx.extractOptions,
+                    (Collection) ctx.keepRuleFields, (Set) ctx.keepFieldSet) + [rawCount: raw.size()])
+            return [errors: [], statusCode: 200, attemptCount: 1, transport: "GRAPHQL", pagination: [pageCount: 1]]
+        }
+    }
+
+    private static Map extract(List<Map> raw, List keep, List keepRuleFields, Map options, List seen = null) {
+        Map result = OmsExtractSupport.extractOrders(baseConfig(), "2026-05-01T00:00:00Z", "2026-05-02T00:00:00Z",
+                keep, null, keepRuleFields, options, pagesOf(raw, seen))
+        assertEquals([], result.errors)
+        return result
+    }
+
+    /** DAR-BE-318 (Task 17): the side's Keep runs in Spark over the file, so the read drops nothing for a tenant's filter. */
     @Test
-    void noExclusionRulesLeavesFilteringExactlyAsBefore() {
-        List records = [
-                salesOrder("1", "WEB_SALES_CHANNEL"),
-                salesOrder("2", "POS_SALES_CHANNEL"),
-                [orderId: "3", orderTypeId: "PURCHASE_ORDER"],
-        ]
+    void noRecordIsDroppedForATenantFilter() {
+        List seen = []
+        Map result = extract([salesOrder("1", "WEB_SALES_CHANNEL"), salesOrder("2", "POS_SALES_CHANNEL"),
+                              [orderId: "3", orderTypeId: "SALES_ORDER"], [orderId: "4", orderTypeId: "PURCHASE_ORDER"]],
+                null, ["salesChannelEnumId", "isExchangeOrder"], null, seen)
 
-        Map result = OmsExtractSupport.filterComparableOrderRecords(records)
-
-        assertEquals(2, (result.records as List).size())
-        assertEquals(1, result.excludedNonSalesOrderCount)
-        assertEquals(0, result.excludedExchangeOrderCount)
-        assertEquals([:], result.excludedByRuleCounts)
+        assertEquals(["1", "2", "3"], (result.records as List<Map>)*.orderId, "every sales order; the read limits to sales orders only")
+        assertEquals(["salesChannelEnumId", "isExchangeOrder"] as Set, seen[0].keepRuleFields, "the Keep fields reach the page source")
+        Map filters = (Map) result.requestMetadata.filters
+        assertFalse(filters.containsKey("configuredExclusions"), "no tenant filter ran, so darpan never reads the side as filtered at the read")
+        assertEquals(1, filters.excludedNonSalesOrderCount)
     }
 
+    /** Ruling 3b2b-12: the derived scalar is written after the projection, and the manifest still lists the exchange. */
     @Test
-    void configuredRuleExcludesMatchingRecordsAndCountsThemByRule() {
-        List records = [
-                salesOrder("1", "WEB_SALES_CHANNEL"),
-                salesOrder("2", "POS_SALES_CHANNEL"),
-                salesOrder("3", "pos_sales_channel"),
-        ]
+    void anExchangeOrderIsWrittenWithIsExchangeOrderAndStillInTheManifest() {
+        Map exchange = exchangeOrder("M2", "M0")
+        Map result = extract([salesOrder("M1", "WEB"), exchange], ["orderId", "grandTotal"], ["isExchangeOrder"], null)
 
-        Map result = OmsExtractSupport.filterComparableOrderRecords(records, posChannelRule())
+        assertEquals([[orderId: "M1", grandTotal: 10, isExchangeOrder: "N"], [orderId: "M2", grandTotal: 20, isExchangeOrder: "Y"]],
+                result.records, "every record flagged, whatever the projection keeps")
+        assertEquals(2, result.recordCount)
+        assertEquals(["M2"], (result.exchangeManifest as List<Map>)*.omsOrderId)
+        assertEquals("M0", (result.exchangeManifest as List<Map>)[0].toOrderId)
+        Map filters = (Map) result.requestMetadata.filters
+        assertEquals(1, filters.excludedExchangeOrderCount)
+        assertEquals(1, filters.flaggedExchangeOrderCount)
+        assertFalse(exchange.containsKey(OmsExtractSupport.IS_EXCHANGE_ORDER_FIELD), "the raw record (a shared read's) is never changed")
 
-        assertEquals(1, (result.records as List).size())
-        assertEquals("1", (result.records as List)[0].orderId)
-        assertEquals([(1): 2], result.excludedByRuleCounts)
+        Map whole = extract([exchange], null, null, null)
+        assertEquals("Y", (whole.records as List<Map>)[0].isExchangeOrder, "flagged without a projection too")
+        assertTrue((whole.records as List<Map>)[0].containsKey("orderItemAssocs"))
     }
 
+    /** DAR-BE-205 / DAR-BE-318: a read by key answers exactly as before the move: no flag, and exchanges as they were. */
     @Test
-    void includeRuleKeepsOnlyListedChannelsAndCountsAbsentSeparately() {
-        // DAR-BE-054. Under INCLUDE_IN the two rejection reasons are different facts: order 2 named
-        // a channel this rule does not allow, order 3 named no channel at all. Folding them into one
-        // count would let an include rule quietly delete a whole row class and read as a busy rule.
-        List<Map<String, Object>> rules = darpan.reconciliation.source.SourceFilterSupport.parseRules([[
-                sequenceNum    : 1,
-                fieldExpression: "salesChannelEnumId",
-                operator       : "INCLUDE_IN",
-                filterValues   : "WEB_SALES_CHANNEL",
-        ]])
-        List records = [
-                salesOrder("1", "WEB_SALES_CHANNEL"),
-                salesOrder("2", "POS_SALES_CHANNEL"),
-                [orderId: "3", orderTypeId: "SALES_ORDER"],
-        ]
+    void aLookupStillReadsExchangesAsToday() {
+        List<Map> raw = [salesOrder("M1", "WEB"), exchangeOrder("M2", "M0")]
 
-        Map result = OmsExtractSupport.filterComparableOrderRecords(records, rules)
+        Map conclusion = extract(raw, ["orderId"], null, OmsExtractSupport.lookupExtractOptions(["M1", "M2"], true))
+        assertEquals([[orderId: "M1"], [orderId: "M2"]], conclusion.records, "a conclusion lookup reads exchange orders, unflagged")
+        assertEquals([], conclusion.exchangeManifest)
 
-        assertEquals(1, (result.records as List).size())
-        assertEquals("1", (result.records as List)[0].orderId)
-        assertEquals([(1): 1], result.excludedByRuleCounts)
-        assertEquals([(1): 1], result.fieldAbsentByRuleCounts)
+        Map recheck = extract(raw, ["orderId"], null, OmsExtractSupport.lookupExtractOptions(["M1", "M2"], null))
+        assertEquals([[orderId: "M1"]], recheck.records, "any other read by key leaves exchange orders out itself, unflagged")
+        assertEquals(["M2"], (recheck.exchangeManifest as List<Map>)*.omsOrderId)
+        assertEquals(1, recheck.requestMetadata.filters.excludedExchangeOrderCount)
+        assertEquals(0, recheck.requestMetadata.filters.flaggedExchangeOrderCount)
     }
 
+    private static Map unitOrder(Map extra = [:]) {
+        return [orderId: "O1", orderName: "#1001", externalId: "6678687481987", orderTypeId: "SALES_ORDER", statusId: "ORDER_COMPLETED",
+                productStoreId: "STORE", grandTotal: 30, salesChannelEnumId: "WEB_SALES_CHANNEL",
+                shipGroups: [[facilityId: "F1", items: [[orderItemSeqId: "01", externalId: "152", quantity: 2,
+                                                         statusId: "ITEM_CANCELLED", productId: "P1"]]]]] + extra
+    }
+
+    private static final Map UNIT_OPTIONS = [emitGrain: "ORDER_LINE_UNIT", applyExchangeExclusion: false, requireShopifyLineId: false]
+
+    private static List<Map> units(Map order, Collection keepRuleFields) {
+        Map bundle = OmsExtractSupport.shapePageRecords([order], UNIT_OPTIONS, keepRuleFields, null)
+        return (List<Map>) new JsonSlurper().parseText("[" + bundle.serializedRecords + "]")
+    }
+
+    /** Ruling 3b2b-10: a unit gets a copy of each order scalar its Keep reads that it lacks, and nothing else. */
     @Test
-    void anExcludeRuleNeverReportsFieldAbsentDrops() {
-        // The bucket exists on both modes so a reader need not know which keys apply to which, but
-        // under EXCLUDE_IN a record with no value is KEPT, so the bucket is structurally empty.
-        List records = [salesOrder("1", "POS_SALES_CHANNEL"), [orderId: "2", orderTypeId: "SALES_ORDER"]]
+    void aUnitCarriesOnlyTheKeepNamedOrderScalarsItLacks() {
+        List<Map> plain = units(unitOrder(), null)
+        List<Map> kept = units(unitOrder(), ["orderName", "productStoreId", "unitState", "shipGroups"])
 
-        Map result = OmsExtractSupport.filterComparableOrderRecords(records, posChannelRule())
-
-        assertEquals(1, (result.records as List).size())
-        assertEquals([(1): 1], result.excludedByRuleCounts)
-        assertEquals([:], result.fieldAbsentByRuleCounts)
+        assertEquals(2, kept.size(), "one record per unit")
+        kept.eachWithIndex { Map unit, int i ->
+            assertEquals(plain[i] + [orderName: "#1001", productStoreId: "STORE"], unit)
+        }
+        assertFalse(kept[0].containsKey("grandTotal"), "an order field no Keep reads is not carried")
+        assertFalse(kept[0].containsKey("shipGroups"), "a nested order field is never carried: the old view held scalars only")
+        assertEquals(plain, units(unitOrder(), []), "no Keep, no copies")
     }
 
+    /** The old filter view laid the unit over the order: a key the unit holds is its own, a null one included. */
     @Test
-    void builtInExclusionsKeepPriorityOverConfiguredOnes() {
-        // A non-sales order that also matches a configured rule must stay attributed to the built-in
-        // counter, so existing excludedNonSalesOrderCount values never shift when a filter is added.
-        List records = [[orderId: "1", orderTypeId: "PURCHASE_ORDER", salesChannelEnumId: "POS_SALES_CHANNEL"]]
+    void aUnitsOwnFieldWinsOverTheOrders() {
+        // A top-level facilityId on the order, and a ship group with none: the unit's facilityId is null, and stays so.
+        Map order = unitOrder(facilityId: "ORIGIN", shipGroups: [[items: [[orderItemSeqId: "01", externalId: "152", quantity: 1,
+                                                                             statusId: "ITEM_CANCELLED", productId: "P1"]]]])
+        List<Map> kept = units(order, ["statusId", "facilityId", "orderTypeId"])
 
-        Map result = OmsExtractSupport.filterComparableOrderRecords(records, posChannelRule())
-
-        assertEquals(1, result.excludedNonSalesOrderCount)
-        assertEquals([:], result.excludedByRuleCounts)
-        assertEquals(0, (result.records as List).size())
+        assertEquals(1, kept.size())
+        assertEquals("ITEM_CANCELLED", kept[0].statusId, "the item's status, never the order's ORDER_COMPLETED")
+        assertTrue(kept[0].containsKey("facilityId") && kept[0].facilityId == null, "a null unit field stays the unit's")
+        assertEquals("SALES_ORDER", kept[0].orderTypeId, "a field the unit lacks comes from its order")
     }
-
-    @Test
-    void exchangeExclusionKeepsPriorityOverConfiguredRules() {
-        List records = [[
-                orderId           : "1",
-                orderTypeId       : "SALES_ORDER",
-                salesChannelEnumId: "POS_SALES_CHANNEL",
-                items             : [[orderItemAssocTypeId: "EXCHANGE", toOrderId: "9"]],
-        ]]
-
-        Map result = OmsExtractSupport.filterComparableOrderRecords(records, posChannelRule())
-
-        assertEquals(1, result.excludedExchangeOrderCount)
-        assertEquals([:], result.excludedByRuleCounts)
-        // Must actually fall into the exchange branch, not merely skip the rule branch: the record
-        // is dropped from the kept set and shows up on the exchange manifest, not silently kept.
-        assertEquals(0, (result.records as List).size())
-        List excludedExchangeOrders = result.excludedExchangeOrders as List
-        assertEquals(1, excludedExchangeOrders.size())
-        assertEquals("1", (excludedExchangeOrders[0] as Map).omsOrderId)
-        assertEquals("9", (excludedExchangeOrders[0] as Map).toOrderId)
-    }
-
-    @Test
-    void recordMissingTheFilteredFieldIsKept() {
-        List records = [[orderId: "1", orderTypeId: "SALES_ORDER"]]
-
-        Map result = OmsExtractSupport.filterComparableOrderRecords(records, posChannelRule())
-
-        assertEquals(1, (result.records as List).size())
-        assertEquals([:], result.excludedByRuleCounts)
-    }
-
-    /**
-     * Shaped from a real captured OMS extract (`_entity` = org.apache.ofbiz.order.order.OrderHeader):
-     * the exact top-level key set the live orders endpoint returns. The point is the field NAME —
-     * a pill offering `productStoreId` against a record that spells it differently, or nests it,
-     * would persist a rule that matches nothing and excludes nothing, with no error anywhere.
-     */
-    private static Map omsOrderHeaderRecord(String orderId, String productStoreId) {
-        return [
-                _entity                 : "org.apache.ofbiz.order.order.OrderHeader",
-                orderId                 : orderId,
-                orderTypeId             : "SALES_ORDER",
-                orderName               : "SO-${orderId}".toString(),
-                externalId              : "ext-${orderId}".toString(),
-                statusId                : "ORDER_APPROVED",
-                productStoreId          : productStoreId,
-                salesChannelEnumId      : "WEB_SALES_CHANNEL",
-                originFacilityId        : "WH1",
-                grandTotal              : 10,
-                currencyUom             : "USD",
-                presentmentCurrencyUom  : "USD",
-        ]
-    }
-
-    @Test
-    void configuredRuleExcludesByProductStoreIdOnRealOrderShape() {
-        List records = [
-                omsOrderHeaderRecord("1", "STORE"),
-                omsOrderHeaderRecord("2", "RETAIL_STORE"),
-                omsOrderHeaderRecord("3", "retail_store"),
-        ]
-
-        List<Map<String, Object>> rules = darpan.reconciliation.source.SourceFilterSupport.parseRules([[
-                sequenceNum    : 1,
-                fieldExpression: "productStoreId",
-                filterValues   : "RETAIL_STORE",
-        ]])
-
-        Map result = OmsExtractSupport.filterComparableOrderRecords(records, rules)
-
-        // Values match case-insensitively, so both spellings of the excluded store go.
-        assertEquals(1, (result.records as List).size())
-        assertEquals("1", (result.records as List)[0].orderId)
-        assertEquals([(1): 2], result.excludedByRuleCounts)
-    }
-
-    @Test
-    void productStoreIdPillJsonPathSurvivesTheRealDispatchChain() {
-        // End-to-end over the chain production actually uses for the pill the rules board writes:
-        //   stored `$.records[*].productStoreId`
-        //     -> toRecordFieldRules  (dispatch: AutomationRuntimeSupport / ReconciliationSavedRunSupport)
-        //     -> parseRules          (inside the extractor)
-        //     -> evaluate            (scans TOP-LEVEL record keys)
-        // evaluate never reduces anything itself, so skipping the dispatch step is what would
-        // silently match nothing. This asserts the pill's stored path lands on the real record key.
-        List<Map<String, Object>> dispatched = darpan.reconciliation.source.SourceFilterSupport
-                .toRecordFieldRules([[
-                        sequenceNum    : 1,
-                        fieldExpression: "\$.records[*].productStoreId",
-                        filterValues   : "STORE",
-                ] as Map<String, Object>])
-        assertEquals("productStoreId", dispatched[0].fieldExpression)
-
-        Map result = OmsExtractSupport.filterComparableOrderRecords(
-                [omsOrderHeaderRecord("1", "STORE"), omsOrderHeaderRecord("2", "OTHER_STORE")],
-                darpan.reconciliation.source.SourceFilterSupport.parseRules(dispatched))
-
-        assertEquals(1, (result.records as List).size())
-        assertEquals("2", (result.records as List)[0].orderId)
-        assertEquals([(1): 1], result.excludedByRuleCounts)
-    }
-
-    @Test
-    void salesOrderFilterIsUnchangedWhenOptionsAbsent() {
-        List records = [
-                [orderId: "SO-1", orderTypeId: "SALES_ORDER"],
-                [orderId: "SO-2", orderTypeId: "SALES_ORDER",
-                 itemAssocs: [[orderItemAssocTypeId: "EXCHANGE", toOrderId: "SO-1"]]],
-                [orderId: "TO-1", orderTypeId: "TRANSFER_ORDER"],
-        ]
-
-        Map<String, Object> result = OmsExtractSupport.filterComparableOrderRecords(records)
-
-        assertEquals(["SO-1"], (result.records as List).collect { it.orderId })
-        assertEquals(1, result.excludedNonSalesOrderCount)
-        assertEquals(1, result.excludedExchangeOrderCount)
-    }
-
-    @Test
-    void configuredExclusionsAppearInRequestMetadataWithCounts() {
-        Map<String, Object> filters = OmsExtractSupport.buildFilterMetadata(
-                4, 2, false, posChannelRule(), [(1): 7], [:])
-
-        assertEquals("SALES_ORDER", filters.requiredOrderTypeId)
-        assertEquals(4, filters.excludedNonSalesOrderCount)
-        assertEquals(2, filters.excludedExchangeOrderCount)
-
-        List configured = filters.configuredExclusions as List
-        assertEquals(1, configured.size())
-        assertEquals(1, configured[0].sequenceNum)
-        assertEquals("salesChannelEnumId", configured[0].fieldExpression)
-        assertEquals("EXCLUDE_IN", configured[0].operator)
-        assertEquals(["POS_SALES_CHANNEL"], configured[0].values)
-        assertEquals(7, configured[0].excludedCount)
-        // Always present, structurally zero on an exclude rule.
-        assertEquals(0, configured[0].fieldAbsentCount)
-    }
-
-    @Test
-    void metadataOmitsConfiguredExclusionsWhenNoRulesAreSet() {
-        Map<String, Object> filters = OmsExtractSupport.buildFilterMetadata(1, 0, false, [], [:], [:])
-
-        assertFalse(filters.containsKey("configuredExclusions"))
-    }
-
-    @Test
-    void ruleThatMatchedNothingStillReportsAZeroCount() {
-        // An operator who configured an exclusion needs to see it ran and matched nothing, rather
-        // than see the rule vanish from metadata and wonder whether it was applied at all.
-        Map<String, Object> filters = OmsExtractSupport.buildFilterMetadata(0, 0, false, posChannelRule(), [:], [:])
-
-        assertEquals(0, (filters.configuredExclusions as List)[0].excludedCount)
-    }
-
 
     @Test
     void headersRejectControlCharactersOverlongValuesAndNonObjects() {
@@ -407,10 +285,13 @@ class OmsExtractSupportTests {
     void extractOptionsDefaultToSalesOrderBehaviour() {
         Map<String, Object> options = OmsExtractSupport.normalizeExtractOptions(null)
         assertTrue(options.applyExchangeExclusion as boolean)
+        assertEquals(false, options.exchangeExclusionAtRead, "a window read leaves the exchange to Keep")
         assertNull(options.emitGrain)
         assertEquals(true, options.requireShopifyLineId)
         assertEquals(false, OmsExtractSupport.normalizeExtractOptions([applyExchangeExclusion: false]).applyExchangeExclusion)
         assertEquals(false, OmsExtractSupport.normalizeExtractOptions([requireShopifyLineId: "N"]).requireShopifyLineId)
+        assertEquals(true, OmsExtractSupport.normalizeExtractOptions([emitGrain: "ORDER_LINE_UNIT", exchangeExclusionAtRead: false])
+                .exchangeExclusionAtRead, "a unit carries no flag: unit grain always leaves exchanges out itself")
     }
 
     /** DAR-BE-205 (gorjana R10): a lookup of approved exchange orders came back empty, so no facility rule could match. */
@@ -418,9 +299,9 @@ class OmsExtractSupportTests {
     void onlyAKeyedConclusionLookupReadsExchangeOrders() {
         assertEquals([applyExchangeExclusion: false], OmsExtractSupport.lookupExtractOptions(["M1214942"], true))
         assertEquals([applyExchangeExclusion: false], OmsExtractSupport.lookupExtractOptions(["M1214942"], "Y"))
-        // An audit re-check by key sends no flag: its comparison still leaves exchanges out.
-        assertNull(OmsExtractSupport.lookupExtractOptions(["M1214942"], null))
-        assertNull(OmsExtractSupport.lookupExtractOptions(["M1214942"], false))
+        // An audit re-check by key keeps leaving exchanges out at the read (DAR-BE-318: keyed reads answer as before).
+        assertEquals([exchangeExclusionAtRead: true], OmsExtractSupport.lookupExtractOptions(["M1214942"], null))
+        assertEquals([exchangeExclusionAtRead: true], OmsExtractSupport.lookupExtractOptions(["M1214942"], false))
         // A window read is never widened by the flag.
         assertNull(OmsExtractSupport.lookupExtractOptions(null, true))
         assertNull(OmsExtractSupport.lookupExtractOptions([], true))
@@ -439,15 +320,5 @@ class OmsExtractSupportTests {
         Map bad = OmsExtractSupport.extractOrders(baseConfig(), "not-a-date", "also-bad", null, null, null, null, fetcher)
         assertEquals(2, bad.errors.count { it.contains("must be a Timestamp") }, bad.errors.toString())
         assertFalse(called, "a rejected request never reaches the page source")
-    }
-
-    @Test
-    void malformedExcludeFilterFailsBeforeThePageSourceIsAsked() {
-        boolean called = false
-        Closure fetcher = { Map ctx -> called = true; [errors: []] }
-        Map result = OmsExtractSupport.extractOrders(baseConfig(), "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z",
-                null, null, [[sequenceNum: 1, fieldExpression: "", filterValues: "X"]], null, fetcher)
-        assertTrue(result.errors as boolean)
-        assertFalse(called)
     }
 }

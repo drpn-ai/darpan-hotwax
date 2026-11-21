@@ -71,15 +71,22 @@ class OmsGqlOrderGrainAssemblerTests {
         assertEquals("CREDIT_CARD,GIFT_CARD", o.paymentMethodTypeIds)
     }
 
+    /** DAR-BE-318: the real exchange scan finds a grafted order; a window read writes it flagged, a read by key leaves it out. */
     @Test
-    void theRealExchangeExclusionDropsAGraftedOrder() {
+    void theRealExchangeScanFlagsAGraftedOrder() {
         List assembled = OmsGqlOrderGrainAssembler.assemble(
                 [order("M1", [opp("CREDIT_CARD")]), order("M2", [opp("CREDIT_CARD")])], [exch("M2", "M0")])
         Map shaped = OmsExtractSupport.shapePageRecords(assembled, null, null, null)
         assertEquals(1, shaped.excludedExchangeOrderCount)
+        assertEquals(1, shaped.flaggedExchangeOrderCount)
         assertEquals("M0", ((Map) ((List) shaped.excludedExchangeOrders)[0]).toOrderId)
         assertTrue((shaped.serializedRecords as String).contains("\"orderId\":\"M1\""))
-        assertTrue(!(shaped.serializedRecords as String).contains("\"orderId\":\"M2\""))
+        assertTrue((shaped.serializedRecords as String).contains("\"isExchangeOrder\":\"Y\""))
+
+        Map keyed = OmsExtractSupport.shapePageRecords(assembled, [exchangeExclusionAtRead: true], null, null)
+        assertEquals(1, keyed.excludedExchangeOrderCount)
+        assertTrue(!(keyed.serializedRecords as String).contains("\"orderId\":\"M2\""))
+        assertTrue(!(keyed.serializedRecords as String).contains("isExchangeOrder"))
     }
 
     @Test
@@ -96,7 +103,7 @@ class OmsGqlOrderGrainAssemblerTests {
         List assembled = OmsGqlOrderGrainAssembler.assemble([order("M1", [])], [])
         Map shaped = OmsExtractSupport.shapePageRecords(assembled, null, null,
                 ["orderId", "externalId", "hasPaymentPreference"] as Set)
-        assertEquals('{"orderId":"M1","externalId":"SHM1","hasPaymentPreference":"N"}', shaped.serializedRecords)
+        assertEquals('{"orderId":"M1","externalId":"SHM1","hasPaymentPreference":"N","isExchangeOrder":"N"}', shaped.serializedRecords)
     }
 
     @Test
