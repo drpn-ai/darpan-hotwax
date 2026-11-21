@@ -200,9 +200,8 @@ class OmsReturnsGqlLookupTests {
                 "${result.errors}")
     }
 
-    @Test
-    void aTransportFailureOnOneChunkStillChecksTheRest() {
-        // A timeout says nothing about the next chunk, unlike a server error.
+    /** Every identifications call answered by `answerOf(attempt)`: an exception it returns is thrown (a transport failure). */
+    private void identificationsAnswering(Closure<Object> answerOf) {
         int identificationCalls = 0
         OmsReturnsSourceSupport.setGqlClientFactory { Map config ->
             OmsGqlClient c = new OmsGqlClient(config, { String url, Map headers, String body ->
@@ -211,7 +210,8 @@ class OmsReturnsGqlLookupTests {
                     return [statusCode: 200, body: JsonOutput.toJson([data: [returns: [edges: [], pageInfo: [hasNextPage: false]]], errors: []])]
                 }
                 gqlRequests.add(payload)
-                if (identificationCalls++ == 0) throw new java.net.http.HttpTimeoutException("request timed out")
+                Object answer = answerOf.call(identificationCalls++)
+                if (answer instanceof Exception) throw (Exception) answer
                 List<String> asked = ((((Map) payload.variables).q as String) - "idValue:").split(",").toList()
                 [statusCode: 200, body: JsonOutput.toJson([data: [returnIdentifications: [
                         edges: asked.collect { [node: ident(it)] }, pageInfo: [hasNextPage: false]]], errors: []])]
@@ -219,15 +219,44 @@ class OmsReturnsGqlLookupTests {
             c.sleeper = { long ms -> }
             return c
         }
+    }
+
+    /**
+     * DAR-BE-142: the client asks a timed-out call again (maxPageAttempts, default 5), so one timeout on a chunk costs one
+     * more call and the chunk is still checked, with the rest.
+     */
+    @Test
+    void aTimeoutOnOneChunkIsAskedAgainAndEveryChunkIsChecked() {
+        identificationsAnswering { int call -> call == 0 ? new java.net.http.HttpTimeoutException("request timed out") : null }
 
         List<String> ids = (1..120).collect { "id${it}".toString() }
         Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(CONFIG, ids)
 
-        assertEquals(3, gqlRequests.size())
-        assertEquals(ids.take(50), result.unresolvedIds)
-        assertEquals(ids.drop(50) as Set, result.foundIds as Set)
+        assertEquals(4, gqlRequests.size(), "three chunks, the first asked twice")
+        assertEquals(ids as Set, result.foundIds as Set)
+        assertEquals([], result.unresolvedIds)
+        assertEquals([], result.errors)
+    }
+
+    /**
+     * DAR-BE-142: a chunk that times out on every attempt fails closed as TRANSIENT, an OmsGqlException, which the pass
+     * treats as it treats any error the client raises (DAR-BE-067): the rest of the pass is not sent, and every id it did
+     * not check is unresolved, never missing, with one error. An OMS that stayed unreachable through the client's retries
+     * would cost each further chunk the same retries.
+     */
+    @Test
+    void aChunkThatOutlastsTheRetriesStopsThePassAndLeavesItsIdsUnresolved() {
+        identificationsAnswering { int call -> new java.net.http.HttpTimeoutException("request timed out") }
+
+        List<String> ids = (1..120).collect { "id${it}".toString() }
+        Map result = OmsReturnsSourceSupport.lookupReturnsByExternalId(CONFIG, ids)
+
+        assertEquals(OmsGqlClient.DEFAULT_MAX_PAGE_ATTEMPTS, gqlRequests.size(), "the first chunk's attempts, no further chunk")
+        assertEquals(ids, result.unresolvedIds)
+        assertEquals([], result.missingIds)
         assertEquals(1, (result.errors as List).size(), "${result.errors}")
-        assertTrue(((result.errors as List)[0] as String).contains("50 id(s)"), "${result.errors}")
+        assertTrue(((result.errors as List)[0] as String).contains("120 id(s)"), "${result.errors}")
+        assertTrue(((result.errors as List)[0] as String).contains("attempts"), "${result.errors}")
     }
 
     @Test
