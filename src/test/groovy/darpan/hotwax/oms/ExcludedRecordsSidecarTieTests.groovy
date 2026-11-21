@@ -22,7 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue
  *     when its script asks OmsScriptServiceSupport.runExtract for it (excludedRecordsSidecar: true) AND its pipeline feeds
  *     the collector the records its filters drop. Both are read from the code: the script's spec from its text, the feeding
  *     by running the pipeline on a record a filter drops. A kept-copy slice writes it exactly when the row says Y.</li>
- * <li>One that no longer takes it (Task 17: the OMS orders and order-items reads) keeps in Spark, and darpan writes the side
+ * <li>One that no longer takes it (Task 17: the OMS orders and order-items reads; Task 18: the returns read) keeps in Spark, and darpan writes the side
  *     file exactly when the row says Y. Such a script must not ask runExtract for one, so two writers never meet; and each row
  *     keeps what its read wrote before, so a run's conclusions read the side as they did.</li>
  * </ul>
@@ -78,8 +78,11 @@ class ExcludedRecordsSidecarTieTests {
         return contract != null && contract.size() > 0 && declares(contract)
     }
 
-    /** What the extracts that now keep in Spark wrote before (Task 17): kept, so conclusions read those sides as before. */
-    private static final Map<String, String> SPARK_SIDE_FILE_AS_BEFORE = [OMS_GQL: "N", OMS_ORDER_ITEMS_GQL: "Y"]
+    /**
+     * What the extracts that now keep in Spark wrote before (Tasks 17 and 18): kept, so conclusions read those sides as before.
+     * OMS_RETURNS_GQL never wrote one (its pipeline counted what its filters dropped and kept none of it).
+     */
+    private static final Map<String, String> SPARK_SIDE_FILE_AS_BEFORE = [OMS_GQL: "N", OMS_ORDER_ITEMS_GQL: "Y", OMS_RETURNS_GQL: "N"]
 
     /** Whether the endpoint's pipeline hands the records its filters drop to the side file's collector. */
     private static boolean collectsDrops(String endpoint) {
@@ -105,9 +108,6 @@ class ExcludedRecordsSidecarTieTests {
                 } finally {
                     work.delete()
                 }
-            case "OMS_RETURNS_GQL":
-                // the returns pipeline counts what its filters drop and keeps none of it
-                return false
             default:
                 throw new AssertionError("A HotWax extract for ${endpoint} is not tied to darpan's side-file sets yet: say here " +
                         "whether its pipeline collects what its filters drop, and list it in ExcludedRecordsSidecar")
@@ -127,9 +127,12 @@ class ExcludedRecordsSidecarTieTests {
         }
     }
 
-    /** DAR-BE-318 (Task 17): the orders and order-items reads keep in Spark, and the unit side file now comes from Spark. */
+    /**
+     * DAR-BE-318 (Tasks 17 and 18): the orders, order-items and returns reads keep in Spark, and the unit side file now comes
+     * from Spark.
+     */
     @Test
-    void theOrdersReadsKeepInSparkAndOnlySparkWritesTheirSideFile() {
+    void theOrdersAndReturnsReadsKeepInSparkAndOnlySparkWritesTheirSideFile() {
         Map<String, Boolean> specs = sidecarSpecs()
         Map<String, String> rows = declared()
         Set<String> spark = specs.keySet().findAll { !takesSourceFilters(it) } as Set<String>

@@ -121,8 +121,9 @@ class OmsExtractScriptCharacterizationTests {
         List<String> windowedIn = ["omsRestSourceConfigId", "automationExecutionId", "companyUserGroupId", "windowStart",
                                    "windowEnd", "outputLocation", "fileName", "keepRecordFields", "sourceFilters",
                                    "reconciliationRunResultId", "progressStageCode", "expectedRecordCount"]
-        // DAR-BE-318: the returns contract declares windowFieldName (entryDate only) right after the window.
-        List<String> returnsIn = windowedIn.take(5) + ["windowFieldName"] + windowedIn.drop(5)
+        // DAR-BE-318: the returns contract declares windowFieldName (entryDate only) right after the window. Plan 3b-2b,
+        // Task 18: and no source filters, so Spark keeps the returns side.
+        List<String> returnsIn = windowedIn.take(5) + ["windowFieldName"] + windowedIn.drop(5) - ["sourceFilters"]
         // DAR-BE-318 (plan 3b-2b, Task 17): the orders reads take no source filters; they are sent the fields Spark Keep reads.
         List<String> ordersIn = windowedIn - ["sourceFilters"]
         List<String> unitIn = ["omsRestSourceConfigId", "automationExecutionId", "companyUserGroupId", "windowStart",
@@ -295,7 +296,9 @@ class OmsExtractScriptCharacterizationTests {
         String out = freshOut()
         List<String> partialsSeen = []
         serveGql(out, partialsSeen, [
-                returns    : { Map v -> conn([gqlReturn("M0001")]) },
+                // DAR-BE-318 (Task 18): the cancelled and no-reference returns are written too, each with its class
+                returns    : { Map v -> conn([gqlReturn("M0001"), gqlReturn("M0002") + [statusId: "RETURN_CANCELLED"],
+                                              gqlReturn("M0003") + [identifications: []]]) },
                 returnItems: { Map v -> conn([[returnId: "M0001", returnItemSeqId: "01", orderId: "GR1", orderItemSeqId: "00101",
                                                productId: "P1", returnQuantity: 1, receivedQuantity: 0, returnPrice: 65,
                                                returnReasonId: "UNKNOWN", statusId: "RETURN_REQUESTED", returnTypeId: "RTN_REFUND"]]) },
@@ -308,13 +311,41 @@ class OmsExtractScriptCharacterizationTests {
         Map result = extract("HotWaxOmsGqlReturns", baseParams(out))
 
         assertEquals([], result.errors, result.toString())
-        assertEquals(1, result.recordCount)
+        assertEquals(3, result.recordCount)
         assertEquals(true, result.dataAvailable)
         assertTrue(((String) result.fileName).startsWith("oms-returns-"), result.fileName as String)
-        assertEquals(["M0001"], records(result)*.returnId)
+        assertEquals([["M0001", "KEEP"], ["M0002", "CANCELLED"], ["M0003", "NO_SHOPIFY_REF"]],
+                records(result).collect { [it.returnId, it.omsReturnClass] })
+        assertEquals([excludedNoShopifyRefCount: 1, serverReportedReturnsCount: 3, excludedCancelledCount: 1],
+                ((Map) result.requestMetadata).filters, "the read's counts as before, and no configuredExclusions")
         assertTrue(partialsSeen.every { it.startsWith("oms-gql-returns-extract-") }, partialsSeen.toString())
         assertFalse(partialsSeen.isEmpty())
         assertFalse(result.containsKey("exchangeManifestFileLocation"))
+        assertEquals([result.fileName], listing(out), "no excluded-records side file from the read")
+    }
+
+    /**
+     * DAR-BE-318 (plan 3b-2b, Task 18, Ruling 3b2b-23): on the definition Moqui merges from the contract, the returns read
+     * declares no sourceFilters (the OMS_RETURNS_GQL row's filterParameterName), so darpan's gate keeps its side in Spark.
+     * A caller that still sends the rules has them dropped by Moqui: every return is written.
+     */
+    @Test
+    void theReturnsReadTakesNoSourceFiltersAndDropsNothingForThem() {
+        def sd = ec.factory.serviceFacade.getServiceDefinition(SVC + "extract#HotWaxOmsGqlReturns")
+        assertFalse(sd.getInParameterNames().contains("sourceFilters"))
+        assertFalse(sd.getInParameterNames().contains(darpan.reconciliation.source.KeepPlanSupport.KEEP_FIELDS_PARAMETER),
+                "the returns record is built whole, so the read takes no Keep fields of its own: keepRecordFields carries them")
+        def connector = ec.entity.find("darpan.reconciliation.SourceSystemConnector").condition("systemEnumId", "OMS_RETURNS_GQL")
+                .disableAuthz().useCache(false).one()
+        assertEquals("sourceFilters", connector.filterParameterName)
+        assertTrue(darpan.reconciliation.source.KeepPlanSupport.sparkKeepsSide(connector.getMap() as Map, sd))
+
+        String out = freshOut()
+        serveGql(out, [], returnsHandlers())
+        Map result = extract("HotWaxOmsGqlReturns", baseParams(out) + [sourceFilters: [[sequenceNum: 1,
+                fieldExpression: "returnChannelEnumId", operator: "EXCLUDE_IN", filterValues: "ADMIN_RTN_CHANNEL"]]])
+        assertEquals([], result.errors, result.toString())
+        assertEquals(["M0001"], records(result)*.returnId, "the rule is not the read's: Spark Keep applies it")
         assertEquals([result.fileName], listing(out))
     }
 

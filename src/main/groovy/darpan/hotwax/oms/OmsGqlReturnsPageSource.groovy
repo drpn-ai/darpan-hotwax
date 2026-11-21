@@ -11,10 +11,18 @@ import java.util.concurrent.atomic.AtomicInteger
  * Shopify reported read as missing in HotWax. GraphQL `returns` has no such exclusion.
  *
  * Per returns page: classify each node (OmsGqlReturnAssembler.classify — the exclusions REST applied
- * server-side), then flat, id-keyed lookups for the kept ones only — returnItems, the orders and order
+ * server-side), then flat, id-keyed lookups for the ones the read writes — returnItems, the orders and order
  * items that carry the Shopify ids, and products for sku — then build REST-shaped records and hand them
- * to the extractor's pageConsumer. Filtering, the join-key fallback, projection and writing stay in
- * OmsReturnsSourceSupport, shared with REST.
+ * to the extractor's pageConsumer. The join-key fallback, projection and writing stay in
+ * OmsReturnsSourceSupport.
+ *
+ * DAR-BE-318 (plan 3b-2b, Ruling 3b2b-12): a WINDOW read writes every return it reads, cancelled and without a Shopify
+ * reference included, each with its classification in omsReturnClass (KEEP, CANCELLED or NO_SHOPIFY_REF). darpan's Spark
+ * Keep sets the cancelled and no-reference ones aside through the OMS_RETURNS_GQL row's declared Keep lines
+ * (data/HotWaxConnectorSeedData.xml), as this read used to leave them out. The server counts are counted as before. A read
+ * BY KEY (lookupKeys, by returnId or by replacement order) is not Keep's business: it leaves them out itself, as before,
+ * and writes no class. onlyCancelledReturns still asks the OMS for RETURN_CANCELLED only, and a return of any other status
+ * it answers is still left out: that is the read's scope, not Keep.
  *
  * Every lookup follows its own cursor: a truncated items page would understate returnTotal, and a
  * truncated order page would emit null Shopify ids that read as real differences. Any GraphQL error
@@ -25,6 +33,12 @@ class OmsGqlReturnsPageSource {
 
     /** DAR-BE-116: kept returns per lookup pass; the lookups then run in chunks of 100 ids, not one pass per page. */
     static final int RETURNS_BATCH = 200
+
+    /**
+     * DAR-BE-318: the field a window read writes on every return, its OmsGqlReturnAssembler.classify verdict. The
+     * OMS_RETURNS_GQL row's keepLinesJson reads it; never selected from the OMS (OmsKeptFieldsProjection.OMS_RETURNS appends it).
+     */
+    static final String RETURN_CLASS_FIELD = "omsReturnClass"
 
     static Closure fetcher(OmsGqlClient client, Map options = [:]) {
         return { Map ctx -> fetchAll(client, ctx + (options ?: [:])) }
@@ -60,6 +74,8 @@ class OmsGqlReturnsPageSource {
         Map shared = [pageSize: new AtomicInteger(OmsGqlQueries.RETURNS_PAGE_SIZE), pages: new AtomicInteger(0),
                       maxPages: OmsReturnsSourceSupport.MAX_RETURNS_PAGE_COUNT, pagination: pagination, serverCounts: serverCounts,
                       onlyCancelled: onlyCancelled, keepNoShopifyRef: keepNoShopifyRef,
+                      // DAR-BE-318: a window read writes every return with its class, for Spark Keep; a read by key does not.
+                      writeEveryClass: !keys,
                       // DAR-BE-192: the credit HotWax gives each return (returnCredit), only when a run asks for it.
                       withReturnCredit: ctx.withReturnCredit == true || byReplacement,
                       pageConsumer: { List<Map> records -> synchronized (pagination) { consumer.call(records) } }]
@@ -103,9 +119,9 @@ class OmsGqlReturnsPageSource {
     }
 
     /**
-     * DAR-BE-116: the returns read through OmsGqlSharedRead. The producer builds every return either check could keep
-     * (with and without a Shopify reference) and tags each with its classification; cancelled ones are only counted.
-     * Each caller then keeps and counts by its OWN includeReturnsWithoutShopifyRef, so R8 and R11 read the month once.
+     * DAR-BE-116: the returns read through OmsGqlSharedRead. The producer builds every return and tags each with its
+     * classification. Each caller counts by its OWN includeReturnsWithoutShopifyRef, so R8 and R11 read the month once, and
+     * writes every return with its class (DAR-BE-318): Spark Keep sets aside what each caller's options leave out.
      */
     private static void readReturnsShared(OmsGqlClient client, Map shared, List<List<Long>> slices, Map config) {
         Map pagination = (Map) shared.pagination
@@ -128,17 +144,8 @@ class OmsGqlReturnsPageSource {
         }) { Map record ->
             String verdict = record.remove(SHARED_VERDICT) as String
             serverCounts.returnsCount = (serverCounts.returnsCount as int) + 1
-            if (verdict == OmsGqlReturnAssembler.CANCELLED) {
-                serverCounts.excludedCancelledCount = (serverCounts.excludedCancelledCount as int) + 1
-                return
-            }
-            if (verdict == OmsGqlReturnAssembler.NO_SHOPIFY_REF) {
-                if (!keepNoShopifyRef) {
-                    serverCounts.excludedNoShopifyRefCount = (serverCounts.excludedNoShopifyRefCount as int) + 1
-                    return
-                }
-                serverCounts.keptNoShopifyRefCount = (serverCounts.keptNoShopifyRefCount as int) + 1
-            }
+            countVerdict(serverCounts, verdict, keepNoShopifyRef)
+            record.put(RETURN_CLASS_FIELD, verdict)
             batch.add(record)
             if (batch.size() >= RETURNS_BATCH) { ((Closure) shared.pageConsumer).call(batch); batch = [] }
         }
@@ -150,12 +157,30 @@ class OmsGqlReturnsPageSource {
     /** The classification a shared read's raw return carries, removed before the record reaches a caller. */
     static final String SHARED_VERDICT = "_sharedVerdict"
 
-    /** One slice's returns: the ones this read keeps are built every RETURNS_BATCH by one lookup pass. */
+    /**
+     * What the returns read counts of one return, by its classification: a cancelled one, and one with no Shopify reference
+     * as kept or excluded by the caller's includeReturnsWithoutShopifyRef. Counted whether or not the return is written
+     * (DAR-BE-318: a window read writes them all, for Spark Keep), so the counts are what they were.
+     */
+    private static void countVerdict(Map serverCounts, String verdict, boolean keepNoShopifyRef) {
+        if (verdict == OmsGqlReturnAssembler.CANCELLED) {
+            serverCounts.excludedCancelledCount = (serverCounts.excludedCancelledCount as int) + 1
+        } else if (verdict == OmsGqlReturnAssembler.NO_SHOPIFY_REF) {
+            String count = keepNoShopifyRef ? "keptNoShopifyRefCount" : "excludedNoShopifyRefCount"
+            serverCounts.put(count, (serverCounts.get(count) as int) + 1)
+        }
+    }
+
+    /**
+     * One slice's returns: the ones this read writes are built every RETURNS_BATCH by one lookup pass. A window read
+     * (writeEveryClass) writes every return with its class; a read by key leaves out what its scope excludes, as before.
+     */
     private static void fetchSlice(OmsGqlClient client, Map shared, String filter) {
         Map pagination = (Map) shared.pagination
         Map serverCounts = (Map) shared.serverCounts
         boolean onlyCancelled = shared.onlyCancelled == true
         boolean keepNoShopifyRef = shared.keepNoShopifyRef == true
+        boolean writeEveryClass = shared.writeEveryClass == true
         Closure sink = (Closure) shared.sink
         Closure<List<Map>> keep = { List<Map> nodes ->
             List<Map> kept = []
@@ -163,21 +188,17 @@ class OmsGqlReturnsPageSource {
                 serverCounts.returnsCount = (serverCounts.returnsCount as int) + nodes.size()
                 nodes.each { Map n ->
                     String verdict = OmsGqlReturnAssembler.classify(n)
-                    if (sink != null) {
-                        // A shared read: cancelled returns are only counted by the callers; the rest are built and tagged.
-                        if (verdict == OmsGqlReturnAssembler.CANCELLED) sink.call([(SHARED_VERDICT): verdict])
-                        else { n.put(SHARED_VERDICT, verdict); kept.add(n) }
+                    n.put(SHARED_VERDICT, verdict)
+                    // A shared read: every return is built and tagged; each caller counts by its own options.
+                    if (sink != null) { kept.add(n); return }
+                    if (onlyCancelled) {
+                        // the OMS was asked for RETURN_CANCELLED only: a status it was not asked for is not R16's, Keep or not
+                        if (verdict == OmsGqlReturnAssembler.CANCELLED) kept.add(n)
                         return
                     }
-                    if (verdict == OmsGqlReturnAssembler.CANCELLED && onlyCancelled) kept.add(n)
-                    else if (onlyCancelled) { /* the OMS answered a status it was not asked for: not R16's */ }
-                    else if (verdict == OmsGqlReturnAssembler.CANCELLED) serverCounts.excludedCancelledCount = (serverCounts.excludedCancelledCount as int) + 1
-                    else if (verdict == OmsGqlReturnAssembler.NO_SHOPIFY_REF && keepNoShopifyRef) {
-                        serverCounts.keptNoShopifyRefCount = (serverCounts.keptNoShopifyRefCount as int) + 1
-                        kept.add(n)
-                    }
-                    else if (verdict == OmsGqlReturnAssembler.NO_SHOPIFY_REF) serverCounts.excludedNoShopifyRefCount = (serverCounts.excludedNoShopifyRefCount as int) + 1
-                    else kept.add(n)
+                    countVerdict(serverCounts, verdict, keepNoShopifyRef)
+                    boolean scoped = verdict == OmsGqlReturnAssembler.KEEP || (verdict == OmsGqlReturnAssembler.NO_SHOPIFY_REF && keepNoShopifyRef)
+                    if (writeEveryClass || scoped) kept.add(n)
                 }
             }
             return kept
@@ -186,7 +207,10 @@ class OmsGqlReturnsPageSource {
                 filter, RETURNS_BATCH, keep) { List<Map> batch ->
             List<Map> built = buildPage(client, batch, pagination, shared.withReturnCredit == true)
             if (sink != null) built.eachWithIndex { Map r, int i -> sink.call(r + [(SHARED_VERDICT): batch[i].get(SHARED_VERDICT)]) }
-            else ((Closure) shared.pageConsumer).call(built)
+            else {
+                if (writeEveryClass) built.eachWithIndex { Map r, int i -> r.put(RETURN_CLASS_FIELD, batch[i].get(SHARED_VERDICT)) }
+                ((Closure) shared.pageConsumer).call(built)
+            }
         }
     }
 

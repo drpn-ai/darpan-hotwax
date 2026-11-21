@@ -2,16 +2,18 @@ package darpan.hotwax.oms
 
 import groovy.json.JsonOutput
 
-import darpan.reconciliation.source.SourceFilterSupport
-
 import static darpan.common.ValueSupport.normalize
 import static darpan.common.ValueSupport.normalizeInt
 
 /**
  * The OMS returns extract pipeline (DAR-BE-018, DAR-BE-040 fix 3) and the by-id returns lookup, both over GraphQL.
  *
- * A page source (OmsGqlReturnsPageSource) fetches and builds the return records; this class runs the configured
- * filters, the join-key fallback, the projection and the streaming sink over them, and writes the metadata.
+ * A page source (OmsGqlReturnsPageSource) fetches and builds the return records; this class runs the join-key fallback,
+ * the projection and the streaming sink over them, and writes the metadata.
+ *
+ * DAR-BE-318 (plan 3b-2b, Task 18): it takes no source filters. A run's Keep (the tenant's rules, and the cancelled and
+ * no-reference returns the OMS_RETURNS_GQL row declares) runs in darpan's Spark over the file, so every return the page
+ * source hands over is written, and the metadata carries no configuredExclusions.
  */
 class OmsReturnsSourceSupport {
 
@@ -41,25 +43,22 @@ class OmsReturnsSourceSupport {
     }
 
     static Map<String, Object> extractReturns(Object rawConfig, Object windowStart, Object windowEnd,
-                                              List keepRecordFields, Closure pageProgressListener,
-                                              List sourceFilters, Map options = [:]) {
+                                              List keepRecordFields, Closure pageProgressListener, Map options = [:]) {
         return extractReturnsInternal(rawConfig, windowStart, windowEnd, null, keepRecordFields,
-                pageProgressListener, sourceFilters, options ?: [:], true)
+                pageProgressListener, options ?: [:], true)
     }
 
     static Map<String, Object> extractReturnsToFile(Object rawConfig, Object windowStart, Object windowEnd,
                                                     File targetFile, List keepRecordFields,
-                                                    Closure pageProgressListener, List sourceFilters,
-                                                    Map options = [:]) {
+                                                    Closure pageProgressListener, Map options = [:]) {
         return extractReturnsInternal(rawConfig, windowStart, windowEnd, targetFile, keepRecordFields,
-                pageProgressListener, sourceFilters, options ?: [:], false)
+                pageProgressListener, options ?: [:], false)
     }
 
     private static Map<String, Object> extractReturnsInternal(Object rawConfig, Object windowStart,
                                                               Object windowEnd, File targetFile,
                                                               List keepRecordFields, Closure pageProgressListener,
-                                                              List sourceFilters, Map options,
-                                                              boolean retainRecords) {
+                                                              Map options, boolean retainRecords) {
         List<String> errors = []
         List<String> warnings = []
 
@@ -76,41 +75,16 @@ class OmsReturnsSourceSupport {
         Long thruMillis = OmsExtractSupport.parseWindowMillis(windowEnd, "windowEnd", errors)
         if (errors) return failure(errors, [], retainRecords)
 
-        // Parsed once, before any page is fetched, so a malformed rule fails pre-flight rather than
-        // mid-window on some later page (matches the orders contract). parseRules returns the rule
-        // list directly (List<Map<String,Object>>), not a wrapping Map.
-        List<Map<String, Object>> parsedFilters
-        try {
-            parsedFilters = SourceFilterSupport.parseRules(sourceFilters)
-        } catch (Exception e) {
-            return failure([normalize(e.message) ?: "Configured exclusion rules are invalid."], [], retainRecords)
-        }
-
         List<Map<String, Object>> collected = []
         OutputSink sink = new OutputSink(targetFile)
         Map<String, Object> serverCounts = [:]
-        Map<String, Object> exclusionCounts = [:]
-        Map<String, Object> fieldAbsentCounts = [:]
         long cumulativeRaw = 0L
 
-        // One record pipeline: client filters, the join-key fallback, projection, the sink.
+        // One record pipeline: the join-key fallback, projection, the sink. Keep runs in Spark, over the file.
         Closure consumePage = { List pageReturns ->
             pageReturns.each { Object raw ->
                 if (!(raw instanceof Map)) return
                 Map<String, Object> record = (Map<String, Object>) raw
-                // Configured exclusions run here, after the page source's own exclusions: a return it
-                // excluded (excludedNoShopifyRefCount) never arrives, so nothing is counted twice.
-                Map<String, Object> verdict = SourceFilterSupport.evaluate(record, parsedFilters)
-                if (verdict != null) {
-                    String key = String.valueOf(((Map) verdict.get("rule")).get("sequenceNum"))
-                    // Two buckets, one rejection: an include rule that drops a whole row class
-                    // for want of the field must not read as "the rule matched many values".
-                    Map<String, Object> bucket = SourceFilterSupport.REASON_FIELD_ABSENT == verdict.get("reason")
-                            ? fieldAbsentCounts
-                            : exclusionCounts
-                    bucket.put(key, normalizeInt(bucket.get(key), 0) + 1)
-                    return
-                }
                 applyJoinKeyFallback(record)
                 Map<String, Object> projected = projectRecord(record, keepRecordFields)
                 sink.write(projected)
@@ -133,7 +107,7 @@ class OmsReturnsSourceSupport {
             if (errors) {
                 sink.abort()
             } else {
-                sink.finish(withTransport(buildMetadata(serverCounts, exclusionCounts, fieldAbsentCounts, parsedFilters), transport))
+                sink.finish(withTransport(buildMetadata(serverCounts), transport))
             }
         } catch (Exception e) {
             sink.abort()
@@ -149,7 +123,7 @@ class OmsReturnsSourceSupport {
         Map<String, Object> fetchedResult = [
                 recordCount    : fetchedCount,
                 dataAvailable  : fetchedCount > 0,
-                requestMetadata: withTransport(buildMetadata(serverCounts, exclusionCounts, fieldAbsentCounts, parsedFilters), transport),
+                requestMetadata: withTransport(buildMetadata(serverCounts), transport),
                 warnings       : warnings,
                 errors         : [],
                 fileName       : OmsExtractSupport.buildDefaultFileName(fromMillis, thruMillis, DEFAULT_FILE_NAME_PREFIX),
@@ -343,34 +317,17 @@ class OmsReturnsSourceSupport {
         return keep == null ? record : (Map<String, Object>) OmsKeptFieldsProjection.project(record, keep)
     }
 
-    protected static Map<String, Object> buildMetadata(Map serverCounts, Map exclusionCounts,
-                                                        Map fieldAbsentCounts,
-                                                        List<Map<String, Object>> parsedFilters) {
+    /**
+     * The page source's counts, as before. DAR-BE-318: on a window read excludedNoShopifyRefCount and excludedCancelledCount
+     * count the returns of that class the read found, which it now writes for Spark Keep to set aside; no
+     * configuredExclusions, since the read applies no tenant rule (darpan's Keep summary carries them).
+     */
+    protected static Map<String, Object> buildMetadata(Map serverCounts) {
         Map<String, Object> filters = [:]
         filters.put("excludedNoShopifyRefCount", normalizeInt(serverCounts.get("excludedNoShopifyRefCount"), 0))
         filters.put("serverReportedReturnsCount", normalizeInt(serverCounts.get("returnsCount"), 0))
         if (serverCounts.containsKey("excludedCancelledCount")) {
             filters.put("excludedCancelledCount", normalizeInt(serverCounts.get("excludedCancelledCount"), 0))
-        }
-
-        // parseRules returns the rule list directly — no "rules" wrapper key to unwrap.
-        List<Map<String, Object>> rules = parsedFilters ?: []
-        if (rules) {
-            // Every configured rule appears, including one that matched nothing (excludedCount 0) —
-            // a missing entry would read as "not applied". Absent entirely when no rules configured.
-            filters.put("configuredExclusions", rules.collect { Map<String, Object> rule ->
-                String key = String.valueOf(rule.get("sequenceNum"))
-                return [
-                        sequenceNum    : rule.get("sequenceNum"),
-                        fieldExpression: rule.get("fieldExpression"),
-                        operator       : rule.get("operator"),
-                        values          : rule.get("values"),
-                        excludedCount   : normalizeInt(exclusionCounts.get(key), 0),
-                        // Present on every rule including EXCLUDE_IN ones, where it is structurally
-                        // zero: a reader should not need to know which keys apply to which mode.
-                        fieldAbsentCount: normalizeInt(fieldAbsentCounts?.get(key), 0),
-                ]
-            })
         }
         return [filters: filters]
     }

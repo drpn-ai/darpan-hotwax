@@ -62,7 +62,7 @@ class OmsGqlReturnsPageSourceTests {
     }
 
     @Test
-    void pagesTheWindowAndHandsOnlyKeptReturnsToTheConsumer() {
+    void pagesTheWindowAndHandsEveryReturnToTheConsumerWithItsClass() {
         int call = 0
         Map<String, Closure> h = lookupsAnswering() + [returns: { Map v ->
             call++
@@ -75,7 +75,7 @@ class OmsGqlReturnsPageSourceTests {
         assertEquals([], result.errors)
         assertEquals("GRAPHQL", result.transport)
         List<Map> records = pages.flatten() as List<Map>
-        assertEquals(["M0001"], records*.returnId)
+        assertEquals([["M0001", "KEEP"], ["M0002", "CANCELLED"], ["M0003", "NO_SHOPIFY_REF"]], records.collect { [it.returnId, it.omsReturnClass] })
         Map r = records[0]
         assertEquals("37447000001", r.shopifyReturnId)
         assertEquals("7186636636291", r.orderExternalId)
@@ -89,6 +89,152 @@ class OmsGqlReturnsPageSourceTests {
                 requests.find { it.root == "goodIdentifications" }.variables.q, "only the NetSuite id type is read")
         assertEquals([returnsCount: 3, excludedNoShopifyRefCount: 1, excludedCancelledCount: 1], result.serverCounts)
         assertEquals("c1", requests.findAll { it.root == "returns" }[1].variables.after, "second page must follow the cursor")
+    }
+
+    // ------------------------------------------------------------------------------------------- DAR-BE-318 (Task 18)
+
+    /** The window's returns of every class: kept, cancelled (with and without a Shopify reference), and no reference. */
+    private static List<Map> everyClass() {
+        return [ret("M0001"), ret("M0002", [statusId: "RETURN_CANCELLED"]),
+                ret("628087", [identifications: [], returnChannelEnumId: "HAPPINESS_GUARANTEE", statusId: "RETURN_COMPLETED"]),
+                ret("M0004", [identifications: [], statusId: "RETURN_CANCELLED"]),
+                ret("M0005", [externalId: "990011", identifications: []])]
+    }
+
+    private static final Map<String, String> CLASS_OF = [M0001: "KEEP", M0002: "CANCELLED", "628087": "NO_SHOPIFY_REF",
+                                                         M0004: "CANCELLED", M0005: "KEEP"]
+
+    /** The lookups, with one item on order GR1 for each return asked. */
+    private Map<String, Closure> everyClassLookups() {
+        return lookupsAnswering() + [returns: { Map v -> conn(everyClass()) },
+                returnItems: { Map v -> conn(((v.q as String) - "returnId:").split(",").collect { String id ->
+                    [returnId: id, returnItemSeqId: "01", orderId: "GR1", orderItemSeqId: "00101", productId: "P1", returnQuantity: 1,
+                     receivedQuantity: 0, returnPrice: 65, returnReasonId: "UNKNOWN", statusId: "RETURN_REQUESTED", returnTypeId: "RTN_REFUND"] }) }]
+    }
+
+    private Map read(Map options, List<Map> nodes = everyClass(), boolean shared = false) {
+        OmsGqlSharedRead.reset()
+        OmsGqlLookupCache.reset()
+        requests.clear()
+        OmsGqlClient c = client(everyClassLookups() + [returns: { Map v -> conn(nodes) }])
+        c.realEndpoint = shared
+        List<List<Map>> pages = []
+        Map result = OmsGqlReturnsPageSource.fetcher(c, options).call([fromMillis: FROM, thruMillis: THRU, config: CONFIG,
+                pageConsumer: { List<Map> records -> pages.add(records) }])
+        OmsGqlSharedRead.reset()
+        return result + [records: pages.flatten() as List<Map>]
+    }
+
+    /**
+     * Ruling 3b2b-12: a window read writes the cancelled and no-reference returns it used to leave out, each built like any
+     * return and marked with its class, for the OMS_RETURNS_GQL row's Keep lines; with or without the shared read.
+     */
+    @Test
+    void aWindowReadWritesCancelledAndNoRefReturnsWithTheirClass() {
+        [false, true].each { boolean shared ->
+            Map out = read([:], everyClass(), shared)
+            assertEquals([], out.errors)
+            Map<String, Map> byId = ((List<Map>) out.records).collectEntries { [(it.returnId): it] }
+            assertEquals(CLASS_OF.keySet(), byId.keySet(), "every return is written (shared ${shared})")
+            assertEquals(CLASS_OF, byId.collectEntries { k, v -> [(k): v.omsReturnClass] }, "each with its class (shared ${shared})")
+            assertEquals("7186636636291", byId.M0002.orderExternalId, "a cancelled return is built like any other")
+            assertEquals(null, byId["628087"].shopifyReturnId)
+            assertTrue(((List<Map>) out.records).every { !it.containsKey(OmsGqlReturnsPageSource.SHARED_VERDICT) })
+            assertEquals("omsReturnClass", ((List<Map>) out.records)[0].keySet().last(), "written last, after the built record")
+        }
+        // onlyCancelledReturns still asks the OMS for the cancelled ones only, and leaves out a status it did not ask for
+        Map cancelled = read([onlyCancelledReturns: true])
+        assertTrue((requests.find { it.root == "returns" }.variables.q as String).startsWith("statusId:RETURN_CANCELLED "))
+        assertEquals([["M0002", "CANCELLED"], ["M0004", "CANCELLED"]], ((List<Map>) cancelled.records).collect { [it.returnId, it.omsReturnClass] })
+    }
+
+    /**
+     * DAR-BE-116 + DAR-BE-318: R8 (keeps returns with no Shopify reference) and R11 (does not) still read the month once; each
+     * gets every return with its class, and its own counts.
+     */
+    @Test
+    void theSharedReadServesBothOptionsFromOneRead() {
+        OmsGqlSharedRead.reset()
+        OmsGqlLookupCache.reset()
+        java.util.concurrent.CountDownLatch both = new java.util.concurrent.CountDownLatch(2)
+        Map<String, Closure> h = everyClassLookups() + [returns: { Map v ->
+            both.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            return conn(everyClass())
+        }]
+        OmsGqlClient c = client(h)
+        c.realEndpoint = true
+        def pool = java.util.concurrent.Executors.newFixedThreadPool(2)
+        try {
+            List<List<List<Map>>> pages = [Collections.synchronizedList([]), Collections.synchronizedList([])]
+            List futures = [true, false].withIndex().collect { boolean keepNoRef, int i ->
+                pool.submit({ ->
+                    both.countDown()
+                    OmsGqlReturnsPageSource.fetchAll(c, [fromMillis: FROM, thruMillis: THRU, config: CONFIG,
+                            includeReturnsWithoutShopifyRef: keepNoRef, pageConsumer: { List<Map> records -> pages[i].add(records) }])
+                } as java.util.concurrent.Callable)
+            }
+            List<Map> results = futures.collect { (Map) it.get(10, java.util.concurrent.TimeUnit.SECONDS) }
+            results.each { assertEquals([], it.errors) }
+            assertEquals(1, requests.count { it.root == "returns" }, "one returns page for both extracts")
+            assertEquals(1, requests.count { it.root == "returnItems" }, "one lookup pass for both")
+            [0, 1].each { int i ->
+                assertEquals(CLASS_OF, (pages[i].flatten() as List<Map>).collectEntries { [(it.returnId): it.omsReturnClass] })
+            }
+            assertEquals([returnsCount: 5, excludedNoShopifyRefCount: 0, excludedCancelledCount: 2, keptNoShopifyRefCount: 1], results[0].serverCounts)
+            assertEquals([returnsCount: 5, excludedNoShopifyRefCount: 1, excludedCancelledCount: 2], results[1].serverCounts)
+            assertTrue((Map) results[0].pagination instanceof Map && results[0].pagination.sharedRead == true)
+        } finally {
+            pool.shutdownNow()
+            OmsGqlSharedRead.reset()
+            OmsGqlLookupCache.reset()
+        }
+    }
+
+    /**
+     * Ruling 3b2b-12: a read by key is not Keep's business. By returnId it leaves out the cancelled and no-reference returns
+     * as before (onlyCancelledReturns: only the cancelled ones); by replacement it keeps a return with no reference. No class.
+     */
+    @Test
+    void aKeyedReadAnswersAsToday() {
+        Map<String, Closure> h = everyClassLookups()
+        List<List<Map>> pages = []
+        Map result = OmsGqlReturnsPageSource.fetchAll(client(h), [config: CONFIG, lookupKeys: CLASS_OF.keySet() as List<String>,
+                pageConsumer: { List<Map> records -> pages.add(records) }])
+        assertEquals([], result.errors)
+        List<Map> byKey = pages.flatten() as List<Map>
+        assertEquals(["M0001", "M0005"], byKey*.returnId)
+        assertTrue(byKey.every { !it.containsKey("omsReturnClass") }, "a keyed read writes no class")
+        assertEquals([returnsCount: 5, excludedNoShopifyRefCount: 1, excludedCancelledCount: 2], result.serverCounts)
+
+        pages.clear()
+        Map cancelled = OmsGqlReturnsPageSource.fetchAll(client(h), [config: CONFIG, lookupKeys: ["M0002", "M0004", "M0001"],
+                onlyCancelledReturns: true, pageConsumer: { List<Map> records -> pages.add(records) }])
+        assertEquals([], cancelled.errors)
+        assertEquals(["M0002", "M0004"], (pages.flatten() as List<Map>)*.returnId)
+        assertTrue((pages.flatten() as List<Map>).every { !it.containsKey("omsReturnClass") })
+        assertTrue((requests.findAll { it.root == "returns" }.last().variables.q as String).startsWith("statusId:RETURN_CANCELLED returnId:"))
+    }
+
+    /** DAR-BE-318: every option's server counts are what the read counted before it wrote every return. */
+    @Test
+    void theServerCountsAreUnchanged() {
+        Map<Map, Map> expected = [
+                ([:])                                    : [returnsCount: 5, excludedNoShopifyRefCount: 1, excludedCancelledCount: 2],
+                ([includeReturnsWithoutShopifyRef: true]): [returnsCount: 5, excludedNoShopifyRefCount: 0, excludedCancelledCount: 2,
+                                                            keptNoShopifyRefCount: 1],
+                ([onlyCancelledReturns: true])           : [returnsCount: 5, excludedNoShopifyRefCount: 0, excludedCancelledCount: 0,
+                                                            keptNoShopifyRefCount: 0],
+        ]
+        expected.each { Map options, Map counts ->
+            assertEquals(counts, read(options).serverCounts, "unshared ${options}")
+            if (!options.onlyCancelledReturns) assertEquals(counts, read(options, everyClass(), true).serverCounts, "shared ${options}")
+        }
+        // and they reach the file's metadata as before, with no configuredExclusions: the read applies no tenant rule
+        Map extract = OmsReturnsSourceSupport.extractReturns(CONFIG, "2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z", null, null,
+                [pageFetcher: OmsGqlReturnsPageSource.fetcher(client(everyClassLookups()))])
+        assertEquals([excludedNoShopifyRefCount: 1, serverReportedReturnsCount: 5, excludedCancelledCount: 2],
+                ((Map) extract.requestMetadata).filters)
+        assertEquals(5, extract.recordCount)
     }
 
     /** DAR-BE-116 R8 (F-104602): a product with no NETSUITE_PRODUCT_ID, or only an expired one, leaves the item without the field. */
@@ -277,8 +423,9 @@ class OmsGqlReturnsPageSourceTests {
             List<Map> results = futures.collect { (Map) it.get(10, java.util.concurrent.TimeUnit.SECONDS) }
             results.each { assertEquals([], it.errors) }
             assertEquals(1, requests.count { it.root == "returns" }, "one returns page for both extracts")
-            assertEquals(["M0001", "M0002"], (pages[0].flatten() as List<Map>)*.returnId.sort())
-            assertEquals(["M0001"], (pages[1].flatten() as List<Map>)*.returnId)
+            // DAR-BE-318: both write every return with its class; Spark Keep keeps each check's own scope
+            assertEquals(["M0001", "M0002", "M0003"], (pages[0].flatten() as List<Map>)*.returnId.sort())
+            assertEquals(["M0001", "M0002", "M0003"], (pages[1].flatten() as List<Map>)*.returnId.sort())
             assertEquals(1, ((Map) results[1].serverCounts).excludedNoShopifyRefCount)
             assertEquals(1, ((Map) results[0].serverCounts).keptNoShopifyRefCount)
             results.each { assertEquals(1, ((Map) it.serverCounts).excludedCancelledCount) }
@@ -314,10 +461,12 @@ class OmsGqlReturnsPageSourceTests {
         Map result = OmsGqlReturnsPageSource.fetcher(client(h), [includeReturnsWithoutShopifyRef: true]).call(
                 [fromMillis: FROM, thruMillis: THRU, config: CONFIG, pageConsumer: { List<Map> records -> pages.add(records) }])
         assertEquals([], result.errors)
-        assertEquals(["M0001", "628087"], (pages.flatten() as List<Map>)*.returnId)
+        // DAR-BE-318: the cancelled one is written too, for Spark Keep to set aside (the R8 side's options still apply its line)
+        assertEquals([["M0001", "KEEP"], ["628087", "NO_SHOPIFY_REF"], ["M0002", "CANCELLED"]],
+                (pages.flatten() as List<Map>).collect { [it.returnId, it.omsReturnClass] })
         assertEquals(null, (pages.flatten() as List<Map>)[1].shopifyReturnId)
         assertEquals([returnsCount: 3, excludedNoShopifyRefCount: 0, excludedCancelledCount: 1, keptNoShopifyRefCount: 1], result.serverCounts,
-                "cancelled stays out; the kept ones are counted")
+                "the cancelled one counted as excluded; the kept ones counted")
     }
 
     @Test
@@ -345,9 +494,11 @@ class OmsGqlReturnsPageSourceTests {
         assertFalse((first.query as String).toLowerCase().contains("mutation"))
     }
 
+    /** A read by key makes no lookup for a page whose returns it all leaves out. */
     @Test
     void noLookupIsMadeForAPageWithNothingKept() {
-        run(client([returns: { Map v -> conn([ret("M0002", [statusId: "RETURN_CANCELLED"])]) }]))
+        OmsGqlReturnsPageSource.fetchAll(client([returns: { Map v -> conn([ret("M0002", [statusId: "RETURN_CANCELLED"])]) }]),
+                [config: CONFIG, lookupKeys: ["M0002"], pageConsumer: { List<Map> r -> }])
         assertEquals(["returns"], requests*.root)
     }
 

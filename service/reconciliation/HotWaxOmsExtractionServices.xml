@@ -190,18 +190,8 @@
                 <parameter name="fieldName"/>
                 <description>Optional projection of top-level record fields. items[] is always retained
                     regardless of this list, because the nested-line contract (RQ-21) does not survive a
-                    projection that names only header fields.</description>
-            </parameter>
-            <parameter name="sourceFilters" type="List">
-                <parameter name="filterRule" type="Map">
-                    <parameter name="sequenceNum" type="Integer"/>
-                    <parameter name="fieldExpression"/>
-                    <parameter name="operator"/>
-                    <parameter name="filterValues"/>
-                </parameter>
-                <description>Optional record-exclusion rules, same semantics as the order extractors. These
-                    run client-side: the endpoint has no knowledge of tenant exclusion rules. The expected
-                    rule here excludes returns whose returnChannelEnumId never has a Shopify counterpart.</description>
+                    projection that names only header fields; so is omsReturnClass, which a window read writes
+                    (DAR-BE-318). A run joins the fields its Keep reads to this list (Ruling 3b2b-4).</description>
             </parameter>
             <parameter name="reconciliationRunResultId">
                 <description>Optional observability run id for progress heartbeats. Advisory only.</description>
@@ -228,10 +218,13 @@
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/automation/extractOmsGqlReturns.groovy">
         <description>Extract HotWax OMS returns for an automation window over the OMS GraphQL API (connector
             OMS_RETURNS_GQL, DAR-BE-040 fix 3), writing a {records, metadata} file. GraphQL `returns` carries every
-            return, pending ones included. It excludes returns with no Shopify reference (counted
-            as excludedNoShopifyRefCount) and, by default, RETURN_CANCELLED (excludedCancelledCount), which
-            the Shopify side suppresses (DAR-BE-027). Needs the OMS GraphQL upgrade (gorjana 2026-09-30); on an
-            OMS without it the extract FAILS rather than returning an empty file.</description>
+            return, pending ones included. DAR-BE-318 (plan 3b-2b): it takes no source filters, so darpan keeps in Spark
+            over its file. A window read writes every return, each with omsReturnClass: CANCELLED (RETURN_CANCELLED, which
+            the Shopify side suppresses, DAR-BE-027), NO_SHOPIFY_REF (no Shopify reference) or KEEP; the OMS_RETURNS_GQL
+            row's keepLinesJson sets the first two aside as the read used to leave them out, and the read still counts them
+            (excludedCancelledCount, excludedNoShopifyRefCount). A read by key leaves them out itself and writes no class,
+            as before. Needs the OMS GraphQL upgrade (gorjana 2026-09-30); on an OMS without it the extract FAILS rather
+            than returning an empty file.</description>
         <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsReturnsContract"/>
         <in-parameters>
             <parameter name="lookupKeys" type="List">
@@ -250,16 +243,12 @@
             <parameter name="fileName">
                 <description>Optional output file name. Defaults to oms-returns-{fromMillis}-{thruMillis}.json.</description>
             </parameter>
-            <parameter name="sourceFilters">
-                <description>Optional record-exclusion rules, same semantics as the order extractors. These
-                    run client-side, after the built-in exclusions. The expected
-                    rule here excludes returns whose returnChannelEnumId never has a Shopify counterpart.</description>
-            </parameter>
                     <parameter name="includeReturnsWithoutShopifyRef" type="Boolean" default="false">
                 <description>DAR-BE-094. Keep the returns with no Shopify reference (counted as keptNoShopifyRefCount) instead
                     of excluding them: the OMS's own Happiness Guarantee and sellable returns, which Shopify never sees but
                     NetSuite must. For a check against NetSuite (R8), set in the automation source's
-                    safeMetadataJson.parameters; every Shopify comparison leaves it off.</description>
+                    safeMetadataJson.parameters; every Shopify comparison leaves it off. DAR-BE-318: on a window read the
+                    return is written either way; this option turns off the declared Keep line that sets it aside.</description>
             </parameter>
             <parameter name="withReturnCredit" type="Boolean" default="false">
                 <description>DAR-BE-192. Also read the payments each return's responses refund and write the credit HotWax gives
@@ -269,7 +258,7 @@
             <parameter name="onlyCancelledReturns" type="Boolean" default="false">
                 <description>DAR-BE-094 R16. Read ONLY the returns the OMS cancelled (asked of the OMS by status), with or
                     without a Shopify reference: for a check that nothing stays open in NetSuite for them. Set in the
-                    automation source's safeMetadataJson.parameters.</description>
+                    automation source's safeMetadataJson.parameters. DAR-BE-318: it also turns off both declared Keep lines.</description>
             </parameter>
         </in-parameters>
     </service>

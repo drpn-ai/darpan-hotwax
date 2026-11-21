@@ -42,8 +42,9 @@ class OmsKeptFieldsProjection {
         final Integer exchangeManifestMax
         /**
          * Fields the extractor writes on every record after its projection, whatever it is asked to keep, and never selects
-         * (DAR-BE-318: OMS orders' isExchangeOrder). A projection keeps them, and serving never asks a copy for them: a copy
-         * read before they existed holds none of the records they mark (its read left the exchange orders out).
+         * (DAR-BE-318: OMS orders' isExchangeOrder, OMS returns' omsReturnClass). A projection keeps them, and serving never
+         * asks a copy for them: a copy read before they existed holds none of the records they mark (its read left the
+         * exchange orders, and the cancelled and no-reference returns, out).
          */
         final Set<String> appended
 
@@ -68,8 +69,9 @@ class OmsKeptFieldsProjection {
             exchangeManifestMax: 500,
             appended: [OmsExtractSupport.IS_EXCHANGE_ORDER_FIELD])
 
-    /** HotWax OMS returns (extract#HotWaxOmsGqlReturns): items[] always kept (RQ-21). */
-    static final Spec OMS_RETURNS = new Spec(alwaysKept: ["items"], projectsOnAnyList: true)
+    /** HotWax OMS returns (extract#HotWaxOmsGqlReturns): items[] always kept (RQ-21), and the window read's class (DAR-BE-318). */
+    static final Spec OMS_RETURNS = new Spec(alwaysKept: ["items"], projectsOnAnyList: true,
+            appended: [OmsGqlReturnsPageSource.RETURN_CLASS_FIELD])
 
     /** The HotWax endpoints whose live projection is this class, by systemEnumId. */
     static final Map<String, Spec> SPECS = ([OMS_GQL: OMS_ORDERS, OMS_RETURNS_GQL: OMS_RETURNS] as Map<String, Spec>).asImmutable()
@@ -104,6 +106,7 @@ class OmsKeptFieldsProjection {
             if (!(rawFields instanceof Collection) || ((Collection) rawFields).isEmpty()) return null
             Set<String> keep = keepSet(rawFields) ?: new LinkedHashSet<String>()
             keep.addAll(spec.alwaysKept)
+            keep.addAll(spec.appended)
             return keep
         }
         Set<String> keep = withCompanions(keepSet(rawFields), spec.companions)

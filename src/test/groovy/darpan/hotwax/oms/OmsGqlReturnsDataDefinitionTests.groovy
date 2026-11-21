@@ -165,15 +165,39 @@ class OmsGqlReturnsDataDefinitionTests {
         return m.group(1)
     }
 
-    /** The coded path: extractOmsGqlReturns.groovy's call, on the scripted server. */
+    /**
+     * The coded path: extractOmsGqlReturns.groovy's call, on the scripted server, then the Keep a run puts on its file.
+     * DAR-BE-318 (plan 3b-2b, Task 18): the coded read takes no filters. A window read writes every return with its
+     * omsReturnClass, and Spark Keep then sets aside the CANCELLED and NO_SHOPIFY_REF ones the OMS_RETURNS_GQL row's declared
+     * lines name (each unless the side's options turn its line off) and what the tenant's rules drop. That Keep is stated
+     * here as front-end A states it (SourceFilterSupport, whose parity with Spark darpan's KeepColumnParityTests pins;
+     * OmsReturnsKeepParityTests runs the declared lines and the rules in Spark), so the data-defined read, which still
+     * filters at its read (Ruling 3b2b-16), is compared with what a coded run keeps. A read by key writes no class and is
+     * compared as it reads. The Keep fields join a projection as a run joins them, and leave with Keep.
+     */
     static Map coded(Map options = [:], List keep = null, List rawFilters = null) {
         File out = File.createTempFile("coded-returns-", ".json")
         try {
-            Map result = OmsReturnsSourceSupport.extractReturnsToFile(CONFIG, FROM, THRU, out, keep, null, rawFilters,
+            List<Map<String, Object>> rules = SourceFilterSupport.parseRules(rawFilters)
+            List<String> keepFields = (rules.collect { it.fieldExpression as String } + [OmsGqlReturnsPageSource.RETURN_CLASS_FIELD]).unique()
+            List sent = keep == null ? null : (keep + keepFields).unique()
+            Map result = OmsReturnsSourceSupport.extractReturnsToFile(CONFIG, FROM, THRU, out, sent, null,
                     [pageFetcher: OmsGqlReturnsPageSource.fetcher(new OmsGqlClient(CONFIG, new Server().sender()), options)])
             assertEquals([], result.errors, "coded extract errors")
             Map file = (Map) new JsonSlurper().parse(out)
-            return [records: file.records, metadata: file.metadata]
+            Set<String> setAside = [] as Set<String>
+            if (options.onlyCancelledReturns != true) {
+                setAside.add(OmsGqlReturnAssembler.CANCELLED)
+                if (options.includeReturnsWithoutShopifyRef != true) setAside.add(OmsGqlReturnAssembler.NO_SHOPIFY_REF)
+            }
+            List<Map> records = ((List<Map>) file.records).findAll { !setAside.contains(it.get(OmsGqlReturnsPageSource.RETURN_CLASS_FIELD)) }
+                    .collect { Map r -> r.findAll { k, v -> k != OmsGqlReturnsPageSource.RETURN_CLASS_FIELD } }
+            Map applied = SourceFilterSupport.applyToRecords(records, rules)
+            darpan.reconciliation.conclusion.ExcludedRecordsSidecar.discard((Map) applied.excludedCollector)
+            Set<String> dropped = keep == null ? [] as Set<String> : (keepFields - keep) as Set<String>
+            Map metadata = (Map) file.metadata
+            if (rules) ((Map) metadata.filters).configuredExclusions = applied.configuredExclusions
+            return [records: ((List<Map>) applied.records).collect { Map r -> r.findAll { k, v -> !dropped.contains(k) } }, metadata: metadata]
         } finally {
             out.delete()
         }

@@ -55,6 +55,11 @@ class KeptFieldsProjectionTieTests {
         Map ret = [returnId: "R1", items: [[returnItemSeqId: "1"]], statusId: "RETURN_COMPLETED"]
         assertEquals([returnId: "R1", items: ret.items], OmsReturnsSourceSupport.projectRecord(ret, ["returnId"]))
         assertEquals([items: ret.items], OmsReturnsSourceSupport.projectRecord(ret, [" "]))
+        // DAR-BE-318 (Task 18): and the class a window read writes on every return, whatever it is asked
+        assertEquals([OmsGqlReturnsPageSource.RETURN_CLASS_FIELD] as Set, OmsKeptFieldsProjection.OMS_RETURNS.appended)
+        Map classed = ret + [omsReturnClass: "CANCELLED"]
+        assertEquals([returnId: "R1", items: ret.items, omsReturnClass: "CANCELLED"], OmsReturnsSourceSupport.projectRecord(classed, ["returnId"]))
+        assertEquals([items: ret.items, omsReturnClass: "CANCELLED"], OmsReturnsSourceSupport.projectRecord(classed, [" "]))
         assertTrue(OmsReturnsSourceSupport.projectRecord(ret, null).is(ret))
         // the order read trims on names, keeping the record's order
         assertEquals(["statusId", "orderId"], OmsExtractSupport.trimRecord([statusId: "A", orderId: "O", x: 1], ["orderId", "statusId"] as Set).keySet() as List)

@@ -9,13 +9,17 @@
   says Y. Tied to the extracts by ExcludedRecordsSidecarTieTests.
     OMS_GQL N: Keep runs in Spark (Task 17). Its read never wrote one (DAR-BE-064), so a run that sets orders aside still
       reads them as unknown, as before.
-    OMS_RETURNS_GQL N: the returns script writes no side file (DAR-BE-040 fix 3).
+    OMS_RETURNS_GQL N: Keep runs in Spark (Task 18). Its read never wrote one (DAR-BE-040 fix 3), so a run that sets returns
+      aside still reads them as unknown (or absent, when only the built-in lines set them aside), as before.
     OMS_ORDER_ITEMS_GQL Y: Keep runs in Spark (Task 17), which writes the side file the unit-grain read used to.
     OMS_PRODUCTS_GQL Y: OmsGqlProductsConnectorWiringTests.
   keepLinesJson (DAR-BE-318, Ruling 3b2b-12): built-in Keep lines, run in Spark before the tenant's rules.
     OMS_GQL: an exchange order (isExchangeOrder = Y, written by the orders extract) is set aside, unless the side reads with
       the exchange exclusion off. Its exchange manifest is still written for the exchange-pair verify pass.
-  isExchangeOrder is a field like any other (Aditi, 2026-11-21): offered on the rules board below.
+    OMS_RETURNS_GQL: a cancelled return (omsReturnClass = CANCELLED, written by the returns extract) is set aside unless the
+      side reads only cancelled returns; one with no Shopify reference (NO_SHOPIFY_REF) unless the side keeps those
+      (includeReturnsWithoutShopifyRef) or reads only cancelled ones. The read counts both as before.
+  isExchangeOrder and omsReturnClass are fields like any other (Aditi, 2026-11-21): offered on the rules board below.
   servingProjectionServiceName: the orders and returns extracts trim records to the keep fields they are sent; a kept copy
     is trimmed the same way by project#HotWaxOmsKeptRecords (OmsKeptRecordsServing).
   datasetReadParametersJson: a dataset read of 60 days lists every exchange order it sets aside (a run lists 500), so a
@@ -28,9 +32,13 @@
             keepLinesJson='[{"sequenceNum":0,"label":"isExchangeOrder","appliesUnless":{"applyExchangeExclusion":false},"kinds":{"isExchangeOrder":"FVT_TEXT"},"lines":[{"conditionSeqId":"01","sequenceNum":1,"conditionTypeId":"RCT_COMPARE","fieldName":"isExchangeOrder","operatorEnumId":"ENTCO_EQUALS","compareValue":"Y"}]}]'/>
     <darpan.reconciliation.SourceSystemConnectorField systemEnumId="OMS_GQL" fieldPath="$.records[*].isExchangeOrder"
             label="Exchange order" fieldType="string" sequenceNum="14"
-            description="DAR-BE-318: Y when the order carries an EXCHANGE item association, else N. Written by the orders extract on every window read whatever it keeps; the built-in Keep line (keepLinesJson) sets the Y orders aside."/>
+            description="DAR-BE-318: Y when the order carries an EXCHANGE item association, else N. Written by the orders extract on every window read whatever it keeps; the built-in Keep line (keepLinesJson) sets the Y orders aside. Conclusion lookups write no flag."/>
     <darpan.reconciliation.SourceSystemConnector systemEnumId="OMS_RETURNS_GQL" excludedRecordsSidecar="N"
-            servingProjectionServiceName="reconciliation.HotWaxOmsExtractionServices.project#HotWaxOmsKeptRecords"/>
+            servingProjectionServiceName="reconciliation.HotWaxOmsExtractionServices.project#HotWaxOmsKeptRecords"
+            keepLinesJson='[{"sequenceNum":0,"label":"omsReturnClass","appliesUnless":{"onlyCancelledReturns":true},"kinds":{"omsReturnClass":"FVT_TEXT"},"lines":[{"conditionSeqId":"01","sequenceNum":1,"conditionTypeId":"RCT_COMPARE","fieldName":"omsReturnClass","operatorEnumId":"ENTCO_EQUALS","compareValue":"CANCELLED"}]},{"sequenceNum":1,"label":"omsReturnClass","appliesUnless":{"includeReturnsWithoutShopifyRef":true,"onlyCancelledReturns":true},"kinds":{"omsReturnClass":"FVT_TEXT"},"lines":[{"conditionSeqId":"01","sequenceNum":1,"conditionTypeId":"RCT_COMPARE","fieldName":"omsReturnClass","operatorEnumId":"ENTCO_EQUALS","compareValue":"NO_SHOPIFY_REF"}]}]'/>
+    <darpan.reconciliation.SourceSystemConnectorField systemEnumId="OMS_RETURNS_GQL" fieldPath="$.records[*].omsReturnClass"
+            label="Return class" fieldType="string" sequenceNum="15"
+            description="DAR-BE-318: KEEP, CANCELLED (RETURN_CANCELLED) or NO_SHOPIFY_REF (neither a Shopify refund id nor a Shopify return id). Written by the returns extract on every window read whatever it keeps; the built-in Keep lines (keepLinesJson) set the CANCELLED and NO_SHOPIFY_REF returns aside unless the side's options keep them."/>
     <darpan.reconciliation.SourceSystemConnector systemEnumId="OMS_ORDER_ITEMS_GQL" excludedRecordsSidecar="Y"/>
     <darpan.reconciliation.SourceSystemConnector systemEnumId="OMS_PRODUCTS_GQL" excludedRecordsSidecar="Y"/>
 </entity-facade-xml>

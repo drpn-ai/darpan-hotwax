@@ -15,7 +15,6 @@ import darpan.reconciliation.conclusion.RunConclusionSupport
 import darpan.reconciliation.core.ReconciliationServices
 import darpan.reconciliation.source.KeepArtifacts
 import darpan.reconciliation.source.KeepStepSupport
-import darpan.reconciliation.source.SourceFilterSupport
 import darpan.reconciliation.support.ReconciliationSmokeTestSupport
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurper
@@ -46,7 +45,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue
  * The fixture is 20 synthetic returns (R001..R020) built in this class, entryDate-ordered around the window
  * [2026-11-10T08:00Z, 2026-11-11T08:00Z): R004 exactly at the start (in), R017 exactly at the end (out), two of a channel a
  * source filter excludes, and a few days before and after. The stub extractor stands in for extract#HotWaxOmsGqlReturns for
- * the refresh and for the live read, so no OMS is ever called.
+ * the refresh and for the live read, so no OMS is ever called. DAR-BE-318 (Task 18): the returns read takes no source
+ * filters, so it drops nothing and writes each return's omsReturnClass; Spark Keep sets the filtered channel aside.
  *
  * The returns carry entryDate in epoch milliseconds, as the GraphQL extract writes them (OmsGqlReturnAssembler). The
  * connector row is the seeded one (Task 2b, ruling 3b1-9): OMS_RETURNS_GQL names no windowFieldName and no
@@ -203,6 +203,7 @@ class HotWaxRollingCopyParityTests {
         }
         assertEquals([], live.errors)
         assertEquals(1, liveCalls.size(), "the paused dataset reads live, once")
+        assertFalse(liveCalls[0].params.containsKey("sourceFilters"), "DAR-BE-318 (Task 18): the returns read is sent no filters")
         assertFalse(liveCalls[0].params.containsKey("windowFieldName"), "the live call names no field: its extractor windows on entryDate")
         assertFalse(liveCalls[0].params.containsKey("keepRecordFields"), "a scheduled side keeps whole records")
         assertEquals(START, liveCalls[0].params.windowStart, "the live call is sent the window's instants")
@@ -212,16 +213,24 @@ class HotWaxRollingCopyParityTests {
         Map liveDoc = json(new File(live.result.fileLocation as String))
         assertEquals(true, servedDoc.metadata.servedFromCopy)
         assertEquals(true, liveDoc.metadata.live)
-        List<String> keptIds = servedDoc.records*.returnId
-        assertTrue(keptIds.contains("R004"), "a return exactly at the window start is in")
-        assertFalse(keptIds.contains("R017"), "a return exactly at the window end is out")
-        assertEquals(["R002", "R003"].intersect(keptIds), [], "the filtered channel is not read")
-        assertTrue(keptIds.size() >= 8, keptIds.toString())
+        List<String> readIds = servedDoc.records*.returnId
+        assertTrue(readIds.contains("R004"), "a return exactly at the window start is in")
+        assertFalse(readIds.contains("R017"), "a return exactly at the window end is out")
+        assertEquals(["R002", "R003"], ["R002", "R003"].intersect(readIds), "DAR-BE-318: the filtered channel is read, for Keep")
+        assertTrue(readIds.size() >= 8, readIds.toString())
         assertTrue(servedDoc.records.every { it.returnDate != null }, "whole records, as the scheduled live read keeps them")
         assertEquals(JsonOutput.toJson(liveDoc.records), JsonOutput.toJson(servedDoc.records))
         assertFalse(JsonOutput.toJson(servedDoc.records).contains("_copyId"), "no derived id leaks into a slice")
-        // ruling P3b1-7: the returns extract writes no excluded-records side file, and neither does its slice, so the
-        // conclude pass reads the filtered side UNKNOWN on both
+        // Spark Keep (the plan the scheduled side was read with) sets the filtered channel aside on both
+        Map sideKeep = (Map) live.sideKeep
+        assertEquals("SPARK", sideKeep?.placement, "the scheduled returns side keeps in Spark")
+        [served, live].each { Map run ->
+            Set<String> kept = KeepStepSupport.keptValues(ec, new File(run.result.fileLocation as String), sideKeep, "returnId")
+            assertEquals(["R002", "R003"].intersect(kept), [], "the filtered channel is set aside")
+            assertEquals(readIds - ["R002", "R003"], kept as List)
+        }
+        // ruling P3b1-7: no excluded-records side file (OMS_RETURNS_GQL N, so Spark writes none either), so the conclude pass
+        // reads the filtered side UNKNOWN on both, from the Keep summary's tenant rule count
         assertFalse(sidecarOf(served).exists(), "no side file, as the live returns read writes none")
         assertFalse(sidecarOf(live).exists())
         [served, live].each { Map run ->
@@ -229,7 +238,7 @@ class HotWaxRollingCopyParityTests {
                     ["R002"] as Set<String>, [] as Set<String>).unknownWhenAbsent as boolean, "a filtered side with no side file is UNKNOWN")
         }
 
-        Map servedOut = compareAndWrite(served, "served")
+        Map servedOut = compareAndWrite(served + [sideKeep: sideKeep], "served")
         Map liveOut = compareAndWrite(live, "live")
         ["diff.json", "result.json"].each { String name ->
             assertTrue(servedOut[name].length > 0, name)
@@ -520,9 +529,11 @@ class HotWaxRollingCopyParityTests {
         Map out = null
         List<String> errors = []
         try {
+            // the run loop says its compare takes keepBySide (DAR-BE-318, Task 14), so a Spark side leaves Keep to Spark
             out = AutomationExecutionSupport.callConfiguredSourceExtractor(ec, automation, source,
                     [childWindowStartDate: START, childWindowEndDate: END],
-                    [automationExecutionId: "RCP_EXEC_${seq}".toString(), sideOutputLocation: location, liveExtractor: liveExtractor(calls)])
+                    [automationExecutionId: "RCP_EXEC_${seq}".toString(), sideOutputLocation: location, liveExtractor: liveExtractor(calls),
+                     (AutomationExecutionSupport.KEEP_IN_SPARK): true])
         } catch (Exception e) {
             errors << e.toString()
         }
@@ -531,35 +542,36 @@ class HotWaxRollingCopyParityTests {
         String loc = out?.fileLocation as String
         File file = loc == null ? null : (loc.startsWith("/") ? new File(loc) : ec.resource.getLocationReference(loc).getFile())
         return [result: [fileLocation: file?.absolutePath, fileName: "oms-returns.json", requestMetadata: out?.requestMetadata],
-                errors: errors]
+                errors: errors, sideKeep: out?.get(AutomationExecutionSupport.SIDE_KEEP)]
     }
 
-    /** What a live OMS returns read answers for the window: the returns with entryDate in [start, end), the side's filters applied. */
+    /**
+     * What a live OMS returns read answers for the window: the returns with entryDate in [start, end). DAR-BE-318 (Task 18):
+     * the read takes no source filters, so it drops nothing; each fixture return carries the omsReturnClass the read writes.
+     */
     private Closure liveExtractor(List<Map> calls) {
         return { String service, Map params ->
             calls << [service: service, params: new LinkedHashMap(params)]
+            assertFalse(params.containsKey("sourceFilters"), "the returns read takes no source filters")
             Closure<Instant> at = { Object v -> v instanceof Timestamp ? ((Timestamp) v).toInstant() : Instant.parse(v as String) }
             Instant from = at(params.windowStart), to = at(params.windowEnd)
             String fileName = (params.fileName ?: "oms-returns-${from.toEpochMilli()}-${to.toEpochMilli()}.json") as String
-            List<Map> inWindow = returns().findAll { Map r ->
+            List<Map> records = returns().findAll { Map r ->
                 Instant e = Instant.ofEpochMilli(r.entryDate as long)
                 !e.isBefore(from) && e.isBefore(to)
             }
-            Map applied = SourceFilterSupport.applyToRecords(inWindow, SourceFilterSupport.parseRules(params.sourceFilters as List))
-            // as OmsReturnsSourceSupport.projectRecord: after the filters, keep the asked fields and items
+            // as OmsReturnsSourceSupport.projectRecord: keep the asked fields, items and the class
             List keepFields = params.keepRecordFields as List
             if (keepFields) {
-                Set<String> keep = (keepFields.collect { it.toString() } + ["items"]) as Set<String>
-                applied.records = ((List<Map>) applied.records).collect { Map r -> r.findAll { k, v -> (k as String) in keep } }
+                Set<String> keep = (keepFields.collect { it.toString() } + ["items", "omsReturnClass"]) as Set<String>
+                records = records.collect { Map r -> r.findAll { k, v -> (k as String) in keep } }
             }
             File dir = DataManagerSupport.resolveDirectoryFile(ec, params.outputLocation as String, true)
             new File(dir, fileName).setText(JsonOutput.toJson([metadata: [live: true, windowStart: from.toString(), windowEnd: to.toString(),
-                                                                          filters: [configuredExclusions: applied.configuredExclusions]],
-                                                               records : applied.records]), "UTF-8")
-            // as extract#HotWaxOmsGqlReturns: the excluded returns are counted, never written to a side file
-            ExcludedRecordsSidecar.discard((Map) applied.excludedCollector)
+                                                                          filters: [excludedNoShopifyRefCount: 0]],
+                                                               records : records]), "UTF-8")
             return [fileLocation: DataManagerSupport.childLocation(params.outputLocation as String, fileName), fileName: fileName,
-                    recordCount: ((List) applied.records).size()]
+                    recordCount: records.size()]
         }
     }
 
@@ -833,7 +845,7 @@ class HotWaxRollingCopyParityTests {
         Map called = underFacadeGrant("reconciliation.ReconciliationCoreServices.reconcile#RuleSetCompareScope", [
                 ruleSetId: "RCP_RS", compareScopeId: "RCP_SCOPE", file1Location: run.result.fileLocation,
                 file2Location: new File(fixtures, "ns-returns.json").absolutePath, file1Name: run.result.fileName,
-                file2Name: "ns-returns.json", sparkAppName: "HotWaxRollingCopyParityTests"])
+                file2Name: "ns-returns.json", sparkAppName: "HotWaxRollingCopyParityTests", keepBySide: [FILE_1: run.sideKeep]])
         assertEquals([], called.errors, tag)
         Map out = called.out
         try {
@@ -842,8 +854,14 @@ class HotWaxRollingCopyParityTests {
             Map written = ReconciliationServices.writeDiffDatasetOutput(ec, out.diffDf, dir.absolutePath, "diff.json", "diff.json",
                     [timestamp: "fixed", ruleSetId: out.ruleSetId, compareScopeId: out.compareScopeId],
                     [totalDifferences: out.differenceCount], (List) out.validationErrors, (List) out.processingWarnings)
-            new File(dir, "result.json").setText(JsonOutput.toJson(new TreeMap(out.findAll { k, v ->
-                !isSparkDataset(v) && k != "persistedSources" })), "UTF-8")
+            // DAR-BE-318 (Task 18): the Keep summary names the extract file it ran on, and a slice's file is named its own way
+            // (KeptCopySupport); everything else in the result is the run's
+            Map result = new TreeMap(out.findAll { k, v -> !isSparkDataset(v) && k != "persistedSources" })
+            if (result.keepSummaryBySide instanceof Map) {
+                result.keepSummaryBySide = ((Map) result.keepSummaryBySide).collectEntries { k, v ->
+                    [(k): v instanceof Map ? ((Map) v).findAll { key, x -> key != "sourceFileName" } : v] }
+            }
+            new File(dir, "result.json").setText(JsonOutput.toJson(result), "UTF-8")
             return ["diff.json": new File(written.diffLocation as String).bytes, "result.json": new File(dir, "result.json").bytes]
         } finally {
             ReconciliationServices.unpersistDatasets((List) (out?.persistedSources ?: []))
@@ -865,7 +883,7 @@ class HotWaxRollingCopyParityTests {
     private static Map ret(String id, String entryDate, String channel = "ECOM_RTN_CHANNEL") {
         return [returnId: id, statusId: "RETURN_REQUESTED", entryDate: Instant.parse(entryDate).toEpochMilli(),
                 returnDate: Instant.parse(entryDate).minusSeconds(86400).toEpochMilli(), externalId: "SHR${id.substring(1)}".toString(),
-                returnChannelEnumId: channel, currencyUomId: "USD", returnTotal: 10]
+                returnChannelEnumId: channel, currencyUomId: "USD", returnTotal: 10, omsReturnClass: "KEEP"]
     }
 
     /** 20 synthetic returns, ordered by entryDate, around the window [2026-11-10T08:00Z, 2026-11-11T08:00Z). */

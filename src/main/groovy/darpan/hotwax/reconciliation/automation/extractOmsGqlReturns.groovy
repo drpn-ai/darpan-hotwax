@@ -21,10 +21,11 @@ OmsScriptServiceSupport.runExtract(ec, context, [
                 return [errors: ["The OMS GraphQL returns extract windows on entryDate only, not '${windowField}'.".toString()],
                         warnings: [], requestMetadata: [:], recordCount: 0, dataAvailable: false]
             }
-            // DAR-BE-040 fix 3: the REST returns pipeline (filters, join-key fallback, projection, sink, metadata)
-            // fed by GraphQL pages, which still carry the returns reconciliationReturns stopped serving.
+            // DAR-BE-040 fix 3: the REST returns pipeline (join-key fallback, projection, sink, metadata) fed by GraphQL
+            // pages, which still carry the returns reconciliationReturns stopped serving. DAR-BE-318 (plan 3b-2b): no
+            // source filters; a window read writes every return with its omsReturnClass, and darpan keeps in Spark.
             OmsReturnsSourceSupport.extractReturnsToFile(a.sourceConfig, windowStart, windowEnd,
-                    a.workFile, a.keepRecordFields, a.pageProgressListener, a.sourceFilters,
+                    a.workFile, a.keepRecordFields, a.pageProgressListener,
                     [pageFetcher: OmsGqlReturnsPageSource.fetcher(new OmsGqlClient(OmsExtractSupport.toPlainMap(a.sourceConfig)),
                             [includeReturnsWithoutShopifyRef: includeReturnsWithoutShopifyRef == true,
                              onlyCancelledReturns: onlyCancelledReturns == true,

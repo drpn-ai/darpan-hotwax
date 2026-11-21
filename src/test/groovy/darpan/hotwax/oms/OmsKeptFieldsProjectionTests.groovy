@@ -24,8 +24,9 @@ class OmsKeptFieldsProjectionTests {
                 OmsKeptFieldsProjection.keptBy(ORDERS, ["orderId", "paymentPreferences"]), "raw payment rows bring their slots-full flag")
         assertNull(OmsKeptFieldsProjection.keptBy(ORDERS, ["  "]), "an order read sent only blanks keeps whole records")
         assertNull(OmsKeptFieldsProjection.keptBy(ORDERS, null))
-        assertEquals(["returnId", "items"] as Set, OmsKeptFieldsProjection.keptBy(RETURNS, ["returnId"]))
-        assertEquals(["items"] as Set, OmsKeptFieldsProjection.keptBy(RETURNS, ["  "]), "a returns read projects on any list it is sent")
+        // DAR-BE-318 (Task 18): and a returns window read writes omsReturnClass, so every returns projection keeps it
+        assertEquals(["returnId", "items", "omsReturnClass"], OmsKeptFieldsProjection.keptBy(RETURNS, ["returnId"]) as List)
+        assertEquals(["items", "omsReturnClass"] as Set, OmsKeptFieldsProjection.keptBy(RETURNS, ["  "]), "a returns read projects on any list it is sent")
         assertNull(OmsKeptFieldsProjection.keptBy(RETURNS, []))
         Map record = [statusId: "A", orderId: "O1", other: 1]
         assertEquals([statusId: "A", orderId: "O1"], OmsKeptFieldsProjection.project(record, ["orderId", "statusId"] as Set))
@@ -46,6 +47,20 @@ class OmsKeptFieldsProjectionTests {
         assertNull(problem([keptFields: null, heldFields: BASE], side + [keepFields: null]), "a whole copy whose records lack it")
         Map lacking = problem([keptFields: BASE], side + [filterFields: ["isExchangeOrder", "productStoreId"]])
         assertEquals(["productStoreId"] as Set, lacking.missing, "only fields a read asks for are missing")
+    }
+
+    /**
+     * DAR-BE-318 (Task 18): the same for a returns side's omsReturnClass. A copy read before it existed holds no cancelled or
+     * no-reference return, so its records, lacking the class, are all kept by the Keep lines that read it.
+     */
+    @Test
+    void theReturnClassIsNeverAskedOfACopy() {
+        Map side = [keepFields: ["returnId", "omsReturnClass"], filterFields: ["omsReturnClass"], readFields: [], windowField: "entryDate"]
+        assertNull(OmsKeptFieldsProjection.servingProblem(RETURNS, [keptFields: ["returnId", "entryDate"]], side), "a projected copy")
+        assertNull(OmsKeptFieldsProjection.servingProblem(RETURNS, [keptFields: null, heldFields: null], side), "a whole copy")
+        Map lacking = OmsKeptFieldsProjection.servingProblem(RETURNS, [keptFields: ["returnId", "entryDate"]],
+                side + [filterFields: ["omsReturnClass", "orderProductStoreId"]])
+        assertEquals(["orderProductStoreId"] as Set, lacking.missing, "only fields a read asks for are missing")
     }
 
     @Test
