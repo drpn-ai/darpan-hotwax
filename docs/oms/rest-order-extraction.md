@@ -66,9 +66,9 @@ The extractor paginates order reads before writing the normalized source file. I
 
 Requests advertise `Accept-Encoding: gzip` and decode compressed responses, which multiplies effective throughput on long-haul connections (the OMS itself needs no change — this is standard HTTP content negotiation). Once the pagination strategy is committed, remaining pages are fetched through a small concurrent window (two pages in flight; the code would honour an `ordersFetchConcurrency` key capped at 4, but it is not a config column, so the window is always 2) while output is written strictly in page order. Worker threads hand back pre-filtered, pre-serialized page text rather than parsed record graphs, so the window costs roughly one serialized page of memory per slot — sized for resource-constrained production hosts. A stop condition (empty/repeated/shorter page) may leave up to window-minus-one speculative page requests already issued; their responses are discarded.
 
-When the caller passes `keepRecordFields` (the SourceSystemConnector registry declares the parameter and base field set; dispatch adds the rule set's join-key fields), each order is projected down to those top-level fields after the reconciliation filter and before writing. Full ~14 KB order documents become a few hundred bytes each — a 99k-order window writes tens of MB instead of ~1.4 GB, which also keeps the Spark compare read (unsplittable multiLine JSON) inside constrained heaps. Projection is skipped automatically for rule sets that define field-comparison rules until rule-field extraction is wired into the keep-list.
+When the caller passes `keepRecordFields` (the SourceSystemConnector registry declares the parameter and base field set; dispatch adds the rule set's join-key fields), each order is projected down to those top-level fields before writing. Full ~14 KB order documents become a few hundred bytes each — a 99k-order window writes tens of MB instead of ~1.4 GB, which also keeps the Spark compare read (unsplittable multiLine JSON) inside constrained heaps. Projection is skipped automatically for rule sets that define field-comparison rules until rule-field extraction is wired into the keep-list.
 
-Each fetched page is filtered and appended to the output file on disk before the next page is requested; the extractor never holds more than roughly one page of orders in memory, so month-scale windows do not scale heap usage. The extractor keeps only HotWax orders with `orderTypeId` equal to `SALES_ORDER` and excludes orders that contain an order item association with `orderItemAssocTypeId` equal to `EXCHANGE`. Non-sales orders and exchange orders are not written to the normalized source file and are therefore not compared against Shopify orders. Output metadata includes `filters.excludedNonSalesOrderCount` and `filters.excludedExchangeOrderCount` so the run can distinguish fetched HotWax records from comparison-eligible records. Excluded exchange orders are additionally captured into a sidecar `<extract-name>.exchange-manifest.json` file (`{manifest, truncated, sourceFileName}`, entries are ids/amounts only — `omsOrderId`, `externalId`, `orderName`, `toOrderId`, `grandTotal`, `orderDate`, `statusId` — capped at 500 entries), which the exchange pair verify stage consumes to check exchange orders against their linked original order rather than silently dropping them. `filters.exchangeManifestTruncated` marks windows where the cap was hit.
+Each fetched page is appended to the output file on disk before the next page is requested; the extractor never holds more than roughly one page of orders in memory, so month-scale windows do not scale heap usage. The extractor keeps only HotWax orders with `orderTypeId` equal to `SALES_ORDER`. An order that contains an order item association with `orderItemAssocTypeId` equal to `EXCHANGE` is written flagged `isExchangeOrder` Y on a window read, and Spark Keep sets it aside (DAR-BE-318), so it is not compared against Shopify orders; a read by key leaves it out itself. Non-sales orders are not written. Output metadata includes `filters.excludedNonSalesOrderCount` and `filters.excludedExchangeOrderCount` so the run can distinguish fetched HotWax records from comparison-eligible records. Exchange orders are additionally captured into a sidecar `<extract-name>.exchange-manifest.json` file (`{manifest, truncated, sourceFileName}`, entries are ids/amounts only — `omsOrderId`, `externalId`, `orderName`, `toOrderId`, `grandTotal`, `orderDate`, `statusId` — capped at 500 entries), which the exchange pair verify stage consumes to check exchange orders against their linked original order rather than silently dropping them. `filters.exchangeManifestTruncated` marks windows where the cap was hit.
 
 ### Reconciliation Orders endpoint (opt-in)
 
@@ -125,45 +125,34 @@ knowledge of tenant exclusion rules.
 
 ### Configurable record exclusion
 
-Beyond the two built-in filters above, a rule set can configure its own per-field exclusion rules on either source's extraction. Rules use the operator `EXCLUDE_IN` (drop records whose value is listed) or `INCLUDE_IN` (keep only records whose value is listed; a record with no value for the field is dropped and counted separately as field-absent). These are ordinary tenant-configured rules — a field to test and a set of values that disqualify a record — layered on top of the built-in `SALES_ORDER`/`EXCHANGE` filtering rather than replacing it.
+Tenant exclusion rules are not applied by the extract (DAR-BE-318). `extract#HotWaxOmsOrders` takes no `sourceFilters`
+parameter: it writes every sales order, each flagged `isExchangeOrder` `Y` or `N`, and darpan's Spark Keep (component
+`darpan`, `KeepPlanSupport`) sets aside the exchange orders (the `OMS_GQL` row's `keepLinesJson`) and what the run's rules
+reject, counts them in its Keep summary and writes the excluded-records sidecar. The rule semantics (case-sensitive field
+names against top-level keys, case-insensitive values, `EXCLUDE_IN` keeping a record that lacks the field, `INCLUDE_IN`
+dropping it as field-absent) live in darpan core, not here.
 
-`extract#HotWaxOmsOrders` accepts an optional `sourceFilters` parameter: a list of rule Maps, each with `sequenceNum` (Integer), `fieldExpression`, `operator`, and `filterValues` (comma-separated). The parsing and matching semantics live in the connector-agnostic `darpan.reconciliation.source.SourceFilterSupport` (component `darpan`), which `OmsRestSourceSupport` calls into so configured and built-in exclusions behave identically:
+**The read still decides two things itself.** A non-`SALES_ORDER` order is never written (`excludedNonSalesOrderCount`), and
+a read by key leaves exchange orders out itself (`excludedExchangeOrderCount`, captured into the exchange manifest).
 
-- **Field names** are trimmed and matched **case-sensitively** against each record's top-level keys.
-- **Values** are trimmed and matched **case-insensitively** against the field's value.
-- Under `EXCLUDE_IN`, a record that **lacks the configured field is kept** — an exclusion rule can only remove a record for carrying a matching value, never for missing one. Under `INCLUDE_IN` the same record is dropped.
+**Projection keeps the Keep fields.** `keepRecordFields` trims each order after the page is read, and a run joins the
+fields its Keep rules read to that list, so a rule can target a field such as `salesChannelEnumId` or `productStoreId`
+even though it is not part of the connector's declared keep-field set. The `EXCHANGE`-association scan needs the full order
+document, so it runs before the trim.
 
-`SourceFilterSupport.parseRules` validates and normalizes the raw rule list once, before extraction starts (`extractOrdersInternal`, `OmsRestSourceSupport.groovy`), ahead of building request headers or issuing any HTTP call. A malformed rule (no field, no values, an unsupported operator, or more than `MAX_RULES_PER_SOURCE`/`MAX_VALUES_PER_RULE`) is recorded as a pre-flight error and the extraction returns immediately with no request ever sent — never a failure discovered mid-window on some later page.
+**Which fields the rules board offers.** The exclusion editor has no free-text field entry: a field is excludable only if it
+has a `SourceSystemConnectorField` row for the connector's `systemEnumId`. A pill naming a field the order document does not
+carry would persist a rule that matches nothing, so every entry must name a real top-level key on the OMS order document.
+Nested paths do not work either: only the first segment after `[*]` is read.
 
-**Rejection order matters.** `filterComparableOrderRecords` evaluates each record against exactly three rejection branches, in this fixed order:
+**Metadata.** The read's `requestMetadata.filters` carries only its own counts (`excludedNonSalesOrderCount`,
+`excludedExchangeOrderCount`, `flaggedExchangeOrderCount`, `exchangeManifestTruncated`). There is no `configuredExclusions`
+there; darpan's Keep summary carries the per-rule counts, and reads the side as not filtered at the read.
 
-1. Not `orderTypeId == SALES_ORDER` → counted in `excludedNonSalesOrderCount`.
-2. Carries an `EXCHANGE` order-item association → counted in `excludedExchangeOrderCount` (and captured into the exchange manifest).
-3. Matches a configured exclusion rule → counted per-rule.
+**Lookups apply no exclusion.** `lookup#HotWaxOmsOrdersByExternalId` resolves specific orders by ID and applies no tenant
+rule, so a `STAGE_VERIFY` point lookup can surface an order a run's Keep set aside.
 
-The two built-in branches are checked first, and a record is attributed to exactly one bucket — the first branch it matches. This means a record that would be caught by both a built-in filter and a configured rule is counted only in the built-in bucket, and `excludedNonSalesOrderCount`/`excludedExchangeOrderCount` never shift when a tenant adds or changes a configured exclusion.
-
-**Filtering runs before projection.** A page is filtered (`filterComparableOrderRecords`) before the `keepRecordFields` projection trims it (`prepareOrdersPage`), because the `EXCHANGE`-association scan needs the full order document. A practical consequence: a configured exclusion can target a field such as `salesChannelEnumId` or `productStoreId` even though neither is part of the connector's declared keep-field set — filtering sees the untrimmed record regardless of what the eventual output projection keeps.
-
-**Which fields the rules board offers.** The exclusion editor has no free-text field entry: a field is excludable only if it has a `SourceSystemConnectorField` row for the connector's `systemEnumId` (seed: `darpan/data/SourceSystemConnectorSeedDataFields.xml`, read by `AutomationFacadeSupport.fieldOptionsForSystem`). For `OMS` that is the `keepFieldsBase` fields plus the two exclusion-only fields above (`salesChannelEnumId`, `productStoreId`). Because a record that *lacks* the configured field is kept, a pill naming a field the order document does not actually carry would persist a rule that matches nothing, excludes nothing, and reports no error — so every entry must name a real top-level key on the OMS order document (`org.apache.ofbiz.order.order.OrderHeader`). Nested paths do not work either: `SourceFilterSupport` reduces a stored expression via `CompareIdExpressionSupport.topLevelRecordField`, which keeps only the first segment after `[*]`.
-
-Matched exclusions are reported in `requestMetadata.filters.configuredExclusions`, one entry per configured rule:
-
-```json
-{
-  "sequenceNum": 1,
-  "fieldExpression": "salesChannelEnumId",
-  "operator": "EXCLUDE_IN",
-  "values": ["POS_SALES_CHANNEL"],
-  "excludedCount": 0
-}
-```
-
-Every configured rule appears here, including a rule that matched nothing in the window — `excludedCount` is simply `0` in that case, rather than the rule disappearing from the metadata (a missing entry would read as "not applied"). Conversely, `configuredExclusions` is **absent entirely**, not an empty list, when the source has no configured exclusion rules — `sourceFilters` empty/omitted means fully backward-compatible metadata.
-
-**Exclusions apply to the window extract only, not to pair lookups.** `lookup#HotWaxOmsOrdersByExternalId` (`lookupOrdersByExternalId`) resolves specific orders by ID and applies no exclusion rules — neither the built-in `SALES_ORDER`/`EXCHANGE` filters nor configured `sourceFilters`. A `STAGE_VERIFY` point lookup can therefore surface an order the window extract deliberately dropped. This is pre-existing behavior shared with the built-in filters, not something configured exclusions introduced.
-
-Excluded counts — both the built-in `excludedNonSalesOrderCount`/`excludedExchangeOrderCount` and the per-rule `configuredExclusions[].excludedCount` — are diagnostic run metadata only. They are deliberately **not surfaced in the UI**; the rules board and rule set manager display the configured field/values themselves (what will be excluded), never how many records a run actually excluded.
+Counts are diagnostic run metadata only and are not shown in the UI.
 
 The extractor streams into a `.partial` work file in the run folder and moves it to its final name only after the whole window succeeds, so a mid-window failure never leaves a partial extract where reconciliation could read it.
 

@@ -326,7 +326,8 @@ class OmsReturnsKeepParityTests {
     /** The OMS_RETURNS_GQL row as a run reads it: core's filter parameter, this component's declarations. */
     private static Map connector() {
         return [systemEnumId: "OMS_RETURNS_GQL", filterParameterName: "sourceFilters",
-                excludedRecordsSidecar: seedRow("OMS_RETURNS_GQL").@excludedRecordsSidecar.toString()]
+                excludedRecordsSidecar: seedRow("OMS_RETURNS_GQL").@excludedRecordsSidecar.toString(),
+                keepLinesJson: seedRow("OMS_RETURNS_GQL").@keepLinesJson.toString()]
     }
 
     private static def seedRow(String systemEnumId) {

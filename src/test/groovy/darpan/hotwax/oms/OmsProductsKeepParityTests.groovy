@@ -217,7 +217,8 @@ class OmsProductsKeepParityTests {
     /** The OMS_PRODUCTS_GQL row as a run reads it: core's filter parameter, this component's declarations. */
     private static Map connector() {
         return [systemEnumId: "OMS_PRODUCTS_GQL", filterParameterName: "sourceFilters",
-                excludedRecordsSidecar: seedRow().@excludedRecordsSidecar.toString()]
+                excludedRecordsSidecar: seedRow().@excludedRecordsSidecar.toString(),
+                keepLinesJson: seedRow().@keepLinesJson.toString()]
     }
 
     private static def seedRow() {

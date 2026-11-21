@@ -111,64 +111,28 @@ projection naming only header fields cannot strip line data.
 
 ### Configurable record exclusion
 
-There is no built-in `SALES_ORDER`/`EXCHANGE`-style client-side filter for returns. The endpoint
-excludes returns with no Shopify reference **server-side** (`excludedNoShopifyRefCount`).
-Everything Darpan configures on top is a **client-side** per-field rule, run through the same
-connector-agnostic `darpan.reconciliation.source.SourceFilterSupport` (component `darpan`) that
-orders use. The expected rule excludes returns whose `returnChannelEnumId` never has a Shopify
-counterpart.
+There is no built-in `SALES_ORDER`/`EXCHANGE`-style filter for returns, and the read applies no tenant rule (DAR-BE-318).
+The extract takes no `sourceFilters`: it writes every return, and on a window read stamps each with `omsReturnClass`
+(KEEP, CANCELLED or NO_SHOPIFY_REF). Darpan's Spark Keep (component `darpan`) sets the CANCELLED and NO_SHOPIFY_REF
+returns aside through the `OMS_RETURNS_GQL` row's `keepLinesJson`, applies the tenant's per-field rules on top, counts
+them in its Keep summary and writes the excluded-records sidecar. The expected rule sets aside returns whose
+`returnChannelEnumId` never has a Shopify counterpart.
 
-Semantics match the orders contract:
+Rule semantics match the orders contract and live in darpan core: field names are matched case-sensitively against
+top-level keys, values case-insensitively; `EXCLUDE_IN` keeps a record that lacks the field, `INCLUDE_IN` drops it and
+counts it as field-absent.
 
-- Field names are matched case-sensitively against top-level keys; values case-insensitively.
-- `EXCLUDE_IN` keeps a record that lacks the field. `INCLUDE_IN` drops it and counts it as
-  field-absent.
-- `SourceFilterSupport.parseRules` runs before any HTTP call; a malformed rule fails pre-flight
-  with no request sent.
-
-**Which fields are offered.** The rules-board pills for `OMS_RETURNS` are its
-`SourceSystemConnectorField` rows (`darpan/data/SourceSystemConnectorSeedDataFields.xml`):
-`returnId`, `shopifyReturnId`, `externalId`, `orderExternalId`, `statusId`, `entryDate`,
-`returnTotal`, `currencyUomId`, `returnChannelEnumId`. `returnChannelEnumId` is offered because
-the endpoint's server-side projection includes it, so a rule drawn on it sees a value. `items[]`
-is not offered: it is a nested array, and `SourceFilterSupport` matches only top-level keys.
-
-The `OMS_RETURNS` connector row declares `filterParameterName="sourceFilters"` — **required**,
-because exclusion dispatch keys on this attribute; without it the rules board hides the
-exclusion control.
+**Which fields are offered.** The rules-board pills are the connector's `SourceSystemConnectorField` rows
+(`darpan/data/SourceSystemConnectorSeedDataFields.xml`): `returnId`, `shopifyReturnId`, `externalId`, `orderExternalId`,
+`statusId`, `entryDate`, `returnTotal`, `currencyUomId`, `returnChannelEnumId`. `items[]` is not offered: it is a nested
+array, and rules match only top-level keys.
 
 ### Count semantics
 
-`excludedNoShopifyRefCount` is server-side — those returns never reach Darpan's filter chain.
-Configured exclusions are client-side and run only on the population that survives the server
-filter, so the two counts cannot overlap.
+`excludedNoShopifyRefCount` and `excludedCancelledCount` are the read's own counts of the returns it flagged; Spark Keep
+sets those returns aside, so they are never in the tenant rules' counts. The read's metadata carries no
+`configuredExclusions`; darpan's Keep summary does.
 
-```json
-{
-  "records": [],
-  "metadata": {
-    "filters": {
-      "excludedNoShopifyRefCount": 4,
-      "serverReportedReturnsCount": 7,
-      "configuredExclusions": [
-        {
-          "sequenceNum": 1,
-          "fieldExpression": "returnChannelEnumId",
-          "operator": "EXCLUDE_IN",
-          "values": ["POS_RETURN_CHANNEL"],
-          "excludedCount": 1,
-          "fieldAbsentCount": 0
-        }
-      ]
-    }
-  }
-}
-```
-
-(`OmsReturnsSourceSupport.buildMetadata`.)
-
-- Every configured rule appears, including one that matched nothing (`excludedCount: 0`).
-- `configuredExclusions` is absent entirely, not `[]`, when no rules are configured.
 - `excludedCancelledCount` and `transport` appear only on the GraphQL transport.
 - All counts are diagnostic run metadata only and are not shown in the UI.
 

@@ -875,7 +875,7 @@ class OmsExtractSupport {
      * Request-metadata filter block. excludedExchangeOrderCount is every exchange order the read found and listed on the
      * manifest: left out here on a read by key, or written flagged isExchangeOrder = Y for Keep to set aside
      * (flaggedExchangeOrderCount). No configuredExclusions: the read applies no tenant filter, so darpan reads the side as
-     * not filtered at the read (KeepArtifacts.filteredAtRead) and its Keep summary is what counts.
+     * not filtered at the read (KeepPlanSupport.landedFilteredAtRead) and its Keep summary is what counts.
      */
     protected static Map<String, Object> buildFilterMetadata(int excludedNonSalesOrderCount,
                                                              int excludedExchangeOrderCount,

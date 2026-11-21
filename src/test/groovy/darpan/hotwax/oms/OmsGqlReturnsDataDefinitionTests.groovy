@@ -172,8 +172,9 @@ class OmsGqlReturnsDataDefinitionTests {
      * lines name (each unless the side's options turn its line off) and what the tenant's rules drop. That Keep is stated
      * here as front-end A states it (SourceFilterSupport, whose parity with Spark darpan's KeepColumnParityTests pins;
      * OmsReturnsKeepParityTests runs the declared lines and the rules in Spark), so the data-defined read, which still
-     * filters at its read (Ruling 3b2b-16), is compared with what a coded run keeps. A read by key writes no class and is
-     * compared as it reads. The Keep fields join a projection as a run joins them, and leave with Keep.
+     * filters at its read (Ruling 3b2b-16), is compared with what a coded run keeps. A read by returnId writes the class of each
+     * return it keeps too (the replacement-order lookup writes none); the class is stripped here before the compare, so a
+     * keyed read compares as it reads. The Keep fields join a projection as a run joins them, and leave with Keep.
      */
     static Map coded(Map options = [:], List keep = null, List rawFilters = null) {
         File out = File.createTempFile("coded-returns-", ".json")

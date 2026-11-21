@@ -63,7 +63,7 @@ class OmsGqlOrderPageSource {
 
         // DAR-BE-116: ORDER_LINE_UNIT grain (the order-items extract) reads the order header and its ship groups,
         // then the items in batches, and hands the unit flattener the assembled
-        // order shape. Filters there are on UNIT fields, checked against what a unit carries.
+        // order shape. The side's Keep rules there are on UNIT fields, checked against what a unit carries.
         boolean unitGrain = "ORDER_LINE_UNIT".equalsIgnoreCase((extractOptions.emitGrain as String)?.trim() ?: "")
         Object exclusionFlag = extractOptions.applyExchangeExclusion
         boolean exchangePass = !(exclusionFlag == false || (exclusionFlag as String)?.trim()?.toLowerCase() in ["false", "n"])
@@ -75,7 +75,7 @@ class OmsGqlOrderPageSource {
             if (unitGrain) {
                 List<String> unknown = unitKeepFieldsNotCarried((Collection<String>) ctx.keepRuleFields)
                 if (unknown) {
-                    return failed("The OMS GraphQL order-items extract cannot filter on ${unknown}: its units do not carry " +
+                    return failed("The OMS GraphQL order-items extract cannot keep on ${unknown}: its units do not carry " +
                             "them (the shared orders read selects neither salesChannelEnumId nor netsuiteOrderId, to keep the page " +
                             "lean).")
                 }

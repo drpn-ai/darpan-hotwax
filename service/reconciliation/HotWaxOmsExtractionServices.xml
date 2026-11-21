@@ -180,8 +180,8 @@
                 <parameter name="fieldName"/>
                 <description>Optional projection of top-level record fields. items[] is always retained
                     regardless of this list, because the nested-line contract (RQ-21) does not survive a
-                    projection that names only header fields; so is omsReturnClass, which a window read writes
-                    (DAR-BE-318). A run joins the fields its Keep reads to this list (Ruling 3b2b-4).</description>
+                    projection that names only header fields; so is omsReturnClass, which a window read and a read by
+                    returnId write (DAR-BE-318). A run joins the fields its Keep reads to this list (Ruling 3b2b-4).</description>
             </parameter>
             <parameter name="reconciliationRunResultId">
                 <description>Optional observability run id for progress heartbeats. Advisory only.</description>

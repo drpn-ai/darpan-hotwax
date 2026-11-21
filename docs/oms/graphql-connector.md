@@ -30,7 +30,7 @@ REST-to-GraphQL migration).
 | Filter returns by the store of the order they came from | `OMS_RETURNS_GQL`. `orderProductStoreId` exists on the GraphQL record only. |
 | Order presence with payment-preference fields (`hasPaymentPreference`, `paymentMethodTypeIds`) | `OMS_GQL`. REST `/oms/orders` carries no payment preferences. |
 | Order extract by status only (no date window), `orderStatusIds`, or a window field other than `orderDate` | REST `OMS`. The GraphQL order extract refuses these. |
-| Filter or project on an order field the GraphQL document does not carry (for example `salesChannelEnumId`) | REST `OMS`. The GraphQL extract refuses the run rather than silently not filtering. |
+| Keep-rule or project on an order field the GraphQL document does not carry (for example `salesChannelEnumId`) | REST `OMS`. The GraphQL extract refuses the run rather than silently not setting anything aside. |
 | An OMS without the GraphQL upgrade | REST. On such an OMS the GraphQL extracts fail; they never return an empty file. |
 | Speed | REST. GraphQL is throttle-bound: a 6-hour gorjana returns window took 258 s over GraphQL against 17 s over REST (2026-10-03). |
 
@@ -116,9 +116,11 @@ Three pieces keep the extract honest:
 Edge: `reconciliation/automation/extractOmsGqlOrders.groovy`. Page source:
 `OmsGqlOrderPageSource`. Document builder: `OmsGqlQueries.orderGrainPagePlan`.
 
-The REST order pipeline runs unchanged; only the pages come from GraphQL. Exclusions, configured
-filters, projection, the work file, the exchange manifest and the excluded-records sidecar are the
-REST code (`OmsRestSourceSupport.extractOrdersToFile` with a GraphQL page fetcher).
+The REST order pipeline runs unchanged; only the pages come from GraphQL. Projection, the work file
+and the exchange manifest are the REST code (`OmsRestSourceSupport.extractOrdersToFile` with a GraphQL
+page fetcher). The read applies no tenant filter (DAR-BE-318): it writes every sales order flagged
+`isExchangeOrder` Y or N, and darpan's Spark Keep sets aside the exchange orders (the `OMS_GQL` row's
+`keepLinesJson`) and what the run's rules reject, then writes the excluded-records sidecar.
 
 Per page:
 
@@ -139,9 +141,9 @@ Optional nested: `identifications`, `shipGroups`. Derived: `hasPaymentPreference
 `paymentMethodTypeIds` (sorted, comma-joined), `paymentPreferenceSlotsFull` (true when both slots
 were used, so there may be more preferences than were read).
 
-The document selects only what the run needs: the projection plus every source-filter field. A
-projection or filter naming a field outside the lists above fails the extract before any request,
-because a filter on a field the document never selected would exclude nothing.
+The document selects only what the run needs: the projection plus every field the side's Keep rules
+read. A projection or Keep field naming a field outside the lists above fails the extract before any
+request, because a rule on a field the document never selected would set nothing aside.
 
 **Refused inputs** (the run fails with a message saying to stay on REST): no date window,
 `orderStatusIds`, or a `windowFieldName` other than `orderDate`.
@@ -162,17 +164,20 @@ Edge: `reconciliation/automation/extractOmsGqlReturns.groovy`. Page source:
 `OmsGqlReturnsPageSource`. Record builder: `OmsGqlReturnAssembler`.
 
 It feeds the REST returns pipeline (`OmsReturnsSourceSupport.extractReturnsToFile` with a GraphQL
-page fetcher): configured filters, the `shopifyReturnId` join-key fallback, projection and the
+page fetcher): the `shopifyReturnId` join-key fallback, projection and the
 file writer are shared with REST. The output file name defaults to the REST name,
 `oms-returns-{fromMillis}-{thruMillis}.json`.
 
 Per page of 25 returns, windowed `entryDate:>=<from> entryDate:<<thru>` (half-open):
 
-1. `OmsGqlReturnAssembler.classify` applies the exclusions REST applies server-side:
-   - `RETURN_CANCELLED` -> excluded, counted in `excludedCancelledCount`. REST never served a
-     cancelled return, and the Shopify side suppresses closed unrefunded returns (DAR-BE-027).
-   - no `externalId` and no Shopify return identification -> excluded, counted in
+1. `OmsGqlReturnAssembler.classify` sorts each return, and none is dropped (DAR-BE-318):
+   - `RETURN_CANCELLED` -> `omsReturnClass` CANCELLED, counted in `excludedCancelledCount`. REST never
+     served a cancelled return, and the Shopify side suppresses closed unrefunded returns (DAR-BE-027).
+   - no `externalId` and no Shopify return identification -> `NO_SHOPIFY_REF`, counted in
      `excludedNoShopifyRefCount`.
+   - anything else -> KEEP.
+   Spark Keep sets the CANCELLED and NO_SHOPIFY_REF returns aside through the `OMS_RETURNS_GQL` row's
+   `keepLinesJson`, unless the side's options turn a line off.
 2. For the kept returns only, flat id-keyed lookups: `returnItems` by return id; `orders`
    (`externalId`, `productStoreId`) and `orderItems` (`externalId`) by origin order id; `products`
    (`internalName`, which is REST's `sku`) by product id.
@@ -194,9 +199,9 @@ Metadata adds `excludedCancelledCount` and `transport: "GRAPHQL"`; neither appea
 
 `Return.productStoreId` is not populated on the OMS, so a return's store is taken from its origin
 order (the order `orderExternalId` names). The REST returns record has no order id to reach it, so
-this field exists on `OMS_RETURNS_GQL` only. It is a filter field, not a compare field: it is not in
-`keepFieldsBase`, filters run before projection, so an include/exclude rule can use it and the
-compared record stays identical to REST's. It is absent on a return with no items, so an
+this field exists on `OMS_RETURNS_GQL` only. It is a Keep-rule field, not a compare field: it is not in
+`keepFieldsBase`, and the read selects it for the side's Keep rules, so an include/exclude rule can
+use it and the compared record stays identical to REST's. It is absent on a return with no items, so an
 `INCLUDE_IN` rule on it drops those returns.
 
 Pills: the nine `OMS_RETURNS` pills plus "Store" (`orderProductStoreId`). The registry row matches
