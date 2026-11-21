@@ -228,6 +228,29 @@ class OmsReturnsKeepParityTests {
         assertFalse(afterKeep([:], exact, false).setAsideBy.containsKey("R10"), "filled before Keep: kept")
     }
 
+    /**
+     * Fix round 1 (as Task 17's I1): a side read by the other side's keys (a read by returnId) still runs Keep, and
+     * omsReturnClass is a selectable field. The keyed read writes the class of every return it keeps, so a tenant rule on it
+     * sets nothing aside for want of the field.
+     */
+    @Test
+    void aKeyedSideWithAClassRuleSetsNothingAsideAsFieldAbsent() {
+        List<Map<String, Object>> onClass = rows([[sequenceNum: 1, fieldExpression: '$.records[*].omsReturnClass', operator: "INCLUDE_IN",
+                                                   filterValues: "KEEP"]])
+        Map sideKeep = KeepPlanSupport.effectiveSideKeep(ec, onClass, connector(), [:], returnsServiceDefinition(), "records",
+                ['$.records[*].returnId'], true)
+        File file = new File(dir, "oms-returns-keyed.json")
+        Map result = OmsReturnsSourceSupport.extractReturnsToFile(CONFIG, FROM, THRU, file, null, null,
+                [pageFetcher: OmsGqlReturnsPageSource.fetcher(client(false), [lookupKeys: RETURNS*.returnId, lookupKeyField: "returnId"])])
+        assertEquals([], result.errors)
+
+        Set<String> kept = KeepStepSupport.keptValues(ec, file, sideKeep, "returnId")
+        assertEquals(["R01", "R02", "R03", "R09", "R10", "R11"], kept as List, "the keyed read's own scope, all kept")
+        Map rule = (KeepArtifacts.readSummary(file).configuredExclusions as List<Map>)[0]
+        assertEquals([0, 0], [rule.excludedCount, rule.fieldAbsentCount], "nothing set aside, none for want of the class")
+        assertEquals(0, KeepArtifacts.readSummary(file).setAsideCount as int)
+    }
+
     // ------------------------------------------------------------------------------------------------------------ parity
 
     /** BEFORE and AFTER for one option and rule set, asserted equal on every point; returns AFTER's answers. */

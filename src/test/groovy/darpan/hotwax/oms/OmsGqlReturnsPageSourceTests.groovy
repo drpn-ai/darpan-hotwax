@@ -192,7 +192,8 @@ class OmsGqlReturnsPageSourceTests {
 
     /**
      * Ruling 3b2b-12: a read by key is not Keep's business. By returnId it leaves out the cancelled and no-reference returns
-     * as before (onlyCancelledReturns: only the cancelled ones); by replacement it keeps a return with no reference. No class.
+     * as before (onlyCancelledReturns: only the cancelled ones), and writes the class of each return it keeps (fix round 1:
+     * a side read by the other side's keys still runs Keep, so a tenant rule on the class finds it).
      */
     @Test
     void aKeyedReadAnswersAsToday() {
@@ -202,16 +203,14 @@ class OmsGqlReturnsPageSourceTests {
                 pageConsumer: { List<Map> records -> pages.add(records) }])
         assertEquals([], result.errors)
         List<Map> byKey = pages.flatten() as List<Map>
-        assertEquals(["M0001", "M0005"], byKey*.returnId)
-        assertTrue(byKey.every { !it.containsKey("omsReturnClass") }, "a keyed read writes no class")
+        assertEquals([["M0001", "KEEP"], ["M0005", "KEEP"]], byKey.collect { [it.returnId, it.omsReturnClass] }, "the class of what it keeps")
         assertEquals([returnsCount: 5, excludedNoShopifyRefCount: 1, excludedCancelledCount: 2], result.serverCounts)
 
         pages.clear()
         Map cancelled = OmsGqlReturnsPageSource.fetchAll(client(h), [config: CONFIG, lookupKeys: ["M0002", "M0004", "M0001"],
                 onlyCancelledReturns: true, pageConsumer: { List<Map> records -> pages.add(records) }])
         assertEquals([], cancelled.errors)
-        assertEquals(["M0002", "M0004"], (pages.flatten() as List<Map>)*.returnId)
-        assertTrue((pages.flatten() as List<Map>).every { !it.containsKey("omsReturnClass") })
+        assertEquals([["M0002", "CANCELLED"], ["M0004", "CANCELLED"]], (pages.flatten() as List<Map>).collect { [it.returnId, it.omsReturnClass] })
         assertTrue((requests.findAll { it.root == "returns" }.last().variables.q as String).startsWith("statusId:RETURN_CANCELLED returnId:"))
     }
 
@@ -342,6 +341,7 @@ class OmsGqlReturnsPageSourceTests {
         assertEquals([], result.errors)
         List<Map> records = (pages.flatten() as List<Map>).sort { it.returnId }
         assertEquals([["R1", "M2"], ["R8", "W1"]], records.collect { [it.returnId, it.replacementOrderId] })
+        assertTrue(records.every { !it.containsKey("omsReturnClass") }, "DAR-BE-318: the brain's replacement lookup writes no class")
         assertEquals([60, 60], records*.returnCredit.collect { it as int })
         assertEquals(["EXC-#GOR7", "#GOR7"], OmsGqlReturnsPageSource.originalNames("EXC-#GOR7-2"))
         assertEquals(["WTY-#GOR196813520-1", "#GOR196813520-1"], OmsGqlReturnsPageSource.originalNames("WTY-#GOR196813520-1-1"))

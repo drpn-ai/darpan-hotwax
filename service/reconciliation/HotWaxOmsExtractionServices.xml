@@ -222,8 +222,8 @@
             over its file. A window read writes every return, each with omsReturnClass: CANCELLED (RETURN_CANCELLED, which
             the Shopify side suppresses, DAR-BE-027), NO_SHOPIFY_REF (no Shopify reference) or KEEP; the OMS_RETURNS_GQL
             row's keepLinesJson sets the first two aside as the read used to leave them out, and the read still counts them
-            (excludedCancelledCount, excludedNoShopifyRefCount). A read by key leaves them out itself and writes no class,
-            as before. Needs the OMS GraphQL upgrade (gorjana 2026-09-30); on an OMS without it the extract FAILS rather
+            (excludedCancelledCount, excludedNoShopifyRefCount). A read by returnId leaves them out itself, as before, and
+            writes the class of each return it keeps; the read by replacement order (a conclusion lookup) writes none. Needs the OMS GraphQL upgrade (gorjana 2026-09-30); on an OMS without it the extract FAILS rather
             than returning an empty file.</description>
         <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsReturnsContract"/>
         <in-parameters>
