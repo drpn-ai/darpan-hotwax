@@ -260,7 +260,9 @@ class OmsReturnsSourceSupport {
                 found.addAll(echoed)
             } catch (Exception e) {
                 // An error the OMS ANSWERED is the answer to the document every chunk sends, so the rest of
-                // this pass is not sent (as in the identifications pass); a transport failure is per chunk.
+                // this pass is not sent (as in the identifications pass). The client retries a transport failure
+                // and throws TRANSIENT once out of retries (DAR-BE-142), which also stops the pass; only an
+                // exception from outside the client is per chunk.
                 List<String> skipped = (e instanceof OmsGqlException) ? chunks.drop(i).flatten() as List<String> : chunk
                 unresolved.addAll(skipped)
                 errors.add("OMS GraphQL returns lookup by ${field} failed for ${skipped.size()} id(s): ${e.message ?: e.class.simpleName}".toString())
@@ -293,8 +295,9 @@ class OmsReturnsSourceSupport {
                 data = (response?.data instanceof Map) ? (Map) response.data : [:]
             } catch (Exception e) {
                 // An error the OMS ANSWERED (a Moqui REST rejection, a GraphQL error) is the answer to the
-                // document, and every chunk sends the same document, so the rest are not sent. A transport
-                // failure says nothing about the next chunk, so the pass carries on.
+                // document, and every chunk sends the same document, so the rest are not sent. The client
+                // retries a transport failure and throws TRANSIENT once out of retries (DAR-BE-142), which also
+                // stops the pass: the OMS is still down. Only an exception from outside the client is per chunk.
                 List<String> skipped = (e instanceof OmsGqlException) ? chunks.drop(i).flatten() as List<String> : chunk
                 unresolved.addAll(skipped)
                 String message = e.message ?: e.class.simpleName
