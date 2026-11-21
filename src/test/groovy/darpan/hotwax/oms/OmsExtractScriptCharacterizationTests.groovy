@@ -141,6 +141,8 @@ class OmsExtractScriptCharacterizationTests {
                 // DAR-BE-119: lookupKeys / lookupKeyField, an audit's re-check of its older open findings by key.
                 "extract#HotWaxOmsGqlReturns"          : [returnsIn + ["lookupKeys", "lookupKeyField", "includeReturnsWithoutShopifyRef", "withReturnCredit", "onlyCancelledReturns"], plainOut],
                 "extract#HotWaxOmsGqlOrderItems"       : [unitIn + ["lookupKeys", "lookupKeyField"], plainOut],
+                // DAR-BE-157 / DAR-BE-186: the orders contract plus a read by productId. Plan 3b-2b, Task 19: no source filters.
+                "extract#HotWaxOmsGqlProducts"         : [ordersIn + ["lookupKeys", "lookupKeyField"], ordersOut],
                 // DAR-BE-129: over GraphQL, any date, so no window.
                 "lookup#HotWaxOmsOrdersByExternalId"   : [["omsRestSourceConfigId", "externalIds", "companyUserGroupId"],
                                                           ["ok", "ordersByExternalId", "errors"]],
@@ -347,6 +349,36 @@ class OmsExtractScriptCharacterizationTests {
         assertEquals([], result.errors, result.toString())
         assertEquals(["M0001"], records(result)*.returnId, "the rule is not the read's: Spark Keep applies it")
         assertEquals([result.fileName], listing(out))
+    }
+
+    /**
+     * DAR-BE-318 (plan 3b-2b, Task 19, Ruling 3b2b-23): on the definition Moqui merges from the contract, the products read
+     * declares no sourceFilters (the OMS_PRODUCTS_GQL row's filterParameterName), so darpan's gate keeps its side in Spark.
+     * A caller that still sends the rules has them dropped by Moqui: every product is written, and the read writes no side
+     * file (Spark Keep writes it, the row saying Y).
+     */
+    @Test
+    void theProductsReadTakesNoSourceFiltersAndDropsNothingForThem() {
+        def sd = ec.factory.serviceFacade.getServiceDefinition(SVC + "extract#HotWaxOmsGqlProducts")
+        assertFalse(sd.getInParameterNames().contains("sourceFilters"))
+        def connector = ec.entity.find("darpan.reconciliation.SourceSystemConnector").condition("systemEnumId", "OMS_PRODUCTS_GQL")
+                .disableAuthz().useCache(false).one()
+        assertEquals("sourceFilters", connector.filterParameterName)
+        assertTrue(darpan.reconciliation.source.KeepPlanSupport.sparkKeepsSide(connector.getMap() as Map, sd))
+
+        String out = freshOut()
+        serveGql(out, [], [
+                products           : { Map v -> conn([[productId: "10001", productTypeId: "FINISHED_GOOD", isVirtual: "N"],
+                                                      [productId: "GIFT_CARD", productTypeId: "DIGITAL_GOOD", isVirtual: "N"]]) },
+                goodIdentifications: { Map v -> conn([[productId: "10001", idValue: "26161"], [productId: "GIFT_CARD", idValue: "22677"]]) },
+        ])
+        Map result = extract("HotWaxOmsGqlProducts", baseParams(out) + [sourceFilters: [[sequenceNum: 1,
+                fieldExpression: "sellable", operator: "EXCLUDE_IN", filterValues: "N"]]])
+        assertEquals([], result.errors, result.toString())
+        assertEquals([["10001", "Y"], ["GIFT_CARD", "N"]], records(result).collect { [it.productId, it.sellable] },
+                "the rule is not the read's: Spark Keep applies it")
+        assertFalse(((Map) result.requestMetadata).containsKey("filters"))
+        assertEquals([result.fileName], listing(out), "no excluded-records side file from the read")
     }
 
     private static Map<String, Closure> returnsHandlers() {

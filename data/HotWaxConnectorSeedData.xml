@@ -4,15 +4,16 @@
   here, on the core connector rows by primary key (the other fields stay core's), never in core.
 
   excludedRecordsSidecar: whether the records Keep sets aside are written beside the extract (the excluded-records side
-  file). For an extract that still filters at its read, the extract writes it, and a kept-copy slice writes it exactly when
-  this says Y. For an extract that takes no source filters (DAR-BE-318 plan 3b-2b), darpan's Spark Keep writes it when this
-  says Y. Tied to the extracts by ExcludedRecordsSidecarTieTests.
+  file). No HotWax extract takes source filters since DAR-BE-318 plan 3b-2b (Tasks 17-19): darpan's Spark Keep writes it
+  when this says Y, and a kept-copy slice exactly when this says Y. Each row keeps what its read wrote before. Tied to the
+  extracts by ExcludedRecordsSidecarTieTests.
     OMS_GQL N: Keep runs in Spark (Task 17). Its read never wrote one (DAR-BE-064), so a run that sets orders aside still
       reads them as unknown, as before.
     OMS_RETURNS_GQL N: Keep runs in Spark (Task 18). Its read never wrote one (DAR-BE-040 fix 3), so a run that sets returns
       aside still reads them as unknown (or absent, when only the built-in lines set them aside), as before.
     OMS_ORDER_ITEMS_GQL Y: Keep runs in Spark (Task 17), which writes the side file the unit-grain read used to.
-    OMS_PRODUCTS_GQL Y: OmsGqlProductsConnectorWiringTests.
+    OMS_PRODUCTS_GQL Y: Keep runs in Spark (Task 19), which writes the side file the products read used to, so a conclusion
+      can still name a product R22 sets aside. No keepLinesJson: the read drops nothing of its own.
   keepLinesJson (DAR-BE-318, Ruling 3b2b-12): built-in Keep lines, run in Spark before the tenant's rules.
     OMS_GQL: an exchange order (isExchangeOrder = Y, written by the orders extract) is set aside, unless the side reads with
       the exchange exclusion off. Its exchange manifest is still written for the exchange-pair verify pass.

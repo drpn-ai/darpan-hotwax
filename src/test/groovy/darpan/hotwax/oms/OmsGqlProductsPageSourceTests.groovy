@@ -105,6 +105,38 @@ class OmsGqlProductsPageSourceTests {
         assertEquals(3, pagination.calls)
     }
 
+    /**
+     * DAR-BE-318 (plan 3b-2b, Task 19): the products read takes no source filters. Every record it builds is written, the
+     * not-selling ones R22 sets aside included, and darpan's Spark Keep applies the tenant's rules to the file and writes the
+     * side file (OMS_PRODUCTS_GQL excludedRecordsSidecar Y). The read reports no rule and hands over no records of its own.
+     */
+    @Test
+    void everyProductIsWrittenWhateverTheFilters() {
+        OmsGqlClient c = new OmsGqlClient([baseUrl: "https://gorjana-maarg.hotwax.io", authType: "BEARER", apiToken: "t"],
+                { String url, Map headers, String body ->
+                    String root = body.contains("goodIdentifications(") ? "goodIdentifications" : "products"
+                    List<Map> nodes = root == "products"
+                            ? [product("10001"), product("GIFT_CARD", [productTypeId: "DIGITAL_GOOD", salesDiscontinuationDate: "2025-01-01T00:00:00Z"]),
+                               product("10056")]
+                            : [ident("10001", "26161"), ident("GIFT_CARD", "22677")]
+                    return [statusCode: 200, body: JsonOutput.toJson([data: [(root): [edges: nodes.collect { [node: it] },
+                                                                                       pageInfo: [hasNextPage: false]]]])]
+                })
+        c.sleeper = { long ms -> }
+        File work = File.createTempFile("oms-gql-products-test-", ".json")
+        try {
+            Map extraction = OmsGqlProductsPageSource.extractToFile(c, work)
+            Map doc = (Map) new JsonSlurper().parse(work)
+            assertEquals([["10001", "Y"], ["10056", "Y"], ["GIFT_CARD", "N"]], doc.records.collect { [it.productId, it.sellable] })
+            assertEquals(3, extraction.recordCount)
+            assertTrue(!((Map) doc.metadata).containsKey("filters") && !((Map) extraction.requestMetadata).containsKey("filters"),
+                    "the read applies no rule, so it reports none")
+            assertTrue(!extraction.containsKey("excludedCollector"), "the read sets nothing aside: Spark writes the side file")
+        } finally {
+            work.delete()
+        }
+    }
+
     // A NetSuite item HotWax carries only as a discontinued, virtual or non-selling product must not read "not in HotWax":
     // the record is emitted, marked sellable N with why, and the run excludes it so a cause can name it.
     @Test

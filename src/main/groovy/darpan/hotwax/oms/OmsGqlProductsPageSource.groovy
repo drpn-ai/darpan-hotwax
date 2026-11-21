@@ -1,7 +1,5 @@
 package darpan.hotwax.oms
 
-import darpan.reconciliation.source.SourceFilterSupport
-
 /**
  * DAR-BE-157: HotWax's side of the NetSuite <-> HotWax product reconciliation. Every product and every NETSUITE_PRODUCT_ID
  * identification, swept whole (no window: a product missing since August never falls inside a day's window), joined into
@@ -35,22 +33,24 @@ class OmsGqlProductsPageSource {
     /**
      * The extract: both sweeps, the records, and the {records, metadata} document written to workFile (a few thousand small
      * records, so written whole rather than streamed). Returns the extraction result OmsScriptServiceSupport.runExtract reads.
+     *
+     * DAR-BE-318 (plan 3b-2b, Task 19): every record buildRecords makes is written. The tenant's rules (R22: sellable
+     * EXCLUDE_IN N) are darpan's Spark Keep's, over this file: it reports every rule and writes what it sets aside beside the
+     * extract (OMS_PRODUCTS_GQL excludedRecordsSidecar Y), so a conclusion can still name what HotWax has. The read has no
+     * built-in drop: which products are records at all (the sellable ones, plus one not-selling product per NetSuite id no
+     * sellable product holds) is the read's grain, not Keep.
      */
-    static Map extractToFile(OmsGqlClient client, File workFile, List sourceFilters = null) {
+    static Map extractToFile(OmsGqlClient client, File workFile) {
         Map pagination = [calls: 0]
         List<Map> products = sweep(client, OmsGqlQueries.productsSweepDocument(), "products", null, pagination)
         List<Map> ids = sweep(client, OmsGqlQueries.netsuiteIdsSweepDocument(), "goodIdentifications",
                 OmsGqlQueries.NETSUITE_PRODUCT_ID_FILTER, pagination)
         Map built = buildRecords(products, ids)
-        // The run's source filters (R22: sellable EXCLUDE_IN N), applied here like every extractor: the dropped records go to
-        // the excluded sidecar, so a conclusion can still name what HotWax has, and every rule is reported.
-        Map filtered = SourceFilterSupport.applyToRecords((List) built.records, SourceFilterSupport.parseRules(sourceFilters))
-        List records = (List) filtered.records
+        List records = (List) built.records
         Map metadata = (Map) built.metadata + [identificationsRead: ids.size(), gqlCalls: pagination.calls]
-        if (filtered.configuredExclusions != null) metadata.filters = [configuredExclusions: filtered.configuredExclusions]
         workFile.withWriter("UTF-8") { Writer w -> w.write(groovy.json.JsonOutput.toJson([records: records, metadata: metadata])) }
         return [dataAvailable: !records.isEmpty(), recordCount: records.size(), requestMetadata: metadata,
-                warnings: [], errors: [], fileName: "oms-gql-products.json", excludedCollector: filtered.excludedCollector]
+                warnings: [], errors: [], fileName: "oms-gql-products.json"]
     }
 
     /** DAR-BE-186: product ids per lookup call; the products roots refuse `first` above 100. */
@@ -59,7 +59,7 @@ class OmsGqlProductsPageSource {
     /**
      * DAR-BE-186: the products named by id, whatever their state, each with its NETSUITE_PRODUCT_ID or none: the conclusion
      * brain's productNetsuiteId question ("is this item's product known to NetSuite?"). Two calls per 100 ids, no sweep.
-     * A product HotWax does not have is simply absent. Source filters do not apply to a read by id.
+     * A product HotWax does not have is simply absent. Its records carry no derived field: a conclusion lookup is not Keep's.
      */
     static Map lookupToFile(OmsGqlClient client, File workFile, List lookupKeys) {
         List<String> ids = (lookupKeys ?: []).collect { it?.toString()?.trim() }.findAll { it }.unique() as List<String>
@@ -101,7 +101,7 @@ class OmsGqlProductsPageSource {
         }
         // Reviewer 2026-10-28: a NetSuite item HotWax carries only as a discontinued, virtual or non-selling product is not
         // "missing from HotWax". Such a product is kept, once per NetSuite id no sellable product holds, marked sellable N
-        // with why; the run excludes it, so a cause can name it.
+        // with why; the run's Keep sets it aside (R22), so a cause can name it.
         Set<String> heldIds = productsByNsId.keySet()
         List<Map> notSellable = sorted.findAll { notSellableReason(it) != null && nsIdByProduct[it.productId as String] }
                 .findAll { !heldIds.contains(nsIdByProduct[it.productId as String]) }

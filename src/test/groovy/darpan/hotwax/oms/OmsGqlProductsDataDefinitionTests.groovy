@@ -100,13 +100,24 @@ class OmsGqlProductsDataDefinitionTests {
         return DataSourceDefinitionSupport.parse(row.protocol as String, row.json as String, CONNECTION_FIELDS)
     }
 
+    /**
+     * The coded path on the scripted server, then the Keep a run puts on its file. DAR-BE-318 (plan 3b-2b, Task 19): the coded
+     * read takes no filters and writes every record; Spark Keep then sets aside what the tenant's rules drop. That Keep is
+     * stated here as front-end A states it (SourceFilterSupport, whose parity with Spark darpan's KeepColumnParityTests pins;
+     * OmsProductsKeepParityTests runs it in Spark), so the data-defined read, which still filters at its read (Ruling
+     * 3b2b-16), is compared with what a coded run keeps.
+     */
     static Map coded(Server server, List rawFilters = null) {
         File out = File.createTempFile("coded-products-", ".json")
         try {
-            Map result = OmsGqlProductsPageSource.extractToFile(new OmsGqlClient(CONFIG, server.sender()), out, rawFilters)
+            Map result = OmsGqlProductsPageSource.extractToFile(new OmsGqlClient(CONFIG, server.sender()), out)
             assertEquals([], result.errors)
             Map file = (Map) new JsonSlurper().parse(out)
-            return [records: file.records, metadata: file.metadata]
+            Map applied = SourceFilterSupport.applyToRecords((List) file.records, SourceFilterSupport.parseRules(rawFilters))
+            darpan.reconciliation.conclusion.ExcludedRecordsSidecar.discard((Map) applied.excludedCollector)
+            Map metadata = (Map) file.metadata
+            if (applied.configuredExclusions != null) metadata.filters = [configuredExclusions: applied.configuredExclusions]
+            return [records: applied.records, metadata: metadata]
         } finally {
             out.delete()
         }

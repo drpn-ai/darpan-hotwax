@@ -6,6 +6,7 @@ import groovy.xml.XmlSlurper
 import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
+import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
@@ -42,7 +43,8 @@ class OmsGqlProductsConnectorWiringTests {
         assertEquals("darpan.hotwax.HotWaxOmsRestSourceConfig", r.configEntityName)
         assertEquals("omsRestSourceConfigId", r.configParameterName)
         assertEquals("N", r.windowed)
-        assertEquals("sourceFilters", r.filterParameterName, "R22 excludes sellable N on this side; the extract must receive it")
+        // DAR-BE-318 (3b2b-9): the endpoint takes Keep. R22 excludes sellable N on this side; since Task 19 Spark applies it.
+        assertEquals("sourceFilters", r.filterParameterName, "R22 excludes sellable N on this side; a blank name would drop it")
         assertEquals("Y", r.enabled)
         List<Map<String, String>> others = connectors().findAll { it.systemEnumId != "OMS_PRODUCTS_GQL" && it.enabled == "Y" }
         assertTrue(others.every { it.extractServiceName != r.extractServiceName && it.expectedSourceConfigType != r.expectedSourceConfigType },
@@ -69,6 +71,8 @@ class OmsGqlProductsConnectorWiringTests {
         assertTrue(services.contains('extractOmsGqlProducts.groovy'))
         String script = file(SCRIPT).getText("UTF-8")
         assertTrue(script.contains('"OMS_PRODUCTS_GQL"'), "the endpoint gate must check this connector")
+        assertFalse((script =~ /excludedRecordsSidecar\s*:\s*true|sourceFilters/).find(),
+                "DAR-BE-318 (Task 19): the read takes no filters and writes no side file; Spark Keep does both")
         new GroovyShell().parse(script, "extractOmsGqlProducts.groovy")
     }
 
@@ -138,9 +142,10 @@ class OmsGqlProductsConnectorWiringTests {
     }
 
     // Live run 2026-10-28: R22's FILE_2 rule (sellable EXCLUDE_IN N) never reached the extract, so a discontinued gift card
-    // read as a finding. Exclusions are applied by the extractor, which reports every rule and keeps what it dropped.
+    // read as a finding. DAR-BE-318 (Task 19): the rule is Spark Keep's now (OmsProductsKeepParityTests runs it). The read
+    // writes the gift card, marked sellable N with why, so Keep can set it aside and a cause can still name it.
     @Test
-    void theExtractAppliesTheSourceFiltersAndKeepsWhatItDropped() {
+    void theExtractWritesTheNotSellingProductR22SetsAside() {
         OmsGqlClient c = new OmsGqlClient([baseUrl: "https://gorjana-maarg.hotwax.io", authType: "BEARER", apiToken: "t"],
                 { String url, Map headers, String body ->
                     String root = body.contains("goodIdentifications(") ? "goodIdentifications" : "products"
@@ -154,13 +159,11 @@ class OmsGqlProductsConnectorWiringTests {
         c.sleeper = { long ms -> }
         File work = File.createTempFile("oms-gql-products-test-", ".json")
         try {
-            Map extraction = OmsGqlProductsPageSource.extractToFile(c, work,
-                    [[sequenceNum: 1, fieldExpression: "sellable", operator: "EXCLUDE_IN", filterValues: "N"]])
-            assertEquals(["10001"], ((Map) new JsonSlurper().parse(work)).records*.productId)
-            assertEquals(1, extraction.recordCount)
-            Map rule = extraction.requestMetadata.filters.configuredExclusions[0]
-            assertEquals(["sellable", "EXCLUDE_IN", 1], [rule.fieldExpression, rule.operator, rule.excludedCount])
-            assertTrue(extraction.excludedCollector != null, "the dropped records go to the excluded sidecar")
+            Map extraction = OmsGqlProductsPageSource.extractToFile(c, work)
+            assertEquals([["10001", "Y", null], ["GIFT_CARD", "N", "discontinued"]],
+                    ((Map) new JsonSlurper().parse(work)).records.collect { [it.productId, it.sellable, it.notSellableReason] })
+            assertEquals(2, extraction.recordCount)
+            assertFalse(((Map) extraction.requestMetadata).containsKey("filters"), "the read reports no rule: Keep's summary does")
         } finally {
             work.delete()
         }

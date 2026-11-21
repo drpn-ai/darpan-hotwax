@@ -130,28 +130,18 @@
             discontinued) over the GraphQL endpoint, one record per product keyed by nsKey: its NETSUITE_PRODUCT_ID (the
             NetSuite item internal id), HOTWAX-ONLY:productId when it has none, DUPLICATE:id:productId for every product after
             the first sharing one. Not windowed: windowStart/windowEnd are accepted and ignored (requestMetadata.windowIgnored).
-            A DISTINCT service name is required: the connector registry resolves rows by it.</description>
+            A DISTINCT service name is required: the connector registry resolves rows by it. DAR-BE-318 (plan 3b-2b, Task 19):
+            takes no source filters, so darpan's gate keeps the side in Spark; every record is written, the not-selling ones
+            (sellable N) included, and Spark Keep applies the tenant's rules and writes the excluded-records side file.</description>
         <implements service="reconciliation.HotWaxOmsExtractionServices.extract#HotWaxOmsOrdersContract"/>
         <in-parameters>
             <parameter name="lookupKeys" type="List">
                 <description>DAR-BE-186. Read only these products by productId, whatever their state, each with its
                     NETSUITE_PRODUCT_ID or none (the conclusion brain's productNetsuiteId question), instead of the catalogue.
-                    A product HotWax does not have is absent. Source filters do not apply.</description>
+                    A product HotWax does not have is absent.</description>
                 <parameter name="lookupKey"/>
             </parameter>
             <parameter name="lookupKeyField"><description>The record field lookupKeys are values of: productId.</description></parameter>
-            <parameter name="sourceFilters" type="List">
-                <parameter name="filterRule" type="Map">
-                    <parameter name="sequenceNum" type="Integer"/>
-                    <parameter name="fieldExpression"/>
-                    <parameter name="operator"/>
-                    <parameter name="filterValues"/>
-                </parameter>
-                <description>Optional record-exclusion rules. Each rule names a top-level record field and a
-                    comma-separated list of exact values; matching products are dropped before the extract file is
-                    written and counted per rule in requestMetadata.filters.configuredExclusions. Its own, not
-                    HotWaxOmsOrdersContract's: the orders read takes none since DAR-BE-318.</description>
-            </parameter>
         </in-parameters>
     </service>
 

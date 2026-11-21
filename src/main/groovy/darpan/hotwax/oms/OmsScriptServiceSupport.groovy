@@ -2,7 +2,6 @@ package darpan.hotwax.oms
 
 import darpan.facade.common.DataManagerSupport
 import darpan.facade.reconciliation.RunObservability
-import darpan.reconciliation.conclusion.ExcludedRecordsSidecar
 import groovy.json.JsonOutput
 
 /**
@@ -16,8 +15,8 @@ import groovy.json.JsonOutput
  * output UNSET on the paths that never assigned it (a gate failure leaves an input fileName in place).
  *
  * What still varies per script, and is passed in: the endpoint the gate checks, the work-file prefix,
- * the extraction call itself, the file-name sanitiser, a post-extraction warning, and which sidecars to
- * write. Everything connector-specific stays in OmsExtractSupport / OmsReturnsSourceSupport.
+ * the extraction call itself, the file-name sanitiser, a post-extraction warning, and whether to write
+ * the exchange-manifest sidecar. Everything connector-specific stays in OmsExtractSupport / OmsReturnsSourceSupport.
  */
 class OmsScriptServiceSupport {
     static final String CONFIG_ENTITY_NAME = "darpan.hotwax.HotWaxOmsRestSourceConfig"
@@ -98,7 +97,7 @@ class OmsScriptServiceSupport {
 
     /**
      * The whole body of an OMS extract script: gate, output location, work file, progress, the
-     * extraction, the outputs, the final move, and the advisory sidecars.
+     * extraction, the outputs, the final move, and the advisory exchange-manifest sidecar.
      *
      * Outputs written into {@code context}, on each path exactly as the scripts assigned them:
      * a gate refusal sets errors, warnings, dataAvailable, recordCount (fileName and fileLocation are
@@ -110,12 +109,12 @@ class OmsScriptServiceSupport {
      *   requiredSystemEnumId (String) — the endpoint the gate checks, e.g. "OMS_TRANSFER_ORDERS";
      *   workFilePrefix (String) — temp-file prefix, e.g. "oms-transfer-orders-extract-";
      *   extract (Closure, Map -> Map) — receives [sourceConfig, workFile, keepRecordFields,
-     *       pageProgressListener, sourceFilters] (the two lists already narrowed to List-or-null) and
-     *       returns the support class's extraction result;
+     *       pageProgressListener] (keepRecordFields already narrowed to List-or-null) and returns the
+     *       support class's extraction result. No coded extract takes source filters any more (DAR-BE-318
+     *       plan 3b-2b): darpan's Spark Keep filters their files and writes any side file;
      *   safeFileName (Closure, optional) — defaults to OmsExtractSupport.safeFileName;
      *   afterExtract (Closure, optional) — runs after the extraction outputs are set and before the
      *       error check, for a script's own warning (it reads and writes the script binding directly);
-     *   excludedRecordsSidecar (boolean) — write what the source filters dropped beside the extract;
      *   exchangeManifestSidecar (boolean) — write the exchange-manifest sidecar.
      */
     static void runExtract(def ec, Map context, Map spec) {
@@ -154,13 +153,11 @@ class OmsScriptServiceSupport {
         Map extraction = null
         try {
             Object keepRecordFields = context.get("keepRecordFields")
-            Object sourceFilters = context.get("sourceFilters")
             extraction = (Map) ((Closure) spec.extract).call([
                     sourceConfig        : sourceConfig,
                     workFile            : workFile,
                     keepRecordFields    : (keepRecordFields instanceof List) ? (List) keepRecordFields : null,
                     pageProgressListener: pageProgressListener,
-                    sourceFilters       : (sourceFilters instanceof List) ? (List) sourceFilters : null,
             ])
             List errors = extraction.errors ?: []
             context.put("warnings", extraction.warnings ?: [])
@@ -185,25 +182,11 @@ class OmsScriptServiceSupport {
             context.put("fileLocation", fileLocation)
             DataManagerSupport.moveIntoLocation(ec, workFile, fileLocation)
 
-            if (spec.excludedRecordsSidecar) {
-                // DAR-UI-044 / DAR-BE-063: what the source filters dropped, beside the extract, for the
-                // conclude pass. Advisory. Empty at order grain until the shared shaper collects there
-                // (see FilteringConnectorSidecarContractTests).
-                try {
-                    ExcludedRecordsSidecar.writeBeside(ec, (Map) extraction.excludedCollector, outputBaseLocation, outputFileName, outputDirectory)
-                } catch (Exception sidecarError) {
-                    context.put("warnings", ((context.get("warnings") ?: []) as List) +
-                            ["Excluded-records sidecar not written: ${sidecarError.message}".toString()])
-                }
-            }
-
             if (spec.exchangeManifestSidecar) {
                 writeExchangeManifest(ec, context, extraction, outputBaseLocation, outputFileName, outputDirectory)
             }
         } finally {
             if (workFile.exists()) workFile.delete()
-            // The excluded-records spill holds customer records: gone whether the sidecar was written, not wanted, or failed.
-            ExcludedRecordsSidecar.discard((Map) extraction?.excludedCollector)
         }
     }
 
