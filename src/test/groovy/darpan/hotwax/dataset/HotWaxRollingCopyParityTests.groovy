@@ -122,9 +122,11 @@ class HotWaxRollingCopyParityTests {
             <darpan.rule.RuleSetCompareSourceFilter compareScopeId="RCP_SCOPE" fileSide="FILE_1" sequenceNum="1"
                 fieldExpression="\$.records[*].returnChannelEnumId" operator="EXCLUDE_IN" filterValues="POS_RTN_CHANNEL" companyUserGroupId="${A}"/>
             <darpan.reconciliation.ReconciliationAutomation automationId="RCP_AUTO" automationName="returns copy" companyUserGroupId="${A}"
-                inputModeEnumId="${AutomationExecutionSupport.AUTOMATION_INPUT_API_RANGE}" savedRunId="RCP_RS" compareScopeId="RCP_SCOPE"/>
+                inputModeEnumId="${AutomationExecutionSupport.AUTOMATION_INPUT_API_RANGE}" savedRunId="RCP_RS"/>
             <darpan.reconciliation.ReconciliationAutomationSource automationId="RCP_AUTO" fileSide="FILE_1" companyUserGroupId="${A}"
                 sourceTypeEnumId="${AutomationExecutionSupport.AUTOMATION_SOURCE_API}" systemEnumId="OMS_RETURNS_GQL"/>
+            <darpan.reconciliation.ReconciliationAutomationSourceFilter automationId="RCP_AUTO" fileSide="FILE_1" sequenceNum="1"
+                fieldExpression="\$.records[*].returnChannelEnumId" operator="EXCLUDE_IN" filterValues="POS_RTN_CHANNEL" companyUserGroupId="${A}"/>
         </entity-facade-xml>""").dummyFks(true).load()
         ordersSetup()
         // the other side: NetSuite lacks R004 (the start return), holds R017 (the end return, outside the window) and a stranger
