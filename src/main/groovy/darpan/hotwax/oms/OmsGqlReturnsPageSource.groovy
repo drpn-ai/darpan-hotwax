@@ -65,9 +65,10 @@ class OmsGqlReturnsPageSource {
         if (!keys && (ctx.fromMillis == null || ctx.thruMillis == null)) {
             return failed("The OMS GraphQL returns extract requires a date window.")
         }
-        if (keys && !(ctx.lookupKeyField in [null, "returnId", REPLACEMENT_KEY])) {
-            return failed("The OMS GraphQL returns extract reads by returnId or ${REPLACEMENT_KEY} only, not '${ctx.lookupKeyField}'.")
+        if (keys && !(ctx.lookupKeyField in [null, "returnId", REPLACEMENT_KEY, ORDER_KEY])) {
+            return failed("The OMS GraphQL returns extract reads by returnId, ${REPLACEMENT_KEY} or ${ORDER_KEY} only, not '${ctx.lookupKeyField}'.")
         }
+        boolean byOrder = keys && ctx.lookupKeyField == ORDER_KEY
         // DAR-BE-192: asked by replacement order, every return naming one is kept (a warranty claim has no Shopify reference)
         // and carries its credit, for the conclusion brain's held-by-return causes.
         boolean byReplacement = keys && ctx.lookupKeyField == REPLACEMENT_KEY
@@ -96,6 +97,16 @@ class OmsGqlReturnsPageSource {
                 OmsGqlOrderPageSource.runEach((replacementOf.keySet() as List<String>).collate(OmsGqlQueries.LOOKUP_KEYS_CHUNK),
                         OmsGqlOrderPageSource.CONCURRENCY) { List<String> chunk ->
                     fetchSlice(client, shared, OmsGqlQueries.keysFilter("returnId", chunk))
+                }
+            } else if (byOrder) {
+                // DAR-BE-352: an older open finding keyed on its Shopify order id (Malbon R6), whatever its date. Only the
+                // returns whose record names an asked order are the findings'; one whose first item is on another order is not.
+                Set<String> asked = keys as Set<String>
+                Closure inner = (Closure) shared.pageConsumer
+                shared.pageConsumer = { List<Map> records -> inner.call(records.findAll { asked.contains(it.orderExternalId as String) }) }
+                OmsGqlOrderPageSource.runEach(orderReturns(client, keys, pagination).collate(OmsGqlQueries.LOOKUP_KEYS_CHUNK),
+                        OmsGqlOrderPageSource.CONCURRENCY) { List<String> chunk ->
+                    fetchSlice(client, shared, scoped(OmsGqlQueries.keysFilter("returnId", chunk)))
                 }
             } else if (keys) {
                 // DAR-BE-119: an older open finding's returns, by id, whatever their date.
@@ -349,6 +360,25 @@ class OmsGqlReturnsPageSource {
                     if (named) out.putIfAbsent(n.returnId as String, named)
                 }
         return out
+    }
+
+    /** DAR-BE-352: the lookup key that reads the returns on the orders carrying these Shopify order ids. */
+    static final String ORDER_KEY = "orderExternalId"
+
+    /**
+     * DAR-BE-352. The ids of the returns on every order carrying these Shopify order ids. No returns search names an order,
+     * so they are found as replacementReturns finds its candidates: the orders by externalId (every type, as the window
+     * read names a return's order whatever its type: an exchange keeps the original's id), then those orders' return items.
+     */
+    static List<String> orderReturns(OmsGqlClient client, List<String> shopifyOrderIds, Map pagination) {
+        OmsGqlQueries.requireIdKeys(shopifyOrderIds)
+        List<String> orderIds = fetchByIds(client, OmsGqlQueries.orderExternalIdsDocument(), "orders", "externalId", shopifyOrderIds,
+                OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_RESERVATION, pagination)
+                .collect { it.orderId as String }.findAll { it }.unique()
+        if (!orderIds) return []
+        return fetchByIds(client, OmsGqlQueries.returnItemsDocument(), "returnItems", "orderId", orderIds,
+                OmsGqlQueries.RETURN_ITEMS_ID_CHUNK, OmsGqlQueries.RETURN_ITEMS_PAGE_SIZE, OmsGqlQueries.RETURN_ITEMS_RESERVATION, pagination)
+                .collect { it.returnId as String }.findAll { it }.unique()
     }
 
     /** DAR-BE-192. The names a replacement descends from: its name less its last -N, and that less WTY- / EXC-. */

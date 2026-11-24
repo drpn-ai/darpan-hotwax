@@ -199,10 +199,15 @@ class OmsGqlQueries {
      * the search string, so it may hold only id characters: a space or a colon would add a condition of its own.
      */
     static String keysFilter(String field, List<String> keys) {
-        keys.each { if (!(it ==~ /[A-Za-z0-9_\-]{1,40}/)) throw new IllegalArgumentException("An OMS key holds letters, digits, _ and - only, got: ${it}") }
+        requireIdKeys(keys)
         String filter = "${field}:${keys.join(',')}".toString()
         // Orders by id or by Shopify id are sales orders only, as the window read's are (DAR-BE-156: externalId).
         return field in ["orderId", "externalId"] ? "${filter} orderTypeId:SALES_ORDER".toString() : filter
+    }
+
+    /** Keys that travel inside a search string: id characters only (DAR-BE-119; DAR-BE-352 for the ones asked through inVariables). */
+    static void requireIdKeys(List<String> keys) {
+        keys.each { if (!(it ==~ /[A-Za-z0-9_\-]{1,40}/)) throw new IllegalArgumentException("An OMS key holds letters, digits, _ and - only, got: ${it}") }
     }
 
     static Map pageVariables(String filter, int pageSize, String after) {

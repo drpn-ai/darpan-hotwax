@@ -360,6 +360,64 @@ class OmsGqlReturnsPageSourceTests {
         assertEquals("returnId:M0001", requests.find { it.root == "returns" }.variables.q)
     }
 
+    /**
+     * DAR-BE-352 (Malbon R6 keys its returns on the Shopify order id): an older open finding is read by that id. No returns
+     * search names an order, so the returns are found through every order carrying it (an exchange keeps the original's
+     * Shopify id) and those orders' return items, then read by id like any return. A return whose record names another
+     * order (its first item is on one) is not the finding's and is left out.
+     */
+    @Test
+    void askedByShopifyOrderIdTheReturnsOnItsOrdersAreRead() {
+        Map<String, String> shopifyIdOf = [O1: "111", O2: "111", O3: "222", O4: "333"]
+        Map<String, String> firstOrderOf = [M1001: "O1", M1002: "O2", M1003: "O4"]
+        Map<String, Closure> h = lookupsAnswering() + [
+                orders: { Map v ->
+                    String q = v.q as String
+                    if (q.startsWith("externalId:")) {
+                        assert !q.contains("orderTypeId") : "every order carrying the Shopify id, exchanges included: ${q}"
+                        List<String> wanted = (q - "externalId:").split(",") as List<String>
+                        return conn(shopifyIdOf.findAll { it.value in wanted }.collect { [orderId: it.key, externalId: it.value] })
+                    }
+                    List<String> ids = (q - "orderId:").split(",") as List<String>
+                    return conn(ids.collect { [orderId: it, externalId: shopifyIdOf[it], identifications: []] }) },
+                returnItems: { Map v ->
+                    String q = v.q as String
+                    if (q.startsWith("orderId:")) {
+                        assertEquals(["O1", "O2", "O3"], ((q - "orderId:").split(",") as List<String>).sort())
+                        return conn([[returnId: "M1001", orderId: "O1"], [returnId: "M1002", orderId: "O2"], [returnId: "M1003", orderId: "O3"]])
+                    }
+                    return conn(((q - "returnId:").split(",") as List<String>).collect { String id ->
+                        [returnId: id, returnItemSeqId: "01", orderId: firstOrderOf[id], orderItemSeqId: "00101", productId: "P1",
+                         returnQuantity: 1, receivedQuantity: 1, returnPrice: 60, statusId: "RETURN_COMPLETED", returnTypeId: "RTN_REFUND"] }) },
+                returns: { Map v ->
+                    List<String> ids = ((v.q as String) - "returnId:").split(",") as List<String>
+                    return conn(ids.collect { ret(it, [statusId: "RETURN_COMPLETED"]) }) }]
+        List<List<Map>> pages = []
+        Map result = OmsGqlReturnsPageSource.fetchAll(client(h), [config: CONFIG, lookupKeys: ["111", "222"], lookupKeyField: "orderExternalId",
+                pageConsumer: { List<Map> records -> pages.add(records) }])
+
+        assertEquals([], result.errors)
+        List<Map> records = (pages.flatten() as List<Map>).sort { it.returnId }
+        assertEquals([["M1001", "111", "KEEP"], ["M1002", "111", "KEEP"]], records.collect { [it.returnId, it.orderExternalId, it.omsReturnClass] })
+        assertEquals(["M1001", "M1002", "M1003"], ((requests.find { it.root == "returns" }.variables.q as String) - "returnId:").split(",").toList().sort())
+    }
+
+    /** DAR-BE-352: a Shopify order id travels inside the search string, so it holds id characters only. */
+    @Test
+    void aShopifyOrderIdKeyHoldsIdCharactersOnly() {
+        Map result = OmsGqlReturnsPageSource.fetchAll(client([:]), [config: CONFIG, lookupKeys: ["111 statusId:X"], lookupKeyField: "orderExternalId",
+                pageConsumer: { List<Map> records -> }])
+        assertTrue((result.errors as List<String>).any { it.contains("letters, digits, _ and - only") }, "${result.errors}")
+        assertTrue(requests.isEmpty())
+    }
+
+    @Test
+    void anotherKeyIsStillRefused() {
+        Map result = OmsGqlReturnsPageSource.fetchAll(client([:]), [config: CONFIG, lookupKeys: ["X1"], lookupKeyField: "shopifyReturnId",
+                pageConsumer: { List<Map> records -> }])
+        assertEquals(["The OMS GraphQL returns extract reads by returnId, replacementOrderId or orderExternalId only, not 'shopifyReturnId'."], result.errors)
+    }
+
     /** DAR-BE-116: lookups run once per buffer of kept returns, not once per returns page. */
     @Test
     void oneLookupPassCoversTheBufferedReturnsPages() {
