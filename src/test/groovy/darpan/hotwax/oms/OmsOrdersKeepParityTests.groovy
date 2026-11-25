@@ -192,6 +192,34 @@ class OmsOrdersKeepParityTests {
         assertEquals([0, 0], [rule.excludedCount, rule.fieldAbsentCount])
     }
 
+    /**
+     * DAR-BE-345 (option B). A side whose keepExchangeOrders option is on (Malbon / RAILS R11, "every order HotWax approves
+     * reaches NetSuite") compares exchange orders: the built-in exchange line does not apply to it, so they are kept, flagged
+     * Y, by its window read and by a re-read by key alike; its tenant rows still apply to them. The read is the same read
+     * (only Keep differs), so a side without the option, sharing it, sets them aside as before.
+     */
+    @Test
+    void aSideThatKeepsExchangeOrdersComparesThem() {
+        Map keepsThem = [keepExchangeOrders: true]
+        Map window = afterKeep("OMS_GQL", orders(), [], ORDER_BASE, null, "orders-with-exchanges.json", keepsThem)
+        assertEquals(["O1", "O2", "O3", "O4", "O5", "O6", "O8", "O9", "O10", "O11"], (window.kept as List<Map>)*.orderId)
+        assertEquals(["O4", "O5"], (window.kept as List<Map>).findAll { it.isExchangeOrder == "Y" }*.orderId)
+        assertEquals([:], window.setAsideBy)
+        assertEquals(null, KeepArtifacts.readSummary(window.file as File), "no Keep ran: no built-in line applies and no tenant rows")
+
+        Map ruled = afterKeep("OMS_GQL", orders(), orderRows(), ORDER_BASE, null, "orders-with-exchanges-ruled.json", keepsThem)
+        assertTrue((ruled.kept as List<Map>)*.orderId.contains("O4"))
+        assertEquals("A:1", ruled.setAsideBy.O5, "an exchange order on POS is the tenant's POS rule's now")
+
+        List<String> keys = orders()*.orderId as List<String>
+        Map keyed = afterKeep("OMS_GQL", orders(), [], ORDER_BASE, OmsExtractSupport.lookupExtractOptions(keys, null, true),
+                "orders-with-exchanges-by-key.json", keepsThem)
+        assertEquals((window.kept as List<Map>)*.orderId, (keyed.kept as List<Map>)*.orderId, "a re-read by key keeps what the window kept")
+
+        Map shared = afterKeep("OMS_GQL", orders(), [], ORDER_BASE, null, "orders-shared-default.json")
+        assertEquals([O4: "BUILT_IN:0", O5: "BUILT_IN:0"], shared.setAsideBy, "a side without the option: as before")
+    }
+
     @Test
     void unitGrainKeepsSetsAsideConcludesAndCountsAsTheReadDid() {
         Map before = ReadTimeFilterBefore.unitGrain(unitOrders(), unitRows(), dir)
@@ -237,9 +265,10 @@ class OmsOrdersKeepParityTests {
      * kept and set aside (with the rule that set each aside, by key), its metadata and exchange manifest, and the Keep fields.
      */
     private Map afterKeep(String systemEnumId, List<Map> raw, List<Map<String, Object>> rows, List<String> base, Map options,
-                          String fileName) {
+                          String fileName, Map sideOptions = [:]) {
         List<Map> rules = []
-        rules.addAll(KeepLineTranslator.declared(connectorRow(systemEnumId).keepLinesJson, [:]))
+        // the side's own extract options, as a run hands them to KeepPlanSupport (SourceExtractOptionsSupport.runtimeOptions)
+        rules.addAll(KeepLineTranslator.declared(connectorRow(systemEnumId).keepLinesJson, sideOptions))
         rules.addAll(SourceFilterSupport.toKeepRules(SourceFilterSupport.parseRules(rows)))
         KeepRules.validate(rules)
         Set<String> keepFields = KeepRules.fields(rules)

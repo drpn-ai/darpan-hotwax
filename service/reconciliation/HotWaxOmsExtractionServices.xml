@@ -100,6 +100,11 @@
             <parameter name="conclusionLookup" type="Boolean" default="false"><description>DAR-BE-205. With lookupKeys: this
                 read answers a conclusion lookup, so exchange orders come back too (the exchange exclusion is for a
                 sales-order comparison). An audit re-check by key leaves it off and keeps the exclusion.</description></parameter>
+            <parameter name="keepExchangeOrders" type="Boolean" default="false"><description>DAR-BE-345. The run side keeps
+                exchange orders (the OMS_GQL connector's extract option; its built-in Keep line applies unless it is on). A
+                window read is the same read either way. With lookupKeys and no conclusionLookup, it writes exchange orders
+                flagged isExchangeOrder Y, as the window read does, instead of leaving them out, so the side's re-read by key
+                keeps what its window read kept.</description></parameter>
             <parameter name="windowFieldName" default-value="orderDate">
                 <description>Only orderDate (or empty): the one field the OMS orders read windows on. Any other field is
                     refused rather than ignored, so a dataset refresh that names a field the read cannot honour fails

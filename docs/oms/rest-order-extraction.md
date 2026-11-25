@@ -133,7 +133,8 @@ names against top-level keys, case-insensitive values, `EXCLUDE_IN` keeping a re
 dropping it as field-absent) live in darpan core, not here.
 
 **The read still decides two things itself.** A non-`SALES_ORDER` order is never written (`excludedNonSalesOrderCount`), and
-a read by key leaves exchange orders out itself (`excludedExchangeOrderCount`, captured into the exchange manifest).
+a read by key leaves exchange orders out itself (`excludedExchangeOrderCount`, captured into the exchange manifest), unless
+the side keeps exchange orders (`keepExchangeOrders`, DAR-BE-345, GraphQL read only), when it writes them flagged as a window read does.
 
 **Projection keeps the Keep fields.** `keepRecordFields` trims each order after the page is read, and a run joins the
 fields its Keep rules read to that list, so a rule can target a field such as `salesChannelEnumId` or `productStoreId`

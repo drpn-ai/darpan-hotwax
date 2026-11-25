@@ -16,9 +16,14 @@
     OMS_PRODUCTS_GQL Y: Keep runs in Spark (Task 19), which writes the side file the products read used to, so a conclusion
       can still name a product R22 sets aside. keepLinesJson []: the read drops nothing of its own.
   keepLinesJson (DAR-BE-318, Ruling 3b2b-12): built-in Keep lines, run in Spark before the tenant's rules.
-    OMS_GQL: an exchange order (isExchangeOrder = Y, written by the orders extract) is set aside. No appliesUnless: a read
-      with the exchange exclusion off writes no flag, so there is nothing for the line to set aside. Its exchange manifest is
-      still written for the exchange-pair verify pass.
+    OMS_GQL: an exchange order (isExchangeOrder = Y, written by the orders extract) is set aside unless the side keeps
+      exchange orders (keepExchangeOrders, DAR-BE-345: "every order HotWax approves reaches NetSuite" compares them). The
+      read is the same whichever sides share it; only the side's Keep differs. A read with the exchange exclusion off (a
+      conclusion lookup) writes no flag, so there is nothing for the line to set aside. Its exchange manifest is still
+      written for the exchange-pair verify pass.
+  extractOptionsJson (OMS_GQL, DAR-BE-345): keepExchangeOrders, off unless a run side turns it on (absent is the default,
+    so no existing side's read, Keep or kept-copy options key changes). The orders extract takes it too, so a re-read by key
+    writes exchange orders flagged, as the window read does, instead of leaving them out.
     OMS_RETURNS_GQL: a cancelled return (omsReturnClass = CANCELLED, written by the returns extract) is set aside unless the
       side reads only cancelled returns; one with no Shopify reference (NO_SHOPIFY_REF) unless the side keeps those
       (includeReturnsWithoutShopifyRef) or reads only cancelled ones. The read counts both as before.
@@ -32,10 +37,11 @@
     <darpan.reconciliation.SourceSystemConnector systemEnumId="OMS_GQL" excludedRecordsSidecar="N"
             servingProjectionServiceName="reconciliation.HotWaxOmsExtractionServices.project#HotWaxOmsKeptRecords"
             datasetReadParametersJson='{"exchangeManifestMaxEntries":50000}'
-            keepLinesJson='[{"sequenceNum":0,"label":"isExchangeOrder","kinds":{"isExchangeOrder":"FVT_TEXT"},"lines":[{"conditionSeqId":"01","sequenceNum":1,"conditionTypeId":"RCT_COMPARE","fieldName":"isExchangeOrder","operatorEnumId":"ENTCO_EQUALS","compareValue":"Y"}]}]'/>
+            extractOptionsJson='[{"name":"keepExchangeOrders","label":"Keep exchange orders","type":"boolean"}]'
+            keepLinesJson='[{"sequenceNum":0,"label":"isExchangeOrder","appliesUnless":{"keepExchangeOrders":true},"kinds":{"isExchangeOrder":"FVT_TEXT"},"lines":[{"conditionSeqId":"01","sequenceNum":1,"conditionTypeId":"RCT_COMPARE","fieldName":"isExchangeOrder","operatorEnumId":"ENTCO_EQUALS","compareValue":"Y"}]}]'/>
     <darpan.reconciliation.SourceSystemConnectorField systemEnumId="OMS_GQL" fieldPath="$.records[*].isExchangeOrder"
             label="Exchange order" fieldType="string" sequenceNum="14"
-            description="DAR-BE-318: Y when the order carries an EXCHANGE item association, else N. Written by the orders extract on every window read whatever it keeps; the built-in Keep line (keepLinesJson) sets the Y orders aside. Conclusion lookups write no flag."/>
+            description="DAR-BE-318: Y when the order carries an EXCHANGE item association, else N. Written by the orders extract on every window read whatever it keeps; the built-in Keep line (keepLinesJson) sets the Y orders aside unless the side keeps exchange orders (keepExchangeOrders). Conclusion lookups write no flag."/>
     <darpan.reconciliation.SourceSystemConnector systemEnumId="OMS_RETURNS_GQL" excludedRecordsSidecar="N"
             servingProjectionServiceName="reconciliation.HotWaxOmsExtractionServices.project#HotWaxOmsKeptRecords"
             keepLinesJson='[{"sequenceNum":0,"label":"omsReturnClass","appliesUnless":{"onlyCancelledReturns":true},"kinds":{"omsReturnClass":"FVT_TEXT"},"lines":[{"conditionSeqId":"01","sequenceNum":1,"conditionTypeId":"RCT_COMPARE","fieldName":"omsReturnClass","operatorEnumId":"ENTCO_EQUALS","compareValue":"CANCELLED"}]},{"sequenceNum":1,"label":"omsReturnClass","appliesUnless":{"includeReturnsWithoutShopifyRef":true,"onlyCancelledReturns":true},"kinds":{"omsReturnClass":"FVT_TEXT"},"lines":[{"conditionSeqId":"01","sequenceNum":1,"conditionTypeId":"RCT_COMPARE","fieldName":"omsReturnClass","operatorEnumId":"ENTCO_EQUALS","compareValue":"NO_SHOPIFY_REF"}]}]'/>

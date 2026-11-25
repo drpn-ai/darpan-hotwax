@@ -135,8 +135,10 @@ class OmsExtractScriptCharacterizationTests {
         Map<String, List<List<String>>> expected = [
                 // DAR-BE-120: read by key, for a conclusion lookup (an order's notes behind R1's "never reached NetSuite").
                 // DAR-BE-318: windowFieldName (orderDate only) and the dataset read's exchange-manifest cap, its own (not the contract's).
+                // DAR-BE-345: keepExchangeOrders, a side's choice to compare exchange orders (re-read by key flagged).
                 "extract#HotWaxOmsGqlOrders"           : [ordersIn + ["keepRuleFields", "lookupKeys", "lookupKeyField", "readFields",
-                                                                      "conclusionLookup", "windowFieldName", "exchangeManifestMaxEntries"], ordersOut],
+                                                                      "conclusionLookup", "keepExchangeOrders", "windowFieldName",
+                                                                      "exchangeManifestMaxEntries"], ordersOut],
                 // DAR-BE-094 R8 / R16 added the two returns-scope switches.
                 // DAR-BE-119: lookupKeys / lookupKeyField, an audit's re-check of its older open findings by key.
                 "extract#HotWaxOmsGqlReturns"          : [returnsIn + ["lookupKeys", "lookupKeyField", "includeReturnsWithoutShopifyRef", "withReturnCredit", "onlyCancelledReturns"], plainOut],
@@ -440,6 +442,25 @@ class OmsExtractScriptCharacterizationTests {
             assertEquals(runs.absent.count, run.count)
             assertEquals(runs.absent.manifest, run.manifest)
         }
+    }
+
+    /**
+     * DAR-BE-345: an audit re-reads a side's open findings by key. A side that keeps exchange orders (keepExchangeOrders) gets
+     * them back flagged, as its window read wrote them; any other side's re-read leaves them out, as before.
+     */
+    @Test
+    void aReReadByKeyKeepsExchangeOrdersOnlyForASideThatKeepsThem() {
+        Closure<Map> read = { Map extra ->
+            String out = freshOut()
+            serveGql(out, [], [orders         : { Map v -> conn([gqlOrder("G1"), gqlOrder("G2")]) },
+                               orderItemAssocs: { Map v -> conn([[orderId: "G2", orderItemSeqId: "01", toOrderId: "G9",
+                                                                  toOrderItemSeqId: "01", orderItemAssocTypeId: "EXCHANGE"]]) }])
+            Map result = extract("HotWaxOmsGqlOrders", baseParams(out) + [lookupKeys: ["G1", "G2"]] + extra)
+            assertEquals([], result.errors, result.toString())
+            return result
+        }
+        assertEquals([["G1", "N"], ["G2", "Y"]], records(read([keepExchangeOrders: true])).collect { [it.orderId, it.isExchangeOrder] })
+        assertEquals([["G1", "N"]], records(read([:])).collect { [it.orderId, it.isExchangeOrder] })
     }
 
     /** DAR-BE-318: a dataset read asks for a longer exchange manifest; a run keeps the 500 it always listed. */

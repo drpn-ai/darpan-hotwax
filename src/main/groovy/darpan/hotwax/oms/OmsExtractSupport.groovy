@@ -980,11 +980,16 @@ class OmsExtractSupport {
      * COMPARISON, and a lookup compares nothing. Any other read by key (an audit re-check, a side read by the other side's
      * keys) leaves exchange orders out itself, as it always has (DAR-BE-318: keyed reads answer exactly as before). A window
      * read keeps the default: its exchange orders are written flagged for Keep.
+     *
+     * DAR-BE-345: a side that keeps exchange orders (keepExchangeOrders, the OMS_GQL connector's extract option) is read by
+     * key as its window read reads, exchange orders written flagged (null: the default), so its Keep keeps what the window
+     * kept. A conclusion lookup and a window read are unchanged by it.
      */
-    static Map<String, Object> lookupExtractOptions(Object lookupKeys, Object conclusionLookup) {
+    static Map<String, Object> lookupExtractOptions(Object lookupKeys, Object conclusionLookup, Object keepExchangeOrders = null) {
         boolean keyed = lookupKeys instanceof Collection && !((Collection) lookupKeys).isEmpty()
         if (!keyed) return null
-        return (normalizeBool(conclusionLookup) ? [applyExchangeExclusion: false] : [exchangeExclusionAtRead: true]) as Map<String, Object>
+        if (normalizeBool(conclusionLookup)) return [applyExchangeExclusion: false] as Map<String, Object>
+        return normalizeBool(keepExchangeOrders) ? null : [exchangeExclusionAtRead: true] as Map<String, Object>
     }
 
     protected static boolean isSalesOrder(Object record) {

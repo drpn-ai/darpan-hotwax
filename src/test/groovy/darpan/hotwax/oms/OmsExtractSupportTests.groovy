@@ -332,6 +332,27 @@ class OmsExtractSupportTests {
         assertNull(OmsExtractSupport.lookupExtractOptions([], true))
     }
 
+    /**
+     * DAR-BE-345 (option B). A side that keeps exchange orders (its keepExchangeOrders option, Malbon / RAILS R11) is re-read
+     * by key as its window read reads: every order written, flagged, so its Keep (the built-in line skipped) keeps the
+     * exchanges. Without the option a keyed read leaves them out as before; a conclusion lookup and a window read are unchanged.
+     */
+    @Test
+    void aSideThatKeepsExchangeOrdersReadsThemByKeyFlagged() {
+        assertNull(OmsExtractSupport.lookupExtractOptions(["M1"], null, true), "flagged for Keep, as a window read")
+        assertNull(OmsExtractSupport.lookupExtractOptions(["M1"], false, "true"))
+        assertEquals([applyExchangeExclusion: false], OmsExtractSupport.lookupExtractOptions(["M1"], true, true), "a lookup is a lookup")
+        assertNull(OmsExtractSupport.lookupExtractOptions(null, null, true), "a window read is never changed")
+        [null, false, "false", "N"].each { Object off ->
+            assertEquals([exchangeExclusionAtRead: true], OmsExtractSupport.lookupExtractOptions(["M1"], null, off), "${off}")
+        }
+
+        List<Map> raw = [salesOrder("M1", "WEB"), exchangeOrder("M2", "M0")]
+        Map keyed = extract(raw, ["orderId"], null, OmsExtractSupport.lookupExtractOptions(["M1", "M2"], null, true))
+        assertEquals([[orderId: "M1", isExchangeOrder: "N"], [orderId: "M2", isExchangeOrder: "Y"]], keyed.records)
+        assertEquals(1, keyed.requestMetadata.filters.flaggedExchangeOrderCount)
+    }
+
     @Test
     void anExtractNeedsAPageSourceAndBothWindowBounds() {
         Map noFetcher = OmsExtractSupport.extractOrders(baseConfig(), "2026-05-01T00:00:00Z", "2026-05-01T01:00:00Z",

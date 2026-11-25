@@ -22,7 +22,8 @@ OmsScriptServiceSupport.runExtract(ec, context, [
             // Spark over the file. DAR-BE-205: a conclusion lookup answers for every order it names, exchanges included.
             OmsExtractSupport.extractOrdersToFile(a.sourceConfig, windowStart, windowEnd, a.workFile,
                     a.keepRecordFields, a.pageProgressListener, (keepRuleFields instanceof List) ? (List) keepRuleFields : null,
-                    OmsExtractSupport.lookupExtractOptions(context.lookupKeys, context.conclusionLookup),
+                    // DAR-BE-345: a side that keeps exchange orders re-reads them by key flagged, as its window read
+                    OmsExtractSupport.lookupExtractOptions(context.lookupKeys, context.conclusionLookup, context.keepExchangeOrders),
                     OmsGqlOrderPageSource.fetcher(new OmsGqlClient(OmsExtractSupport.toPlainMap(a.sourceConfig)),
                             // DAR-BE-120: read by key for a conclusion lookup.
                             [lookupKeys: (lookupKeys instanceof List) ? (List) lookupKeys : null, lookupKeyField: lookupKeyField,
