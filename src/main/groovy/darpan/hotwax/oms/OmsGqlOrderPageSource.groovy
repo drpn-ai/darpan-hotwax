@@ -352,6 +352,7 @@ class OmsGqlOrderPageSource {
                 (plan.paymentSlots ?: OmsGqlQueries.PAYMENT_PREF_SLOTS) as int, plan.paymentRefNums == true)
         if (shared.unitGrain == true) attachItemsToShipGroups(client, assembled, ids, pagination)
         if (plan.itemQuantity == true) attachItemQuantities(client, assembled, ids, pagination)
+        if (plan.orderItems == true) attachOrderItems(client, assembled, ids, pagination)
         if (shared.sink != null) {
             // A shared read: the raw records go to the spill file, and each caller shapes them itself.
             ((Closure) shared.sink).call(assembled)
@@ -398,6 +399,27 @@ class OmsGqlOrderPageSource {
         List<Map> items = OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.orderItemQuantitiesDocument(), "orderItems", "orderId",
                 itemOrderIds, OmsGqlQueries.ORDER_ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.ORDER_ITEMS_RESERVATION, pagination)
         OmsGqlOrderGrainAssembler.putItemQuantities(orders, items, originalOfExchange)
+    }
+
+    /**
+     * DAR-BE-368: each order's items in item order, each with its Shopify line id, SKU, quantity and status. The items and
+     * their SKUs are read by id once per page, as the unit read reads them; an order HotWax returned no item for has none.
+     */
+    private static void attachOrderItems(OmsGqlClient client, List<Map> orders, List<String> orderIds, Map pagination) {
+        if (!orderIds) return
+        List<Map> items = OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.unitOrderItemsDocument(), "orderItems", "orderId",
+                orderIds, OmsGqlQueries.ORDER_ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.UNIT_ITEMS_RESERVATION, pagination)
+        Map<String, Object> skus = OmsGqlReturnsPageSource.productNames(client, items.collect { it.productId as String }, pagination)
+        Map<String, List<Map>> byOrder = items.groupBy { it.orderId as String }
+        for (Map order : orders) {
+            order.put(OmsGqlQueries.ORDER_ITEMS_FIELD, (byOrder[order.orderId as String] ?: [])
+                    .sort { it.orderItemSeqId as String }
+                    .collect { Map item ->
+                        // get, not [ ]: a null String key makes Groovy's subscript a property lookup, which throws.
+                        [orderItemSeqId: item.orderItemSeqId, externalId: item.externalId, productId: item.productId,
+                         sku: skus.get(item.productId), quantity: item.quantity, statusId: item.statusId]
+                    })
+        }
     }
 
     /**

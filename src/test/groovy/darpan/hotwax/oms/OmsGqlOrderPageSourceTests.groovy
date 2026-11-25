@@ -550,6 +550,42 @@ class OmsGqlOrderPageSourceTests {
         } finally { out.delete() }
     }
 
+    /**
+     * DAR-BE-368: asked for orderItems, each order carries its items in item order with the Shopify line id, SKU, quantity
+     * and status; an order HotWax returned no item for carries none. Not asked, no item is read.
+     */
+    @Test
+    void orderItemsCarriesEachItemWithItsShopifyLineSkuQuantityAndStatus() {
+        OmsGqlLookupCache.reset()
+        ScriptedClient client = new ScriptedClient([
+                ordersPage([order("M1"), order("M2")], false),
+                assocsPage([]),
+                itemsPage([item("M1", "00102", "00001", "ITEM_CANCELLED", 2), item("M1", "00101", "00001")]),
+                productsPage(["P00101", "P00102"])])
+        File out = File.createTempFile("gql-", ".json")
+        try {
+            Map result = run(client, out, ["orderId", "externalId", "orderItems"])
+            assertEquals([], result.errors)
+            assertEquals("orderId:M1,M2", ((Map) client.calls[2].variables).q)
+            List<Map> records = (List<Map>) (new JsonSlurper().parse(out) as Map).records
+            assertEquals([[orderItemSeqId: "00101", externalId: "L00101", productId: "P00101", sku: "SKU-P00101", quantity: 1, statusId: "ITEM_COMPLETED"],
+                          [orderItemSeqId: "00102", externalId: "L00102", productId: "P00102", sku: "SKU-P00102", quantity: 2, statusId: "ITEM_CANCELLED"]],
+                    records[0].orderItems)
+            assertEquals([], records[1].orderItems)
+        } finally {
+            out.delete()
+            OmsGqlLookupCache.reset()
+        }
+
+        ScriptedClient lean = new ScriptedClient([ordersPage([order("M1")], false), assocsPage([])])
+        File leanOut = File.createTempFile("gql-", ".json")
+        try {
+            run(lean, leanOut, ["orderId", "externalId"])
+            assertEquals(2, lean.calls.size(), "no item read when orderItems is not asked")
+            assertFalse(((List<Map>) (new JsonSlurper().parse(leanOut) as Map).records)[0].containsKey("orderItems"))
+        } finally { leanOut.delete() }
+    }
+
     /** DAR-BE-300: an assoc to an order not asked for means HotWax ignored the toOrderId filter; never count on it. */
     @Test
     void anExchangeAssocToAnOrderNotAskedForFailsTheExtract() {

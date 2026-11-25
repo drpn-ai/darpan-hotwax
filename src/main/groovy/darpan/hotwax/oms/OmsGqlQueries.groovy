@@ -51,7 +51,7 @@ class OmsGqlQueries {
             "orderDate", "grandTotal"]
     /** Computed by OmsGqlOrderGrainAssembler from paymentPreferences and statusId, which are always selected. */
     static final Set<String> DERIVED_FIELDS = ["hasPaymentPreference", "paymentMethodTypeIds", "paymentPreferenceSlotsFull",
-            "isCompleted", "paymentRefNums", ITEM_QUANTITY_FIELD] as Set
+            "isCompleted", "paymentRefNums", ITEM_QUANTITY_FIELD, ORDER_ITEMS_FIELD] as Set
     /**
      * DAR-BE-251: the order's units, the sum of its item rows' quantities (HotWax keeps one row per unit where Shopify has
      * one line of several: #42424EU, 1 line of 8, 8 rows). Equal to Shopify subtotalLineItemsQuantity on 590 of 590 RAILS
@@ -59,6 +59,12 @@ class OmsGqlQueries {
      * order id, once per page, only when a rule reads it: nested in the orders read it cost a page of 2 orders.
      */
     static final String ITEM_QUANTITY_FIELD = "itemQuantity"
+    /**
+     * DAR-BE-368 (Aditi: "include the line item details, expecially the SKU", "show both shopify and HW"): the order's
+     * items, each with its Shopify line id (externalId), SKU (its product's internalName), quantity and status, for an
+     * audit finding to show. Read by order id once per page, only when a read asks for it, like itemQuantity.
+     */
+    static final String ORDER_ITEMS_FIELD = "orderItems"
     /**
      * DAR-BE-151: the raw OPP rows themselves, kept for the conclusion brain's order-payments question (a tender taken and
      * given back is two rows). Always selected; asking for them widens the read to six slots, like paymentRefNums.
@@ -156,7 +162,7 @@ class OmsGqlQueries {
   }
 }"""
         return [document: document, pageSize: pageSize, reservation: reservation, paymentSlots: slots, paymentRefNums: refNums,
-                itemQuantity: wanted.contains(ITEM_QUANTITY_FIELD)]
+                itemQuantity: wanted.contains(ITEM_QUANTITY_FIELD), orderItems: wanted.contains(ORDER_ITEMS_FIELD)]
     }
 
     /**
@@ -425,7 +431,8 @@ class OmsGqlQueries {
     static boolean sharedOrdersCover(Set<String> requiredFields) {
         // DAR-BE-153: paymentRefNums needs manualRefNum from six slots, which the shared read does not ask for.
         // DAR-BE-251: nor itemQuantity, read from the items only by a read that asks for it.
-        return (requiredFields ?: []).every { it != "paymentRefNums" && it != ITEM_QUANTITY_FIELD &&
+        // DAR-BE-368: nor orderItems, read the same way.
+        return (requiredFields ?: []).every { it != "paymentRefNums" && it != ITEM_QUANTITY_FIELD && it != ORDER_ITEMS_FIELD &&
                 (ALWAYS_FIELDS.contains(it) || SHARED_ORDER_FIELDS.contains(it) || DERIVED_FIELDS.contains(it)) }
     }
 
