@@ -30,7 +30,8 @@ OmsScriptServiceSupport.runExtract(ec, context, [
                              // DAR-BE-356: an audit's read of the window's orders that changed since its last read.
                              changedSince: OmsExtractSupport.changedSinceMillis(context.changedSince),
                              // DAR-BE-239: the fields the run's rules read, selected even without a projection.
-                             readFields: (readFields instanceof List) ? (List) readFields : null]),
+                             // DAR-BE-368: plus each order's items when the side turns on withOrderItems.
+                             readFields: OmsExtractSupport.readFieldsWithOptions(readFields, context.withOrderItems)]),
                     // DAR-BE-318: a dataset refresh lists every exchange order of its 60 days; runs keep the default
                     (exchangeManifestMaxEntries as Integer) ?: OmsExtractSupport.EXCHANGE_MANIFEST_MAX_ENTRIES)
         },

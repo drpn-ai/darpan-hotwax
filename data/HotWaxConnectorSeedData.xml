@@ -24,6 +24,8 @@
   extractOptionsJson (OMS_GQL, DAR-BE-345): keepExchangeOrders, off unless a run side turns it on (absent is the default,
     so no existing side's read, Keep or kept-copy options key changes). The orders extract takes it too, so a re-read by key
     writes exchange orders flagged, as the window read does, instead of leaving them out.
+    withOrderItems (DAR-BE-368): off unless a run side turns it on; on, the side also reads each order's items (orderItems), so
+    an audit finding about the order lists its lines with their SKUs.
     OMS_RETURNS_GQL: a cancelled return (omsReturnClass = CANCELLED, written by the returns extract) is set aside unless the
       side reads only cancelled returns; one with no Shopify reference (NO_SHOPIFY_REF) unless the side keeps those
       (includeReturnsWithoutShopifyRef) or reads only cancelled ones. The read counts both as before.
@@ -37,7 +39,7 @@
     <darpan.reconciliation.SourceSystemConnector systemEnumId="OMS_GQL" excludedRecordsSidecar="N"
             servingProjectionServiceName="reconciliation.HotWaxOmsExtractionServices.project#HotWaxOmsKeptRecords"
             datasetReadParametersJson='{"exchangeManifestMaxEntries":50000}'
-            extractOptionsJson='[{"name":"keepExchangeOrders","label":"Keep exchange orders","type":"boolean"}]'
+            extractOptionsJson='[{"name":"keepExchangeOrders","label":"Keep exchange orders","type":"boolean"},{"name":"withOrderItems","label":"Order items","type":"boolean"}]'
             keepLinesJson='[{"sequenceNum":0,"label":"isExchangeOrder","appliesUnless":{"keepExchangeOrders":true},"kinds":{"isExchangeOrder":"FVT_TEXT"},"lines":[{"conditionSeqId":"01","sequenceNum":1,"conditionTypeId":"RCT_COMPARE","fieldName":"isExchangeOrder","operatorEnumId":"ENTCO_EQUALS","compareValue":"Y"}]}]'/>
     <darpan.reconciliation.SourceSystemConnectorField systemEnumId="OMS_GQL" fieldPath="$.records[*].isExchangeOrder"
             label="Exchange order" fieldType="string" sequenceNum="14"

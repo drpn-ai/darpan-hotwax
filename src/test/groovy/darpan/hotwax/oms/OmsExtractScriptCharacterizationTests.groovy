@@ -137,8 +137,9 @@ class OmsExtractScriptCharacterizationTests {
                 // DAR-BE-318: windowFieldName (orderDate only) and the dataset read's exchange-manifest cap, its own (not the contract's).
                 // DAR-BE-345: keepExchangeOrders, a side's choice to compare exchange orders (re-read by key flagged).
                 // DAR-BE-356: changedSince, an audit's read of the window's orders that changed since its recent read.
+                // DAR-BE-368: withOrderItems, a side's choice to read each order's items (orderItems) for a finding's lines.
                 "extract#HotWaxOmsGqlOrders"           : [ordersIn + ["keepRuleFields", "lookupKeys", "lookupKeyField", "changedSince", "readFields",
-                                                                      "conclusionLookup", "keepExchangeOrders", "windowFieldName",
+                                                                      "conclusionLookup", "withOrderItems", "keepExchangeOrders", "windowFieldName",
                                                                       "exchangeManifestMaxEntries"], ordersOut],
                 // DAR-BE-094 R8 / R16 added the two returns-scope switches.
                 // DAR-BE-119: lookupKeys / lookupKeyField, an audit's re-check of its older open findings by key.

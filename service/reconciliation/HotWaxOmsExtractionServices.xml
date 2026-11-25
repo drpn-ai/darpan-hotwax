@@ -104,6 +104,10 @@
             <parameter name="conclusionLookup" type="Boolean" default="false"><description>DAR-BE-205. With lookupKeys: this
                 read answers a conclusion lookup, so exchange orders come back too (the exchange exclusion is for a
                 sales-order comparison). An audit re-check by key leaves it off and keeps the exclusion.</description></parameter>
+            <parameter name="withOrderItems" type="Boolean" default="false"><description>DAR-BE-368. The run side reads each
+                order's items (orderItems: Shopify line id, SKU, quantity, status) for an audit finding to list the order's
+                lines (the OMS_GQL connector's extract option). Off, the read is unchanged. On, the read leaves the shared
+                orders read, as itemQuantity does.</description></parameter>
             <parameter name="keepExchangeOrders" type="Boolean" default="false"><description>DAR-BE-345. The run side keeps
                 exchange orders (the OMS_GQL connector's extract option; its built-in Keep line applies unless it is on). A
                 window read is the same read either way. With lookupKeys and no conclusionLookup, it writes exchange orders

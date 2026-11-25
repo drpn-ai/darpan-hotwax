@@ -32,7 +32,9 @@ class KeepExchangeOrdersOptionTieTests {
     @Test
     void theOrdersConnectorDeclaresTheOptionAndOffIsTheDefault() {
         Map<String, Object> connector = ordersConnector()
-        assertEquals([[name: "keepExchangeOrders", label: "Keep exchange orders", type: "boolean"]],
+        // DAR-BE-368 added withOrderItems beside it (OrderItemsOptionTieTests).
+        assertEquals([[name: "keepExchangeOrders", label: "Keep exchange orders", type: "boolean"],
+                      [name: "withOrderItems", label: "Order items", type: "boolean"]],
                 SourceExtractOptionsSupport.declaredOptions(connector))
         assertEquals('{"keepExchangeOrders":true}', SourceExtractOptionsSupport.validatedJson(connector, [keepExchangeOrders: true]))
         assertNull(SourceExtractOptionsSupport.validatedJson(connector, [keepExchangeOrders: false]), "off is not stored")

@@ -994,6 +994,17 @@ class OmsExtractSupport {
      * key as its window read reads, exchange orders written flagged (null: the default), so its Keep keeps what the window
      * kept. A conclusion lookup and a window read are unchanged by it.
      */
+    /**
+     * DAR-BE-368. The fields a side reads: its rules' (readFields), plus each order's items (orderItems) when the side turns
+     * on withOrderItems, the OMS_GQL connector's extract option, so an audit finding about the order lists its lines. Off,
+     * the read fields are as sent (null stays null).
+     */
+    static List<String> readFieldsWithOptions(Object readFields, Object withOrderItems) {
+        List<String> fields = readFields instanceof List ? ((List) readFields).collect { it as String } : null
+        if (!normalizeBool(withOrderItems)) return fields
+        return ((fields ?: []) + [OmsGqlQueries.ORDER_ITEMS_FIELD]).unique() as List<String>
+    }
+
     static Map<String, Object> lookupExtractOptions(Object lookupKeys, Object conclusionLookup, Object keepExchangeOrders = null) {
         boolean keyed = lookupKeys instanceof Collection && !((Collection) lookupKeys).isEmpty()
         if (!keyed) return null
