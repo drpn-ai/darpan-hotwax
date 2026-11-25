@@ -419,6 +419,15 @@ class OmsExtractSupport {
         return "${prefix}-${fromToken}-${thruToken}.json"
     }
 
+    /** DAR-BE-356. The extract's changedSince parameter as epoch millis; null when absent; refused when it does not parse. */
+    static Long changedSinceMillis(Object rawValue) {
+        if (rawValue == null || rawValue.toString().trim().isEmpty()) return null
+        List<String> errors = []
+        Long millis = parseWindowMillis(rawValue, "changedSince", errors)
+        if (errors || millis == null) throw new IllegalArgumentException(errors ? errors.join("; ") : "changedSince could not be read: ${rawValue}".toString())
+        return millis
+    }
+
     protected static Long parseWindowMillis(Object rawValue, String label, List<String> errors) {
         if (rawValue instanceof Number) return ((Number) rawValue).longValue()
         if (rawValue instanceof Timestamp) return ((Timestamp) rawValue).time

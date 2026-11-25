@@ -290,6 +290,31 @@ class OmsGqlQueries {
     static final int ORDER_ITEMS_ID_CHUNK = 100
     static final int ORDER_ITEMS_PAGE_SIZE = 100
     static final int ORDER_ITEMS_RESERVATION = 450   // 100 + 100 x 3
+    /**
+     * DAR-BE-356. The item statuses whose change brings an older order back into an audit's recent read: an order placed
+     * Nov 3 and completed Nov 8 is outside every orderDate window read on Nov 9, so a "completed" check never saw it.
+     */
+    static final List<String> CHANGE_STATUS_IDS = ["ITEM_APPROVED", "ITEM_COMPLETED", "ITEM_CANCELLED"].asImmutable()
+    static final int STATUS_TIMELINE_PAGE_SIZE = 100
+    static final int STATUS_TIMELINE_RESERVATION = 300 // 100 + 100 x 2 (orderId, the order's orderDate)
+
+    /**
+     * DAR-BE-356. The status rows written in a window, each with its order's date (moqui-gql orderStatusTimeline: statusId
+     * is required, lastUpdatedTxStamp is the window key, at most 31 days).
+     */
+    static String statusTimelineDocument() {
+        return '''query OmsStatusTimeline($q: String, $first: Int, $after: String) {
+  orderStatusTimeline(query: $q, first: $first, after: $after) {
+    edges { node { orderId order { orderDate } } }
+    pageInfo { hasNextPage endCursor }
+  }
+}'''
+    }
+
+    static String statusTimelineFilter(String statusId, String fromIso, String thruIso) {
+        return "statusId:${statusId} lastUpdatedTxStamp:>=${fromIso} lastUpdatedTxStamp:<${thruIso}".toString()
+    }
+
     static final int ORDER_STATUSES_ID_CHUNK = 50
     static final int ORDER_STATUSES_RESERVATION = 150 // 100 + 50 x 1, three scalar fields (live RAILS 2026-10-22)
     static final int PRODUCTS_ID_CHUNK = 100

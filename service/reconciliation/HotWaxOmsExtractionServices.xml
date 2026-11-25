@@ -90,6 +90,10 @@
             </parameter>
             <parameter name="lookupKeyField"><description>The record field lookupKeys are values of: orderId, or externalId (the
                 Shopify order id; DAR-BE-156, a Shopify-paired audit check's re-check).</description></parameter>
+            <parameter name="changedSince" type="Timestamp"><description>DAR-BE-356. Read instead of the window: the orders placed in
+                the window with an item whose status (approved, completed, cancelled) changed at or after this instant, by
+                orderId. An audit sends it after its recent read, so an older order that changed is compared again. A caller
+                checks this parameter is declared before sending it.</description></parameter>
             <parameter name="readFields" type="List">
                 <description>DAR-BE-239. The record fields the run's rules read on this side. Selected even without a
                     projection, so a field this read asks for only when needed (paymentRefNums: five payment slots with
@@ -357,6 +361,10 @@
                 <parameter name="lookupKey"/>
             </parameter>
             <parameter name="lookupKeyField"><description>The record field lookupKeys are values of: omsOrderId (the OMS orderId).</description></parameter>
+            <parameter name="changedSince" type="Timestamp"><description>DAR-BE-356. Read instead of the window: the orders placed in
+                the window with an item whose status (approved, completed, cancelled) changed at or after this instant, by
+                orderId. An audit sends it after its recent read, so an older order that changed is compared again. A caller
+                checks this parameter is declared before sending it.</description></parameter>
             <parameter name="omsRestSourceConfigId">
                 <description>Tenant-owned HotWaxOmsRestSourceConfig identifier; the same credential and baseUrl answer
                     /rest/s1/graphql.</description>

@@ -48,6 +48,21 @@ class OmsGqlOrderPageSource {
         if (!keys && (ctx.fromMillis == null || ctx.thruMillis == null)) {
             return failed("The OMS order extract requires a date window.")
         }
+        // DAR-BE-356: the orders placed in the window whose items changed status since changedSince, read by orderId.
+        Long changedSince = ctx.changedSince as Long
+        if (changedSince != null) {
+            if (keys) return failed("The OMS order extract reads by key or by change, not both.")
+            if (ctx.lookupKeyField && !(ctx.lookupKeyField in ["orderId", "omsOrderId"])) {
+                return failed("The OMS order extract reads changed orders by orderId only, not '${ctx.lookupKeyField}'.")
+            }
+            try {
+                keys = changedOrderIds(client, changedSince, (Long) ctx.thruMillis, (Long) ctx.fromMillis, pagination)
+            } catch (OmsGqlException e) {
+                return failed("OMS GraphQL changed-orders read failed [${e.code}]: ${e.message}".toString())
+            }
+            pagination.changedOrderCount = keys.size()
+            if (!keys) return [errors: [], statusCode: 200, attemptCount: client.callCount, pagination: pagination, transport: "GRAPHQL"]
+        }
         // DAR-BE-156: or by the Shopify order id (externalId), the key a Shopify-paired audit check compares HotWax by.
         String keyFilterField = ctx.lookupKeyField in [null, "orderId", "omsOrderId"] ? "orderId" : ctx.lookupKeyField == "externalId" ? "externalId" : null
         if (keys && !keyFilterField) {
@@ -467,6 +482,58 @@ class OmsGqlOrderPageSource {
             throw new OmsGqlException("MALFORMED", "response carried no ${root} connection with edges: ${String.valueOf(data).take(200)}")
         }
         return (Map) connection
+    }
+
+    /**
+     * DAR-BE-356. The ids of the orders placed in [windowFrom, thru) with an item whose status changed in [since, thru),
+     * once each, in the order first seen. Change is read from the status rows' transaction stamp (orderStatusTimeline), one
+     * status at a time (statusId is required there), and an order is kept only if its orderDate is in the window, so a
+     * read by key never reaches outside what a whole-window read would hold.
+     */
+    static List<String> changedOrderIds(OmsGqlClient client, long since, long thru, Long windowFrom, Map pagination) {
+        LinkedHashSet<String> ids = new LinkedHashSet<String>()
+        if (since >= thru) return []
+        OmsGqlQueries.CHANGE_STATUS_IDS.each { String statusId ->
+            String filter = OmsGqlQueries.statusTimelineFilter(statusId, iso(since), iso(thru))
+            String cursor = null
+            Set<String> seenCursors = [] as Set
+            int size = OmsGqlQueries.STATUS_TIMELINE_PAGE_SIZE
+            while (true) {
+                Map answer
+                try {
+                    answer = client.execute(OmsGqlQueries.statusTimelineDocument(), OmsGqlQueries.pageVariables(filter, size, cursor),
+                            OmsGqlQueries.STATUS_TIMELINE_RESERVATION)
+                } catch (OmsGqlException e) {
+                    if (e.code != "COST_EXCEEDED" || size <= 1) throw e
+                    size = Math.max(1, size.intdiv(2))
+                    continue
+                }
+                Map connection = requireConnection(answer, "orderStatusTimeline")
+                synchronized (pagination) { pagination.lookupCalls = ((pagination.lookupCalls ?: 0) as int) + 1 }
+                OmsGqlOrderGrainAssembler.edgeNodes(connection).each { Map n ->
+                    String orderId = n.orderId as String
+                    if (!orderId) return
+                    if (windowFrom != null) {
+                        Long placed = orderDateMillis(((Map) n.order)?.orderDate)
+                        if (placed == null || placed < windowFrom || placed >= thru) return
+                    }
+                    ids.add(orderId)
+                }
+                cursor = nextCursor(connection, seenCursors, "orderStatusTimeline")
+                if (cursor == null) break
+            }
+        }
+        return ids as List<String>
+    }
+
+    private static Long orderDateMillis(Object value) {
+        String text = value?.toString()?.trim()
+        if (!text) return null
+        try {
+            return Instant.parse(text).toEpochMilli()
+        } catch (Exception ignored) {
+            return null
+        }
     }
 
     /** The next cursor, null when done; MALFORMED on "more" without a cursor, or a cursor seen before. */

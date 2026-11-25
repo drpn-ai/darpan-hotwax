@@ -28,7 +28,9 @@ OmsScriptServiceSupport.runExtract(ec, context, [
                     null, a.pageProgressListener, (keepRuleFields instanceof List) ? (List) keepRuleFields : null, extractOptions,
                     OmsGqlOrderPageSource.fetcher(new OmsGqlClient(OmsExtractSupport.toPlainMap(a.sourceConfig)),
                             // DAR-BE-119: an audit re-checking older open findings reads their orders by orderId.
-                            [lookupKeys: (lookupKeys instanceof List) ? (List) lookupKeys : null, lookupKeyField: lookupKeyField]))
+                            [lookupKeys: (lookupKeys instanceof List) ? (List) lookupKeys : null, lookupKeyField: lookupKeyField,
+                             // DAR-BE-356: an audit's read of the window's orders that changed since its last read.
+                             changedSince: OmsExtractSupport.changedSinceMillis(context.changedSince)]))
         },
         afterExtract          : { ->
             int keptNullShopifyIdCount = (requestMetadata?.keptNullShopifyIdCount ?: 0) as int

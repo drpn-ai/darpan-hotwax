@@ -136,13 +136,14 @@ class OmsExtractScriptCharacterizationTests {
                 // DAR-BE-120: read by key, for a conclusion lookup (an order's notes behind R1's "never reached NetSuite").
                 // DAR-BE-318: windowFieldName (orderDate only) and the dataset read's exchange-manifest cap, its own (not the contract's).
                 // DAR-BE-345: keepExchangeOrders, a side's choice to compare exchange orders (re-read by key flagged).
-                "extract#HotWaxOmsGqlOrders"           : [ordersIn + ["keepRuleFields", "lookupKeys", "lookupKeyField", "readFields",
+                // DAR-BE-356: changedSince, an audit's read of the window's orders that changed since its recent read.
+                "extract#HotWaxOmsGqlOrders"           : [ordersIn + ["keepRuleFields", "lookupKeys", "lookupKeyField", "changedSince", "readFields",
                                                                       "conclusionLookup", "keepExchangeOrders", "windowFieldName",
                                                                       "exchangeManifestMaxEntries"], ordersOut],
                 // DAR-BE-094 R8 / R16 added the two returns-scope switches.
                 // DAR-BE-119: lookupKeys / lookupKeyField, an audit's re-check of its older open findings by key.
                 "extract#HotWaxOmsGqlReturns"          : [returnsIn + ["lookupKeys", "lookupKeyField", "includeReturnsWithoutShopifyRef", "withReturnCredit", "onlyCancelledReturns"], plainOut],
-                "extract#HotWaxOmsGqlOrderItems"       : [unitIn + ["lookupKeys", "lookupKeyField"], plainOut],
+                "extract#HotWaxOmsGqlOrderItems"       : [unitIn + ["lookupKeys", "lookupKeyField", "changedSince"], plainOut],
                 // DAR-BE-157 / DAR-BE-186: the orders contract plus a read by productId. Plan 3b-2b, Task 19: no source filters.
                 "extract#HotWaxOmsGqlProducts"         : [ordersIn + ["lookupKeys", "lookupKeyField"], ordersOut],
                 // DAR-BE-129: over GraphQL, any date, so no window.
