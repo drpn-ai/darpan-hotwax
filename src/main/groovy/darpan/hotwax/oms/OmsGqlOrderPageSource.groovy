@@ -512,10 +512,13 @@ class OmsGqlOrderPageSource {
      * status at a time (statusId is required there), and an order is kept only if its orderDate is in the window, so a
      * read by key never reaches outside what a whole-window read would hold.
      */
-    static List<String> changedOrderIds(OmsGqlClient client, long since, long thru, Long windowFrom, Map pagination) {
+    static List<String> changedOrderIds(OmsGqlClient client, long since, long thru, Long windowFrom, Map pagination,
+                                        List<String> statusIds = OmsGqlQueries.CHANGE_STATUS_IDS) {
         LinkedHashSet<String> ids = new LinkedHashSet<String>()
         if (since >= thru) return []
-        OmsGqlQueries.CHANGE_STATUS_IDS.each { String statusId ->
+        // DAR-BE-320: a caller names only the statuses that matter to it (a NetSuite audit read: ITEM_CANCELLED); the
+        // timeline has no order-date key, so each status read is every row written, mostly for orders placed since.
+        statusIds.each { String statusId ->
             String filter = OmsGqlQueries.statusTimelineFilter(statusId, iso(since), iso(thru))
             String cursor = null
             Set<String> seenCursors = [] as Set

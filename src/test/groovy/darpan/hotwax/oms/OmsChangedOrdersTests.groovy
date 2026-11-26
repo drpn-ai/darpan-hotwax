@@ -96,4 +96,41 @@ class OmsChangedOrdersTests {
         assertEquals([], pages)
         assertTrue(requests.every { it.query.toString().contains("orderStatusTimeline") }, "only the status timeline was asked")
     }
+
+    /**
+     * DAR-BE-320. A NetSuite audit read asks HotWax only for the statuses that can move one of its lines into a finding
+     * (gorjana: ITEM_CANCELLED, ~2 pages a morning; completions are ~95% new orders it reads anyway), any order date (the
+     * NetSuite query bounds them by its own window), in slices of at most 31 days; a failed page fails the whole read.
+     */
+    @Test
+    void aNetsuiteReadAsksOnlyTheStatusesItNamesInSlicesTheTimelineTakes() {
+        OmsOrderStatusLookupSupport.setClientFactory { Map config ->
+            client([ITEM_CANCELLED: [[[orderId: "M850040", orderDate: "2026-08-14T12:00:00Z"]], [[orderId: "M1231905", orderDate: null]]],
+                    ITEM_COMPLETED: [[[orderId: "NEVER_ASKED", orderDate: "2026-11-09T00:00:00Z"]]]])
+        }
+        try {
+            long since = Instant.parse("2026-10-01T00:00:00Z").toEpochMilli()
+            Map out = OmsOrderStatusLookupSupport.changedOrderIds(CONFIG, since, NOV_10, ["item_cancelled"])
+            assertEquals(true, out.ok, "${out.errors}")
+            assertEquals(["M850040", "M1231905"], out.orderIds, "any order date, each once, every page followed")
+            assertTrue(requests.every { ((it.variables.q as String) =~ /statusId:(\S+)/)[0][1] == "ITEM_CANCELLED" }, "only the named status")
+            List<String> starts = requests.collect { ((it.variables.q as String) =~ /lastUpdatedTxStamp:>=(\S+)/)[0][1] }.unique()
+            assertEquals(["2026-10-01T00:00:00Z", "2026-11-01T00:00:00Z"], starts, "40 days are asked as 31 + 9")
+            assertEquals(requests.size(), out.calls)
+
+            assertEquals(false, OmsOrderStatusLookupSupport.changedOrderIds(CONFIG, since, NOV_10, []).ok, "no status named: nothing read")
+            assertEquals(false, OmsOrderStatusLookupSupport.changedOrderIds(CONFIG, since, NOV_10, ["ORDER_CANCELLED"]).ok)
+
+            OmsOrderStatusLookupSupport.setClientFactory { Map config ->
+                new OmsGqlClient(CONFIG, { String url, Map headers, String body -> [statusCode: 503, body: "Service Temporarily Unavailable"] })
+                        .with { it.sleeper = { long ms -> }; it }
+            }
+            Map failed = OmsOrderStatusLookupSupport.changedOrderIds(CONFIG, since, NOV_10, ["ITEM_CANCELLED"])
+            assertEquals(false, failed.ok)
+            assertEquals([], failed.orderIds, "a failed read names no order: never a read that left some out")
+            assertTrue(failed.errors[0].toString().startsWith("OMS changed orders read failed"), "${failed.errors}")
+        } finally {
+            OmsOrderStatusLookupSupport.resetClientFactory()
+        }
+    }
 }

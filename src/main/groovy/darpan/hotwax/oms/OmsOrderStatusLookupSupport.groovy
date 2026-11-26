@@ -56,6 +56,37 @@ class OmsOrderStatusLookupSupport {
         }
     }
 
+    /** DAR-BE-320. The OMS order status timeline's widest window (moqui-gql orderStatusTimeline: at most 31 days). */
+    static final long TIMELINE_MAX_MILLIS = 31L * 86_400_000L
+
+    /**
+     * DAR-BE-320. The HotWax orders an item status in statusIds was written for in [since, thru), any order date (a NetSuite
+     * read bounds them by its own window): [ok, orderIds, calls, errors]. Asked from the status timeline (DAR-BE-356), in
+     * slices of at most 31 days. A failed call fails the whole read (ok=false, no ids): never a read that left some out.
+     */
+    static Map<String, Object> changedOrderIds(Object rawConfig, long since, long thru, List<String> statusIds) {
+        List<String> statuses = (statusIds ?: []).collect { normalize(it)?.toUpperCase() }.findAll { it }.unique()
+        if (!statuses) return [ok: false, orderIds: [], calls: 0, errors: ["Name the HotWax item statuses to read changed orders by."]]
+        if (!statuses.every { it ==~ /ITEM_[A-Z_]{1,40}/ }) {
+            return [ok: false, orderIds: [], calls: 0, errors: ["HotWax item statuses are ITEM_..., got ${statuses}".toString()]]
+        }
+        Map<String, Object> config = OmsExtractSupport.toPlainMap(rawConfig)
+        if (!config) return [ok: false, orderIds: [], calls: 0, errors: ["OMS source config could not be read."]]
+        Map pagination = [lookupCalls: 0]
+        try {
+            OmsGqlClient client = (OmsGqlClient) clientFactory.call(config)
+            LinkedHashSet<String> ids = new LinkedHashSet<String>()
+            for (long from = since; from < thru; from += TIMELINE_MAX_MILLIS) {
+                ids.addAll(OmsGqlOrderPageSource.changedOrderIds(client, from, Math.min(thru, from + TIMELINE_MAX_MILLIS), null,
+                        pagination, statuses))
+            }
+            return [ok: true, orderIds: ids as List<String>, calls: pagination.lookupCalls, errors: []]
+        } catch (Exception e) {
+            return [ok: false, orderIds: [], calls: pagination.lookupCalls,
+                    errors: ["OMS changed orders read failed: ${e.message}".toString()]]
+        }
+    }
+
     /** Key of one item in itemStatusByKey: the OMS order id and the item's seq id. */
     static String itemKey(Object orderId, Object orderItemSeqId) {
         return "${normalize(orderId)}|${normalize(orderItemSeqId)}".toString()

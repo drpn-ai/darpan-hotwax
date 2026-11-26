@@ -479,6 +479,31 @@
         </out-parameters>
     </service>
 
+    <service verb="read" noun="HotWaxOmsChangedOrderIds" type="script" transaction="ignore"
+            allow-remote="false" authenticate="true"
+            location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/lookup/readOmsChangedOrderIds.groovy">
+        <description>DAR-BE-320. The HotWax orders one of statusIds (item statuses, e.g. ITEM_CANCELLED) was written for since
+            changedSince, any order date, from the order status timeline (DAR-BE-356) in slices of at most 31 days. A NetSuite
+            audit read by change asks it before its query, so a line HotWax cancelled is read again although no NetSuite
+            stamp moved. A failed read returns ok=false and no ids.</description>
+        <in-parameters>
+            <parameter name="omsRestSourceConfigId" required="true"/>
+            <parameter name="changedSince" type="Timestamp" required="true"/>
+            <parameter name="changedThru" type="Timestamp"><description>Exclusive end; default now.</description></parameter>
+            <parameter name="statusIds" type="List" required="true"/>
+            <parameter name="companyUserGroupId">
+                <description>Trusted run owner tenant; when present, config access is checked against it
+                    instead of a user-session active tenant.</description>
+            </parameter>
+        </in-parameters>
+        <out-parameters>
+            <parameter name="ok" type="Boolean"/>
+            <parameter name="orderIds" type="List"/>
+            <parameter name="calls" type="Integer"><description>Timeline pages asked.</description></parameter>
+            <parameter name="errors" type="List"/>
+        </out-parameters>
+    </service>
+
     <service verb="lookup" noun="HotWaxOmsReturnsByExternalId" type="script" transaction="ignore" allow-remote="false" authenticate="true"
             location="component://darpan-hotwax/src/main/groovy/darpan/hotwax/reconciliation/lookup/lookupOmsReturnsByExternalId.groovy">
         <description>Point-existence check for OMS return ids over GraphQL, the missing-in-OMS mirror of Shopify's lookup#ShopifyRefundOrReturnIds. The saved-run verification
