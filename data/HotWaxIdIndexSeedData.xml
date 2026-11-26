@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  DAR-BE-374: the ids the ID index takes from what Darpan already reads from HotWax (run extracts and kept copies; the index
+  never calls HotWax itself). Paths are the OMS_GQL and OMS_RETURNS_GQL record fields (SourceSystemConnectorSeedDataFields).
+  externalId on an order is the Shopify order id; a return names its order in Shopify and NetSuite. Product rows: a tenant
+  adds, overrides or hides fields in TenantIdIndexField.
+-->
+<entity-facade-xml type="darpan-seed">
+    <darpan.idindex.IdIndexSource systemEnumId="OMS_GQL" systemCode="OMS" recordKind="ORDER" idField="orderId" isActive="Y"
+            description="HotWax orders"/>
+    <darpan.idindex.IdIndexField systemEnumId="OMS_GQL" fieldId="OMS_ORDER_ID" fieldPath="orderId" role="OWN"
+            description="The HotWax order id"/>
+    <darpan.idindex.IdIndexField systemEnumId="OMS_GQL" fieldId="OMS_ORDER_NAME" fieldPath="orderName" role="OWN"
+            description="The order name as HotWax keeps it"/>
+    <darpan.idindex.IdIndexField systemEnumId="OMS_GQL" fieldId="OMS_EXTERNAL_ID" fieldPath="externalId" role="REF" refRecordKind="ORDER"
+            description="The Shopify order id this HotWax order came from"/>
+
+    <darpan.idindex.IdIndexSource systemEnumId="OMS_RETURNS_GQL" systemCode="OMS" recordKind="RETURN" idField="returnId" isActive="Y"
+            description="HotWax returns"/>
+    <darpan.idindex.IdIndexField systemEnumId="OMS_RETURNS_GQL" fieldId="OMS_RETURN_ID" fieldPath="returnId" role="OWN"
+            description="The HotWax return id"/>
+    <darpan.idindex.IdIndexField systemEnumId="OMS_RETURNS_GQL" fieldId="OMS_RETURN_EXTERNAL_ID" fieldPath="externalId" role="REF" refRecordKind="RETURN"
+            description="The return's id where it came from"/>
+    <darpan.idindex.IdIndexField systemEnumId="OMS_RETURNS_GQL" fieldId="OMS_RETURN_SHOPIFY_RETURN" fieldPath="shopifyReturnId" role="REF" refRecordKind="RETURN"
+            description="The Shopify return"/>
+    <darpan.idindex.IdIndexField systemEnumId="OMS_RETURNS_GQL" fieldId="OMS_RETURN_ORDER_EXTERNAL" fieldPath="orderExternalId" role="REF" refRecordKind="ORDER"
+            description="The Shopify order the return belongs to"/>
+    <darpan.idindex.IdIndexField systemEnumId="OMS_RETURNS_GQL" fieldId="OMS_RETURN_ORDER_NETSUITE" fieldPath="orderNetsuiteId" role="REF" refRecordKind="ORDER"
+            description="The NetSuite sales order the return belongs to"/>
+</entity-facade-xml>
