@@ -88,7 +88,7 @@ class OmsAgentQuerySmokeTests {
     void reset() {
         ec.message.clearErrors()
         sent.clear()
-        ec.cache.getCache(OmsAgentQuerySupport.CACHE_NAME).clear()
+        ec.cache.getCache(darpan.agent.AgentQuerySupport.SCHEMA_CACHE_NAME).clear()
         answer = { String body -> [statusCode: 200, body: JsonOutput.toJson([data: [orders: [edges: [[node: [id: 1]], [node: [id: 2]]]]], errors: []])] }
         AgentQueryLane.reset()
         OmsAgentQuerySupport.senderFactory = { { String url, Map headers, String body ->
@@ -311,7 +311,7 @@ class OmsAgentQuerySmokeTests {
         Map config = [baseUrl: "https://x.test", connectTimeoutSeconds: 30, readTimeoutSeconds: 120]
         assertEquals(15, Math.min(OmsAgentQuerySupport.CONNECT_TIMEOUT_SECONDS, config.connectTimeoutSeconds as int))
         assertTrue(OmsAgentQuerySupport.READ_TIMEOUT_SECONDS < 60)
-        assertNull(OmsAgentQuerySupport.edgeCount([a: 1, b: 2]))
+        assertNull(darpan.agent.AgentQuerySupport.edgeCount([a: 1, b: 2]))
     }
 
     private Map run(String tenant, String configId, String document) {
