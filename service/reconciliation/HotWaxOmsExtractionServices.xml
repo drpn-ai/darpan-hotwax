@@ -4,6 +4,7 @@
 
     <service verb="extract" noun="HotWaxOmsOrdersContract" type="interface">
         <description>The parameters every OMS order-grain extract takes (an interface: extract#HotWaxOmsGqlOrders, extract#HotWaxOmsGqlProducts implement it). Writes normalized JSON output to the automation data-manager folder.</description>
+        <implements service="reconciliation.SourceConnectorContractServices.define#SourceExtractOutputs"/>
         <in-parameters>
             <parameter name="omsRestSourceConfigId" required="true">
                 <description>Tenant-owned HotWaxOmsRestSourceConfig identifier.</description>
@@ -51,17 +52,10 @@
             </parameter>
         </in-parameters>
         <out-parameters>
-            <parameter name="dataAvailable" type="Boolean"/>
-            <parameter name="fileLocation"/>
             <parameter name="exchangeManifestFileLocation">
                 <description>Location of the exchange-manifest sidecar written when the window contained
                     excluded exchange orders; null otherwise. Identities/amounts only, capped at 500 entries.</description>
             </parameter>
-            <parameter name="fileName"/>
-            <parameter name="recordCount" type="Integer"/>
-            <parameter name="requestMetadata" type="Map"/>
-            <parameter name="warnings" type="List"/>
-            <parameter name="errors" type="List"/>
         </out-parameters>
     </service>
 
@@ -160,6 +154,7 @@
 
     <service verb="extract" noun="HotWaxOmsReturnsContract" type="interface">
         <description>The parameters every OMS returns extract takes (an interface: extract#HotWaxOmsGqlReturns implements it). Writes normalized JSON output to the automation data-manager folder.</description>
+        <implements service="reconciliation.SourceConnectorContractServices.define#SourceExtractOutputs"/>
         <in-parameters>
             <parameter name="omsRestSourceConfigId" required="true">
                 <description>Tenant-owned HotWaxOmsRestSourceConfig identifier: the same OMS credentials and baseUrl
@@ -206,15 +201,6 @@
                 <description>Optional expected total, which adds a progress percent alongside the count.</description>
             </parameter>
         </in-parameters>
-        <out-parameters>
-            <parameter name="dataAvailable" type="Boolean"/>
-            <parameter name="fileLocation"/>
-            <parameter name="fileName"/>
-            <parameter name="recordCount" type="Integer"/>
-            <parameter name="requestMetadata" type="Map"/>
-            <parameter name="warnings" type="List"/>
-            <parameter name="errors" type="List"/>
-        </out-parameters>
     </service>
 
     <service verb="extract" noun="HotWaxOmsGqlReturns" type="script" transaction="ignore" allow-remote="false" authenticate="true"
@@ -278,6 +264,7 @@
 
             NO keepRecordFields: the unit record IS the projection. Passing an order-shaped field
             list would strip every field a unit record has and still report a successful extract.</description>
+        <implements service="reconciliation.SourceConnectorContractServices.define#SourceExtractOutputs"/>
         <in-parameters>
             <parameter name="omsRestSourceConfigId" required="true">
                 <description>Tenant-owned HotWaxOmsRestSourceConfig identifier: the same OMS credentials and
@@ -329,9 +316,6 @@
             </parameter>
         </in-parameters>
         <out-parameters>
-            <parameter name="dataAvailable" type="Boolean"/>
-            <parameter name="fileLocation"/>
-            <parameter name="fileName"/>
             <parameter name="recordCount" type="Integer">
                 <description>Number of UNITS written, not orders.</description>
             </parameter>
@@ -340,8 +324,6 @@
                     filter counts. Those two record units the extract could not key and therefore LOST,
                     which is a different thing from a record a filter excluded on purpose.</description>
             </parameter>
-            <parameter name="warnings" type="List"/>
-            <parameter name="errors" type="List"/>
         </out-parameters>
     </service>
 

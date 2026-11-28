@@ -129,8 +129,9 @@ class OmsExtractScriptCharacterizationTests {
         List<String> unitIn = ["omsRestSourceConfigId", "automationExecutionId", "companyUserGroupId", "windowStart",
                                "windowEnd", "windowFieldName", "orderStatusIds", "outputLocation", "fileName", "keepRuleFields",
                                "reconciliationRunResultId", "progressStageCode", "expectedRecordCount"]
-        List<String> ordersOut = ["dataAvailable", "fileLocation", "exchangeManifestFileLocation", "fileName", "recordCount",
-                                  "requestMetadata", "warnings", "errors"]
+        // S99-057: the seven every extract returns come from darpan's define#SourceExtractOutputs; the orders contract's own follows.
+        List<String> ordersOut = ["dataAvailable", "fileLocation", "fileName", "recordCount", "requestMetadata", "warnings", "errors",
+                                  "exchangeManifestFileLocation"]
         List<String> plainOut = ["dataAvailable", "fileLocation", "fileName", "recordCount", "requestMetadata", "warnings", "errors"]
         Map<String, List<List<String>>> expected = [
                 // DAR-BE-120: read by key, for a conclusion lookup (an order's notes behind R1's "never reached NetSuite").
