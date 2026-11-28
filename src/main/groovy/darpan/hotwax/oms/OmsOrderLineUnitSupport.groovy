@@ -1,5 +1,7 @@
 package darpan.hotwax.oms
 
+import static darpan.common.ValueSupport.normalizeBlankToNull as normalize
+
 /**
  * DAR-BE-050. Flattens one OMS order document into one record per UNIT.
  *
@@ -25,7 +27,7 @@ class OmsOrderLineUnitSupport {
      *        order id. False (the OMS_ORDER_ITEMS connector, tri-system D4) EMITS those items with
      *        whichever Shopify id is null left null, because the NetSuite hops key on the OMS order.
      * @return [units: List&lt;Map&gt;, droppedNullLineId: int, nonUnitQuantityCount: int,
-     *         keptNullShopifyIdCount: int]
+     *         keptNullShopifyIdCount: int, droppedNonPositiveQuantity: int]
      *         Dropped units are COUNTED, never silently discarded: a clean run whose metadata
      *         says 400 units were dropped is not a clean run. Kept-but-unkeyed items are counted
      *         apart, per ITEM like droppedNullLineId, so neither number is mistaken for the other.
@@ -35,8 +37,11 @@ class OmsOrderLineUnitSupport {
         int droppedNullLineId = 0
         int nonUnitQuantityCount = 0
         int keptNullShopifyIdCount = 0
+        // DAR-OPS-029 S40b (OC146): items whose quantity is zero, negative or unreadable make no unit; counted apart from
+        // nonUnitQuantityCount (every item not of quantity 1), so a lost item is never read as a multi-unit one.
+        int droppedNonPositiveQuantity = 0
         if (order == null) {
-            return [units: units, droppedNullLineId: 0, nonUnitQuantityCount: 0, keptNullShopifyIdCount: 0]
+            return [units: units, droppedNullLineId: 0, nonUnitQuantityCount: 0, keptNullShopifyIdCount: 0, droppedNonPositiveQuantity: 0]
         }
         boolean requireShopifyLineId = options?.get("requireShopifyLineId") != false
 
@@ -112,6 +117,7 @@ class OmsOrderLineUnitSupport {
             for (Map item : lineItems) {
                 int quantity = toPositiveInt(item.get("quantity"))
                 if (quantity != 1) nonUnitQuantityCount++
+                if (quantity == 0) droppedNonPositiveQuantity++
                 String statusId = normalize(item.get("statusId"))
                 String unitState = unitStateOf(statusId)
                 for (int copy = 0; copy < quantity; copy++) {
@@ -151,7 +157,8 @@ class OmsOrderLineUnitSupport {
         return [units                 : units,
                 droppedNullLineId     : droppedNullLineId,
                 nonUnitQuantityCount  : nonUnitQuantityCount,
-                keptNullShopifyIdCount: keptNullShopifyIdCount]
+                keptNullShopifyIdCount: keptNullShopifyIdCount,
+                droppedNonPositiveQuantity: droppedNonPositiveQuantity]
     }
 
     /**
@@ -186,11 +193,6 @@ class OmsOrderLineUnitSupport {
 
     private static List asList(Object value) {
         return value instanceof List ? (List) value : []
-    }
-
-    private static String normalize(Object value) {
-        String text = value?.toString()?.trim()
-        return text ? text : null
     }
 
     /** A zero, negative, or unparseable quantity emits no unit rather than a negative loop. */

@@ -312,4 +312,24 @@ class OmsOrderLineUnitSupportTests {
         Map result = OmsOrderLineUnitSupport.flattenOrderToUnits(order)
         assertEquals(["POS_SALES_CHANNEL"], ((List<Map>) result.units)*.salesChannelEnumId.unique())
     }
+
+    /**
+     * DAR-OPS-029 S40b (OUTPUT CHANGE C): an item whose quantity is zero, negative or unreadable makes no unit and is
+     * counted on its own (droppedNonPositiveQuantity); nonUnitQuantityCount still counts every item not of quantity 1.
+     * A missing quantity reads as 1 (HotWax always sends one).
+     */
+    @Test
+    void anItemWithNoUsableQuantityIsCountedApartFromMultiUnitItems() {
+        List quantities = [1, 0, -2, null, "abc", 3]
+        List items = quantities.withIndex().collect { Object q, int i ->
+            [orderItemSeqId: String.format("%05d", i + 1), externalId: "L${i + 1}".toString(), quantity: q, statusId: "ITEM_APPROVED"]
+        }
+        Map result = OmsOrderLineUnitSupport.flattenOrderToUnits([orderId: "M1", externalId: "S1", shipGroups: [[items: items]]])
+
+        Map<String, Integer> unitsPerLine = ((List<Map>) result.units).countBy { it.shopifyLineId as String }
+        assertEquals([L1: 1, L4: 1, L6: 3], unitsPerLine)
+        assertEquals(3, result.droppedNonPositiveQuantity)
+        assertEquals(4, result.nonUnitQuantityCount)
+        assertEquals(0, result.droppedNullLineId)
+    }
 }
