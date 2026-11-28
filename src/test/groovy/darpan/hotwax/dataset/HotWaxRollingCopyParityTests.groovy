@@ -586,7 +586,20 @@ class HotWaxRollingCopyParityTests {
         }
     }
 
+    /**
+     * DAR-OPS-029 (S40a/S40c, after darpan OC164): store#Dataset now resolves its source config like any API source (owner or
+     * shared, active, enabled), so each connection the copies read through exists as A's own active HotWax config.
+     */
+    private void ensureConfig(String conn) {
+        def existing = ec.entity.find("darpan.hotwax.HotWaxOmsRestSourceConfig").condition("omsRestSourceConfigId", conn)
+                .disableAuthz().useCache(false).one()
+        if (existing != null) return
+        ec.entity.makeValue("darpan.hotwax.HotWaxOmsRestSourceConfig").setAll([omsRestSourceConfigId: conn, companyUserGroupId: A,
+                description: conn, baseUrl: "https://oms.test", authType: "NONE", timeZone: "UTC", isActive: "Y"]).create()
+    }
+
     private String rollingReturns(String conn) {
+        ensureConfig(conn)
         Map stored = underFacadeGrant("dataset.DatasetServices.store#Dataset", [systemEnumId: "OMS_RETURNS_GQL", sourceConfigId: conn,
                 options: [:], idField: "returnId", windowField: "entryDate", readRuleEnumId: "DRR_ROLLING"])
         assertEquals([], stored.errors)
@@ -609,6 +622,7 @@ class HotWaxRollingCopyParityTests {
 
     private void setStatus(String id, String statusId, String conn = CONN, String system = "OMS_RETURNS_GQL",
                            String idField = "returnId", String windowField = "entryDate") {
+        ensureConfig(conn)
         assertEquals([], underFacadeGrant("dataset.DatasetServices.store#Dataset", [datasetId: id, statusId: statusId,
                 systemEnumId: system, sourceConfigId: conn, options: [:], idField: idField, windowField: windowField]).errors)
     }
@@ -701,6 +715,7 @@ class HotWaxRollingCopyParityTests {
     }
 
     private String rollingOrders(String conn) {
+        ensureConfig(conn)
         Map stored = underFacadeGrant("dataset.DatasetServices.store#Dataset", [systemEnumId: "OMS_GQL", sourceConfigId: conn,
                 options: [:], idField: "orderId", windowField: "orderDate", readRuleEnumId: "DRR_ROLLING"])
         assertEquals([], stored.errors)
