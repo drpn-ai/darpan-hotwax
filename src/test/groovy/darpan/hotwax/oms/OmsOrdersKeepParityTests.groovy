@@ -339,14 +339,28 @@ class OmsOrdersKeepParityTests {
     }
 
     /** RunConclusionSupport reads each key the same from BEFORE's file (and side file) as from AFTER's file and Keep artifacts. */
+    /**
+     * Each key concludes as the read did, except OC67 (darpan 6257e618): a record the Keep set aside is named in its rows file,
+     * so on the Keep path its key reads EXCLUDED, where the old read, which left the record out of the file, said UNKNOWN (a
+     * tenant rule and no side file) or ABSENT (built-in rules only). Which keys were set aside is read from the rows file
+     * itself, not from the code under test.
+     */
     private static void assertConcludesTheSame(Map before, Map after, List<Map> everyRecord, List<String> keyFields) {
         Set<String> keys = everyRecord.collect { ConclusionKeySupport.compareKey(it, keyFields, null) } as Set<String>
         Set<String> firsts = keys.collect { ConclusionKeySupport.firstField(it) } as Set<String>
         Map oldIndex = RunConclusionSupport.indexSide([extractFile: before.file, keyFields: keyFields], keys, firsts)
         Map newIndex = RunConclusionSupport.indexSide([extractFile: after.file, keyFields: keyFields], keys, firsts)
         assertEquals(oldIndex.unknownWhenAbsent, newIndex.unknownWhenAbsent, "unknown when absent")
+        Set<String> setAside = [] as Set<String>
+        KeepArtifacts.forEachSetAsideRecord((File) after.file) { Map record, String ruleId ->
+            String key = ConclusionKeySupport.compareKey(record, keyFields, null)
+            if (key) setAside.add(key)
+        }
         keys.each { String key ->
-            assertEquals(RunConclusionSupport.lookup(oldIndex, key).presence, RunConclusionSupport.lookup(newIndex, key).presence, key)
+            String was = RunConclusionSupport.lookup(oldIndex, key).presence
+            String now = RunConclusionSupport.lookup(newIndex, key).presence
+            if (setAside.contains(key) && now != "KEPT") assertEquals("EXCLUDED", now, "${key}: the Keep set it aside (OC67)")
+            else assertEquals(was, now, key)
         }
         assertTrue(keys.any { RunConclusionSupport.lookup(newIndex, it).presence == "KEPT" })
     }
