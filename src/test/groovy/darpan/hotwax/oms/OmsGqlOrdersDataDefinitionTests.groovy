@@ -79,6 +79,9 @@ class OmsGqlOrdersDataDefinitionTests {
             [orderId: "O3", orderItemSeqId: "00001", toOrderId: "O9", toOrderItemSeqId: "00001", orderItemAssocTypeId: "EXCHANGE"],
             [orderId: "O3", orderItemSeqId: "00002", toOrderId: "O10", toOrderItemSeqId: "00001", orderItemAssocTypeId: "EXCHANGE"],
             [orderId: "O6", orderItemSeqId: "00001", toOrderId: "O11", toOrderItemSeqId: "00001", orderItemAssocTypeId: "REPLACEMENT"],
+            // DAR-BE-300: an EXC- order outside the window exchanging two of O1's lines (one assoc row a line).
+            [orderId: "EXC9", orderItemSeqId: "00001", toOrderId: "O1", toOrderItemSeqId: "00001", orderItemAssocTypeId: "EXCHANGE"],
+            [orderId: "EXC9", orderItemSeqId: "00002", toOrderId: "O1", toOrderItemSeqId: "00002", orderItemAssocTypeId: "EXCHANGE"],
     ]
     /** DAR-BE-368: item rows, out of item order on purpose; P_NONAME has no internalName (its SKU is null). */
     static final List<Map> ITEMS = [
@@ -86,6 +89,8 @@ class OmsGqlOrdersDataDefinitionTests {
             [orderId: "O1", orderItemSeqId: "00001", externalId: "L11", productId: "P_SKU_A", quantity: 1, statusId: "ITEM_COMPLETED", shipGroupSeqId: "00001"],
             [orderId: "O5", orderItemSeqId: "00001", externalId: null, productId: "P_NONAME", quantity: 3, statusId: "ITEM_CREATED", shipGroupSeqId: "00001"],
             [orderId: "O3", orderItemSeqId: "00001", externalId: "L31", productId: "P_SKU_A", quantity: 1, statusId: "ITEM_COMPLETED", shipGroupSeqId: "00001"],
+            [orderId: "EXC9", orderItemSeqId: "00001", externalId: "LX1", productId: "P_SKU_A", quantity: 1, statusId: "ITEM_APPROVED", shipGroupSeqId: "00001"],
+            [orderId: "EXC9", orderItemSeqId: "00002", externalId: "LX2", productId: "P_SKU_B", quantity: "2.000000", statusId: "ITEM_APPROVED", shipGroupSeqId: "00001"],
     ]
     static final List<Map> PRODUCTS = [[productId: "P_SKU_A", internalName: "SKU-A"], [productId: "P_SKU_B", internalName: "SKU-B"],
                                        [productId: "P_NONAME", internalName: null]]
@@ -115,7 +120,7 @@ class OmsGqlOrdersDataDefinitionTests {
                 } else if (op == "OmsExchangeAssocs") {
                     root = "orderItemAssocs"
                     rows = ASSOCS.findAll { matches(it, (String) vars.q) }
-                } else if (op == "OmsUnitOrderItems") {
+                } else if (op == "OmsUnitOrderItems" || op == "OmsOrderItemQuantities") {
                     root = "orderItems"
                     rows = ITEMS.findAll { matches(it, (String) vars.q) }
                 } else if (op == "OmsProductNames") {
@@ -338,6 +343,25 @@ class OmsGqlOrdersDataDefinitionTests {
         Map without = data(lean, window(BASE))
         assertTrue(((List<Map>) without.records).every { !it.containsKey("orderItems") }, "not asked, not written")
         assertTrue(lean.calls.every { it.op != "OmsUnitOrderItems" && it.op != "OmsProductNames" }, "not asked, not read")
+    }
+
+    /**
+     * DAR-BE-251 + DAR-BE-300 (S40d): itemQuantity, the order's units, plus those of the EXC- orders exchanging its lines
+     * (Shopify keeps an exchange line on the original order). HotWax writes one EXCHANGE assoc a line, so an EXC- order
+     * counts once, not once a line; quantity may come as text. No item read when nothing asks for it.
+     */
+    @Test
+    void itemQuantityCountsTheOrdersUnitsAndItsExchangeOrdersOnce() {
+        List<String> keep = BASE + ["itemQuantity"]
+        Map d = data(new Server(), window(keep))
+        assertSame(coded(new Server(), keep), d, "keep itemQuantity")
+        Map<String, Map> byId = ((List<Map>) d.records).collectEntries { [(it.orderId): it] }
+        assertEquals("6", byId.O1.itemQuantity, "O1's 3 units and EXC9's 3, once")
+        assertEquals("3", byId.O5.itemQuantity)
+        assertEquals("0", byId.O2.itemQuantity, "no item is 0")
+        Server lean = new Server()
+        data(lean, window(BASE))
+        assertTrue(lean.calls.every { it.op != "OmsOrderItemQuantities" && !(it.q as String)?.startsWith("toOrderId:") }, "not asked, not read")
     }
 
     @Test
