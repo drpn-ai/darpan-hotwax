@@ -40,7 +40,9 @@ class KeptFieldsProjectionTieTests {
         assertTrue(OmsKeptFieldsProjection.specFor("OMS_GQL").is(ORDERS))
         assertTrue(OmsKeptFieldsProjection.specFor("OMS_RETURNS_GQL").is(OmsKeptFieldsProjection.OMS_RETURNS))
         // the companion the order read keeps with the raw payment rows
-        assertEquals([(OmsGqlQueries.RAW_PAYMENTS_FIELD): ["paymentPreferenceSlotsFull"] as Set], ORDERS.companions)
+        // S99-025 (OC224): each nested list travels with its full flag, as the raw payment rows with theirs.
+        assertEquals([(OmsGqlQueries.RAW_PAYMENTS_FIELD): ["paymentPreferenceSlotsFull"] as Set, identifications: ["identificationsFull"] as Set,
+                      shipGroups: ["shipGroupsFull"] as Set, notes: ["notesFull"] as Set, statuses: ["statusesFull"] as Set], ORDERS.companions)
         assertEquals(["orderId", "paymentPreferences", "paymentPreferenceSlotsFull"] as Set,
                 OmsGqlQueries.keepWithCompanions(["orderId", "paymentPreferences"] as Set))
         // the exchange manifest a live order read lists at most

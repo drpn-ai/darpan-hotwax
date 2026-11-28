@@ -49,9 +49,18 @@ class OmsGqlQueries {
     /** Always selected: the compare key, the built-in non-sales filter, and the REST keepFieldsBase. */
     static final List<String> ALWAYS_FIELDS = ["orderId", "orderName", "externalId", "statusId", "orderTypeId",
             "orderDate", "grandTotal"]
-    /** Computed by OmsGqlOrderGrainAssembler from paymentPreferences and statusId, which are always selected. */
-    static final Set<String> DERIVED_FIELDS = ["hasPaymentPreference", "paymentMethodTypeIds", "paymentPreferenceSlotsFull",
-            "isCompleted", "paymentRefNums", ITEM_QUANTITY_FIELD, ORDER_ITEMS_FIELD] as Set
+    /**
+     * S99-025 (OC224): each nested list read with first: N (NESTED_FIELDS' limit) and its flag, true when the list holds N
+     * rows and so may be cut short. Written only on a list that came back non-empty; asking for a flag reads its list.
+     */
+    static final Map<String, String> NESTED_FULL_FLAGS = [identifications: "identificationsFull", shipGroups: "shipGroupsFull",
+                                                          notes: "notesFull", statuses: "statusesFull"].asImmutable()
+    /**
+     * Computed by OmsGqlOrderGrainAssembler: from paymentPreferences and statusId, which are always selected, from the items
+     * read by order id (itemQuantity, orderItems), and from a nested list (NESTED_FULL_FLAGS).
+     */
+    static final Set<String> DERIVED_FIELDS = (["hasPaymentPreference", "paymentMethodTypeIds", "paymentPreferenceSlotsFull",
+            "isCompleted", "paymentRefNums", ITEM_QUANTITY_FIELD, ORDER_ITEMS_FIELD] + NESTED_FULL_FLAGS.values()) as Set
     /**
      * DAR-BE-251: the order's units, the sum of its item rows' quantities (HotWax keeps one row per unit where Shopify has
      * one line of several: #42424EU, 1 line of 8, 8 rows). Equal to Shopify subtotalLineItemsQuantity on 590 of 590 RAILS
@@ -72,15 +81,15 @@ class OmsGqlQueries {
     static final String RAW_PAYMENTS_FIELD = "paymentPreferences"
     /** Nested lists, selected only when something reads them, with their measured per-order cost. */
     static final Map<String, Map> NESTED_FIELDS = [
-            identifications: [selection: "identifications(first: 5) { orderIdentificationTypeId idValue }", cost: 18.0d],
-            shipGroups     : [selection: "shipGroups(first: 3) { edges { node { shipGroupSeqId facilityId shipmentMethodTypeId } } }", cost: 12.5d],
+            identifications: [selection: "identifications(first: 5) { orderIdentificationTypeId idValue }", cost: 18.0d, limit: 5],
+            shipGroups     : [selection: "shipGroups(first: 3) { edges { node { shipGroupSeqId facilityId shipmentMethodTypeId } } }", cost: 12.5d, limit: 3],
             // DAR-UI-081 (Aditi: "all findings should have basic order info"): the bill-to customer's name (gorjana
             // 2026-10-26: 60 orders 780 -> 910 requested, ~2.2 an order).
             billToCustomer : [selection: "billToCustomer { firstName lastName }", cost: 2.2d],
             // Aditi 2026-10-24 (R1 F-100794): HotWax marks a duplicate order with a note ("duplicate order"). Estimated.
-            notes          : [selection: "notes(first: 5) { note { noteInfo } }", cost: 25.0d],
+            notes          : [selection: "notes(first: 5) { note { noteInfo } }", cost: 25.0d, limit: 5],
             // Aditi 2026-10-24: NetSuite bills a fulfilled item within 24 hours; the order's statuses say when it was fulfilled.
-            statuses       : [selection: "statuses(first: 12) { statusId statusDatetime orderItemSeqId }", cost: 50.0d],
+            statuses       : [selection: "statuses(first: 12) { statusId statusDatetime orderItemSeqId }", cost: 50.0d, limit: 12],
     ]
 
     /**
@@ -133,7 +142,7 @@ class OmsGqlQueries {
         }
         LinkedHashSet<String> scalars = new LinkedHashSet<String>(ALWAYS_FIELDS)
         wanted.findAll { HEADER_FIELDS.contains(it) }.each { scalars.add(it) }
-        List<String> nested = NESTED_FIELDS.keySet().findAll { wanted.contains(it) } as List<String>
+        List<String> nested = NESTED_FIELDS.keySet().findAll { wanted.contains(it) || wanted.contains(NESTED_FULL_FLAGS[it]) } as List<String>
 
         int extraScalars = scalars.size() - ALWAYS_FIELDS.size()
         boolean refNums = wanted.contains("paymentRefNums")
@@ -432,8 +441,10 @@ class OmsGqlQueries {
         // DAR-BE-153: paymentRefNums needs manualRefNum from six slots, which the shared read does not ask for.
         // DAR-BE-251: nor itemQuantity, read from the items only by a read that asks for it.
         // DAR-BE-368: nor orderItems, read the same way.
-        return (requiredFields ?: []).every { it != "paymentRefNums" && it != ITEM_QUANTITY_FIELD && it != ORDER_ITEMS_FIELD &&
-                (ALWAYS_FIELDS.contains(it) || SHARED_ORDER_FIELDS.contains(it) || DERIVED_FIELDS.contains(it)) }
+        // S99-025: a list's full flag is covered exactly when its list is.
+        Map<String, String> listOfFlag = NESTED_FULL_FLAGS.collectEntries { k, v -> [(v): k] }
+        return (requiredFields ?: []).collect { listOfFlag[it] ?: it }.every { it != "paymentRefNums" && it != ITEM_QUANTITY_FIELD &&
+                it != ORDER_ITEMS_FIELD && (ALWAYS_FIELDS.contains(it) || SHARED_ORDER_FIELDS.contains(it) || DERIVED_FIELDS.contains(it)) }
     }
 
     // DAR-BE-116: the items an ORDER_LINE_UNIT extract flattens, asked by orderId in batches (nesting

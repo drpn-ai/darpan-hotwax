@@ -206,4 +206,23 @@ class OmsGqlOrderGrainAssemblerTests {
         assertEquals(["6", "0"], orders.collect { it.itemQuantity },
                 "both exchanges add to M1; an exchange of an order not on the page, or with no item row, adds nothing")
     }
+
+    /**
+     * S99-025 (OC224): identifications, shipGroups, notes and statuses are read with first: N, so a list holding N rows may
+     * be cut short. Its <list>Full flag says so; a list below N is complete, and an empty or unread list carries no flag.
+     */
+    @Test
+    void aNestedListThatFillsItsFirstNIsFlaggedFull() {
+        Map full = order("F1") + [identifications: (1..5).collect { [orderIdentificationTypeId: "T", idValue: "${it}"] },
+                notes: (1..5).collect { [note: [noteInfo: "n${it}"]] }, statuses: (1..12).collect { [statusId: "S${it}"] },
+                shipGroups: [edges: (1..3).collect { [node: [shipGroupSeqId: "0000${it}"]] }]]
+        Map part = order("P1") + [identifications: [[idValue: "1"]], notes: (1..4).collect { [note: [noteInfo: "n"]] },
+                statuses: (1..11).collect { [statusId: "S"] }, shipGroups: [edges: [[node: [shipGroupSeqId: "00001"]]]]]
+        Map none = order("N1") + [identifications: [], notes: null, shipGroups: [edges: []]]
+        List<Map> out = OmsGqlOrderGrainAssembler.assemble([full, part, none], [])
+        assertEquals([true, true, true, true], ["identificationsFull", "shipGroupsFull", "notesFull", "statusesFull"].collect { out[0].get(it) })
+        assertEquals([false, false, false, false], ["identificationsFull", "shipGroupsFull", "notesFull", "statusesFull"].collect { out[1].get(it) })
+        assertTrue(["identificationsFull", "shipGroupsFull", "notesFull", "statusesFull"].every { !out[2].containsKey(it) },
+                "an empty list is not cut short, and an unread one claims nothing: ${out[2]}")
+    }
 }

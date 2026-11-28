@@ -98,6 +98,11 @@ class OmsGqlOrderGrainAssembler {
             order.put("isCompleted", order.get("statusId") == "ORDER_COMPLETED" ? "Y" : "N")
 
             if (order.containsKey("shipGroups")) order.put("shipGroups", edgeNodes(order.get("shipGroups")))
+            // S99-025 (OC224): a list holding its first: N rows may be cut short; an empty or unread one claims nothing.
+            OmsGqlQueries.NESTED_FULL_FLAGS.each { String list, String flag ->
+                Object rows = order.get(list)
+                if (rows instanceof Collection && rows) order.put(flag, rows.size() >= (OmsGqlQueries.NESTED_FIELDS[list].limit as int))
+            }
 
             // REST's value types (review I5): orderDate as epoch millis, grandTotal as a number. A value
             // that does not parse is kept as it came rather than dropped.

@@ -62,7 +62,9 @@ class OmsKeptFieldsProjection {
 
     /** HotWax OMS orders (extract#HotWaxOmsGqlOrders, order grain). */
     static final Spec OMS_ORDERS = new Spec(
-            companions: [paymentPreferences: ["paymentPreferenceSlotsFull"] as Set<String>],
+            // S99-025: each nested list keeps its full flag too (OmsGqlQueries.NESTED_FULL_FLAGS).
+            companions: [paymentPreferences: ["paymentPreferenceSlotsFull"] as Set<String>] +
+                    OmsGqlQueries.NESTED_FULL_FLAGS.collectEntries { k, v -> [(k): [v] as Set<String>] },
             readShapers: ["paymentRefNums", "paymentPreferences", "paymentMethodTypeIds"],
             shapedFields: ["paymentRefNums", "paymentPreferences", "paymentMethodTypeIds", "paymentPreferenceSlotsFull"],
             recordFollowsAskedFields: true,

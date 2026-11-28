@@ -254,4 +254,21 @@ class OmsGqlQueriesTests {
         assertEquals(false, OmsGqlQueries.orderGrainPagePlan(OmsGqlQueries.SHARED_ORDER_FIELDS).itemQuantity)
         assertTrue(OmsGqlQueries.orderItemQuantitiesDocument().contains("quantity"))
     }
+
+    /**
+     * S99-025 (OC224): a <list>Full flag is computed from its list, so asking for the flag reads the list at the same first: N,
+     * keeping the list keeps its flag, and the shared read covers a flag only when it reads the list (shipGroups, not notes).
+     */
+    @Test
+    void aListsFullFlagReadsItsListAndTravelsWithIt() {
+        OmsGqlQueries.NESTED_FULL_FLAGS.each { String list, String flag ->
+            Map field = OmsGqlQueries.NESTED_FIELDS[list]
+            assertTrue((field.selection as String).startsWith("${list}(first: ${field.limit})".toString()), "${list}: ${field.selection}")
+            String document = OmsGqlQueries.orderGrainPagePlan(["orderId", flag] as Set).document
+            assertTrue(document.contains(field.selection as String), "asking ${flag} reads ${list}")
+            assertTrue(OmsGqlQueries.keepWithCompanions(["orderId", list] as Set).contains(flag), "keeping ${list} keeps ${flag}")
+        }
+        assertTrue(OmsGqlQueries.sharedOrdersCover(["orderId", "shipGroupsFull"] as Set), "the shared read reads shipGroups")
+        assertFalse(OmsGqlQueries.sharedOrdersCover(["orderId", "notesFull"] as Set), "the shared read reads no notes")
+    }
 }

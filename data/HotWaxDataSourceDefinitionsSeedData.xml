@@ -992,7 +992,8 @@
        "field": "wanted[*]",
        "op": "IN",
        "values": [
-        "identifications"
+        "identifications",
+        "identificationsFull"
        ]
       }
      ],
@@ -1006,7 +1007,8 @@
        "field": "wanted[*]",
        "op": "IN",
        "values": [
-        "shipGroups"
+        "shipGroups",
+        "shipGroupsFull"
        ]
       }
      ],
@@ -1034,7 +1036,8 @@
        "field": "wanted[*]",
        "op": "IN",
        "values": [
-        "notes"
+        "notes",
+        "notesFull"
        ]
       }
      ],
@@ -1048,7 +1051,8 @@
        "field": "wanted[*]",
        "op": "IN",
        "values": [
-        "statuses"
+        "statuses",
+        "statusesFull"
        ]
       }
      ],
@@ -1567,6 +1571,98 @@
        }
       ]
      }
+    },
+    {
+     "set": "identificationsFull",
+     "when": [
+      {
+       "field": "identifications",
+       "op": "NOT_BLANK"
+      }
+     ],
+     "value": {
+      "fn": "atLeast",
+      "args": [
+       {
+        "fn": "size",
+        "args": [
+         {
+          "copy": "identifications"
+         }
+        ]
+       },
+       5
+      ]
+     }
+    },
+    {
+     "set": "shipGroupsFull",
+     "when": [
+      {
+       "field": "shipGroups",
+       "op": "NOT_BLANK"
+      }
+     ],
+     "value": {
+      "fn": "atLeast",
+      "args": [
+       {
+        "fn": "size",
+        "args": [
+         {
+          "copy": "shipGroups"
+         }
+        ]
+       },
+       3
+      ]
+     }
+    },
+    {
+     "set": "notesFull",
+     "when": [
+      {
+       "field": "notes",
+       "op": "NOT_BLANK"
+      }
+     ],
+     "value": {
+      "fn": "atLeast",
+      "args": [
+       {
+        "fn": "size",
+        "args": [
+         {
+          "copy": "notes"
+         }
+        ]
+       },
+       5
+      ]
+     }
+    },
+    {
+     "set": "statusesFull",
+     "when": [
+      {
+       "field": "statuses",
+       "op": "NOT_BLANK"
+      }
+     ],
+     "value": {
+      "fn": "atLeast",
+      "args": [
+       {
+        "fn": "size",
+        "args": [
+         {
+          "copy": "statuses"
+         }
+        ]
+       },
+       12
+      ]
+     }
     }
    ]
   },
@@ -1801,7 +1897,11 @@
     "shipGroups",
     "billToCustomer",
     "notes",
-    "statuses"
+    "statuses",
+    "identificationsFull",
+    "shipGroupsFull",
+    "notesFull",
+    "statusesFull"
    ]
   }
  ],
@@ -1834,12 +1934,28 @@
    "shipGroups",
    "billToCustomer",
    "notes",
-   "statuses"
+   "statuses",
+   "identificationsFull",
+   "shipGroupsFull",
+   "notesFull",
+   "statusesFull"
   ],
   "keepRecordFields": true,
   "keepWith": {
    "paymentPreferences": [
     "paymentPreferenceSlotsFull"
+   ],
+   "identifications": [
+    "identificationsFull"
+   ],
+   "shipGroups": [
+    "shipGroupsFull"
+   ],
+   "notes": [
+    "notesFull"
+   ],
+   "statuses": [
+    "statusesFull"
    ]
   }
  }

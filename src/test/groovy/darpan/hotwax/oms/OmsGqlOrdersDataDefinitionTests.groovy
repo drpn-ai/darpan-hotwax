@@ -60,8 +60,13 @@ class OmsGqlOrdersDataDefinitionTests {
             // An exchange's original: left out, listed in the manifest.
             order(orderId: "O3", orderName: "#3", externalId: " SH3 ", statusId: "ORDER_COMPLETED", orderDate: "2026-10-01T11:00:00Z",
                     grandTotal: "40.00", paymentPreferences: [opp("CREDIT_CARD", "PAYMENT_SETTLED", 40, "t9")]),
-            // Five payment rows: two slots are full, so are five; refs repeat and one is blank.
+            // Five payment rows: two slots are full, so are five; refs repeat and one is blank. S99-025: every nested list
+            // fills its first: N (5 identifications, 3 ship groups, 5 notes, 12 statuses).
             order(orderId: "O4", orderName: "#4", externalId: "SH4", statusId: "ORDER_APPROVED", orderDate: "2026-10-01T20:00:00Z",
+                    identifications: (1..5).collect { [orderIdentificationTypeId: "SHOPIFY_ORD_ID", idValue: "4${it}"] },
+                    notes: (1..5).collect { [note: [noteInfo: "note ${it}"]] },
+                    statuses: (1..12).collect { [statusId: "ORDER_APPROVED", statusDatetime: "2026-10-01T20:00:00Z", orderItemSeqId: "0000${it}"] },
+                    shipGroups: [edges: (1..3).collect { [node: [shipGroupSeqId: "0000${it}", facilityId: "F1", shipmentMethodTypeId: "STANDARD"]] }],
                     grandTotal: "0.000", paymentPreferences: [opp("CREDIT_CARD", "PAYMENT_SETTLED", 1, "t2"), opp("CASH", "PAYMENT_RECEIVED", 2, "t3"),
                     opp("CREDIT_CARD", "PAYMENT_SETTLED", 3, "t2"), opp("GIFT_CARD", "PAYMENT_SETTLED", 4, "t4"), opp("CREDIT_CARD", "PAYMENT_SETTLED", 5, "t5")]),
             // Two rows: full at two slots, not at five.
@@ -315,11 +320,29 @@ class OmsGqlOrdersDataDefinitionTests {
         assertEquals("t1", byId.O1.paymentRefNums)
         assertEquals(null, byId.O4.paymentRefNums, "five rows fill five slots: no list is claimed")
         assertEquals("t6", byId.O5.paymentRefNums, "two rows do not fill five slots")
-        assertEquals((BASE + ["paymentRefNums"]) as Set, byId.O1.keySet())
+        // S99-025: keeping shipGroups keeps shipGroupsFull (O1 has one ship group: false).
+        assertEquals((BASE + ["paymentRefNums", "shipGroupsFull"]) as Set, byId.O1.keySet())
         assertTrue(!byId.O4.containsKey("paymentRefNums"), "a list the slots cut short is not written")
         Map raw = data(new Server(), window(["orderId", "paymentPreferences"]))
         assertFalse(((List<Map>) raw.records).isEmpty(), "the raw-rows read wrote orders")
         assertTrue(((List<Map>) raw.records).every { it.containsKey("paymentPreferenceSlotsFull") }, "kept with the raw rows")
+    }
+
+    /**
+     * S99-025 (OC224): a nested list that fills its first: N carries <list>Full true on both paths, a shorter one false, an
+     * empty one no flag; asking for a flag alone reads its list, and keeping a list keeps its flag.
+     */
+    @Test
+    void aNestedListThatFillsItsFirstNIsFlaggedTheSameOnBothPaths() {
+        List<String> flags = ["identificationsFull", "shipGroupsFull", "notesFull", "statusesFull"]
+        [BASE + ["notes", "statuses", "identifications"], ["orderId"] + flags, ["orderId", "notesFull"]].each { List<String> keep ->
+            assertSame(coded(new Server(), keep), data(new Server(), window(keep)), "keep ${keep}")
+        }
+        Map<String, Map> byId = ((List<Map>) data(new Server(), window(BASE + ["notes", "statuses", "identifications"])).records)
+                .collectEntries { [(it.orderId): it] }
+        assertEquals([true, true, true, true], flags.collect { byId.O4.get(it) }, "O4 fills every list")
+        assertEquals([false, false, false, false], flags.collect { byId.O1.get(it) }, "O1's lists hold one row each")
+        assertEquals(["shipGroupsFull"], flags.findAll { byId.O2.containsKey(it) }, "O2's empty lists carry no flag")
     }
 
     /**
