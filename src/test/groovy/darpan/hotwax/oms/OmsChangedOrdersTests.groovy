@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test
 import java.time.Instant
 
 import static org.junit.jupiter.api.Assertions.assertEquals
+import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
@@ -94,6 +95,7 @@ class OmsChangedOrdersTests {
         assertEquals([], out.errors)
         assertEquals(0, out.pagination.changedOrderCount)
         assertEquals([], pages)
+        assertFalse(requests.isEmpty(), "the status timeline was asked")
         assertTrue(requests.every { it.query.toString().contains("orderStatusTimeline") }, "only the status timeline was asked")
     }
 

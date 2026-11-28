@@ -196,7 +196,9 @@ class OmsGqlClient {
         // REST layer answers it as a plain String beside `errorCode`. Never coerce with `as List` —
         // Groovy turns a String into a list of its CHARACTERS.
         if (body.errors instanceof List && ((List) body.errors).size() > 0) {
-            Map first = (Map) ((List) body.errors)[0]
+            Object entry = ((List) body.errors)[0]
+            // An entry that is not an object still fails as a GraphQL error, never as a cast error outside the codes.
+            Map first = entry instanceof Map ? (Map) entry : [message: entry?.toString()]
             String code = (first.extensions instanceof Map) ? ((Map) first.extensions).code as String : null
             throw new OmsGqlException(code ?: "GRAPHQL_ERROR", first.message as String)
         }

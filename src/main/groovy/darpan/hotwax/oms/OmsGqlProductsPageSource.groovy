@@ -46,11 +46,22 @@ class OmsGqlProductsPageSource {
         List<Map> ids = sweep(client, OmsGqlQueries.netsuiteIdsSweepDocument(), "goodIdentifications",
                 OmsGqlQueries.NETSUITE_PRODUCT_ID_FILTER, pagination)
         Map built = buildRecords(products, ids)
-        List records = (List) built.records
-        Map metadata = (Map) built.metadata + [identificationsRead: ids.size(), gqlCalls: pagination.calls]
+        return writeExtract(workFile, (List) built.records,
+                (Map) built.metadata + [identificationsRead: ids.size(), gqlCalls: pagination.calls], "oms-gql-products.json")
+    }
+
+    /** The {records, metadata} document, written whole, and the extraction result OmsScriptServiceSupport.runExtract reads. */
+    private static Map writeExtract(File workFile, List records, Map metadata, String fileName) {
         workFile.withWriter("UTF-8") { Writer w -> w.write(groovy.json.JsonOutput.toJson([records: records, metadata: metadata])) }
         return [dataAvailable: !records.isEmpty(), recordCount: records.size(), requestMetadata: metadata,
-                warnings: [], errors: [], fileName: "oms-gql-products.json"]
+                warnings: [], errors: [], fileName: fileName]
+    }
+
+    /** productId -> its active NETSUITE_PRODUCT_ID (an ended identification is no id). */
+    private static Map<String, String> netsuiteIdByProduct(List<Map> identifications) {
+        Map<String, String> nsIdByProduct = [:]
+        identifications.findAll { !it.thruDate && it.idValue }.each { nsIdByProduct.put(it.productId as String, it.idValue as String) }
+        return nsIdByProduct
     }
 
     /** DAR-BE-186: product ids per lookup call; the products roots refuse `first` above 100. */
@@ -69,22 +80,19 @@ class OmsGqlProductsPageSource {
             List<Map> products = sweep(client, OmsGqlQueries.productsSweepDocument(), "products", "productId:${chunk.join(',')}", pagination)
             List<Map> idRows = sweep(client, OmsGqlQueries.productNetsuiteIdsDocument(), "goodIdentifications",
                     "${OmsGqlQueries.NETSUITE_PRODUCT_ID_KEY}:${chunk.join(',')}", pagination)
-            Map<String, String> nsIdByProduct = [:]
-            idRows.findAll { !it.thruDate && it.idValue }.each { nsIdByProduct.put(it.productId as String, it.idValue as String) }
+            Map<String, String> nsIdByProduct = netsuiteIdByProduct(idRows)
             products.findAll { chunk.contains(it.productId as String) }.each { Map p ->
                 records.add([productId: p.productId as String, internalName: p.internalName, productTypeId: p.productTypeId,
                              netsuiteProductId: nsIdByProduct[p.productId as String]])
             }
         }
-        Map metadata = [lookupKeys: ids.size(), productsFound: records.size(), gqlCalls: pagination.calls, windowIgnored: true]
-        workFile.withWriter("UTF-8") { Writer w -> w.write(groovy.json.JsonOutput.toJson([records: records, metadata: metadata])) }
-        return [dataAvailable: !records.isEmpty(), recordCount: records.size(), requestMetadata: metadata,
-                warnings: [], errors: [], fileName: "oms-gql-products-lookup.json"]
+        return writeExtract(workFile, records,
+                [lookupKeys: ids.size(), productsFound: records.size(), gqlCalls: pagination.calls, windowIgnored: true],
+                "oms-gql-products-lookup.json")
     }
 
     static Map buildRecords(List<Map> products, List<Map> identifications) {
-        Map<String, String> nsIdByProduct = [:]
-        identifications.findAll { !it.thruDate && it.idValue }.each { nsIdByProduct.put(it.productId as String, it.idValue as String) }
+        Map<String, String> nsIdByProduct = netsuiteIdByProduct(identifications)
         List<Map> sorted = products.sort(false) { it.productId as String }
         List<Map> sellable = sorted.findAll { notSellableReason(it) == null }
         Map<String, List<String>> productsByNsId = sellable.findAll { nsIdByProduct[it.productId as String] }

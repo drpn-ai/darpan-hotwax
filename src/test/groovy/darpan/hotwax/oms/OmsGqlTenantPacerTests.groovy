@@ -84,7 +84,8 @@ class OmsGqlTenantPacerTests {
     void aZeroRestoreRateDoesNotDivideByZero() {
         OmsGqlTenantPacer p = new OmsGqlTenantPacer({ -> 0L })
         assertEquals(0L, p.sleepMillisFor(250, 0d, 1000d, 25))
-        assertTrue(p.sleepMillisFor(250, 0d, 1000d, 25) > 0L)
+        // A share of a 0 rate is read as 1/s: the next 250 waits 250 s.
+        assertEquals(250_000L, p.sleepMillisFor(250, 0d, 1000d, 25))
     }
 
     // ---- Fix round 1: the server charges a read's actual cost, often less than reserved; the share is of what is spent.

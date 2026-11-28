@@ -217,8 +217,10 @@ class OmsGqlQueriesTests {
     void aSlotCostsOnePlusItsFields() {
         assertEquals(4.0d, OmsGqlQueries.slotCost(["paymentMethodTypeId", "statusId", "maxAmount"]))
         assertEquals(2.0d, OmsGqlQueries.slotCost(["manualRefNum"]))
-        assertTrue(100 + 25 * (8 + 6 * 8) > 1000)
-        assertTrue(100 + 15 * (8 + 4 * 8) <= 950)
+        // The measured pages, through the cost model itself (these were literal arithmetic, touching no code).
+        double seven = OmsGqlQueries.slotCost(["a", "b", "c", "d", "e", "f", "g"])
+        assertEquals(1500, OmsGqlQueries.estimatedPageCost(25, 6, 0, [], seven), "25 x 6 slots was refused at the 1000 cap")
+        assertEquals(700, OmsGqlQueries.estimatedPageCost(15, 4, 0, [], seven), "15 x 4 slots went through")
     }
 
     @Test

@@ -26,6 +26,18 @@ class OmsGqlLookupCacheTests {
         assertEquals([["P1", "P2"], ["P3"]], asked)
     }
 
+    /** DAR-OPS-029 S40b: a fetch that fails remembers nothing; an absence cached from a failure would read as a missing order. */
+    @Test
+    void aFetchThatThrowsCachesNothing() {
+        List<List<String>> asked = []
+        Closure failing = { List<String> ids -> asked.add(ids); throw new OmsGqlException("TRANSIENT", "down") }
+        org.junit.jupiter.api.Assertions.assertThrows(OmsGqlException) {
+            OmsGqlLookupCache.lookup(SCOPE, OmsGqlLookupCache.ORDER, ["O1"], failing)
+        }
+        assertEquals([O1: "row"], OmsGqlLookupCache.lookup(SCOPE, OmsGqlLookupCache.ORDER, ["O1"], fetcher(asked, [O1: "row"])))
+        assertEquals([["O1"], ["O1"]], asked, "asked again after the failure")
+    }
+
     @Test
     void anIdTheOmsDidNotAnswerIsNotAskedAgain() {
         List<List<String>> asked = []

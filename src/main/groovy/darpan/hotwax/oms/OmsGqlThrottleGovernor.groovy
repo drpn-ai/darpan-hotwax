@@ -23,8 +23,9 @@ class OmsGqlThrottleGovernor {
     private static final long SAFETY_MARGIN_MS = 500L
 
     /**
-     * DAR-BE-116: one bucket per OMS endpoint, because the bucket belongs to the credential, not to an
-     * extract. An audit run's parallel slices and its other checks all spend from it.
+     * DAR-BE-116: one bucket per OMS endpoint URL, not per extract: an audit run's parallel slices and its other checks
+     * all spend from it. HotWax's bucket belongs to the credential; keying by URL is the same thing for one credential
+     * per OMS, and only more cautious when two configs share a URL (they wait on each other's spend).
      */
     private static final Map<String, OmsGqlThrottleGovernor> SHARED = new java.util.concurrent.ConcurrentHashMap<>()
 

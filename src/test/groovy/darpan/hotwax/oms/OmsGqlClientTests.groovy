@@ -88,7 +88,12 @@ class OmsGqlClientTests {
         Map result = c.execute("query { orders { edges { node { orderId } } } }", null, 400)
         assertEquals(true, ((Map) result.data).ok)
         assertEquals(2, captured.size())
-        assertTrue(slept.any { it > 0L }, "a retry must wait for the bucket, not hammer it")
+        // DAR-OPS-029 S40b: the retry floor (1-2 s with jitter), then the governor's wait for the reported deficit:
+        // 400 at 50/s from an empty bucket, plus the 500 ms margin.
+        assertEquals(2, slept.size(), "${slept}")
+        assertTrue(slept[0] >= OmsGqlClient.MIN_THROTTLE_BACKOFF_MILLIS && slept[0] < OmsGqlClient.MIN_THROTTLE_BACKOFF_MILLIS + 1000L, "${slept}")
+        // The governor reads the real clock, so the ms between the answer and the retry refill a little (8,498 seen).
+        assertTrue(slept[1] > 8_400L && slept[1] <= 8_500L, "${slept}")
     }
 
     @Test
@@ -140,11 +145,42 @@ class OmsGqlClientTests {
         assertEquals("REST_REJECTED", thrown.code)
     }
 
+    /** DAR-OPS-029 S40b F9: an errors entry that is a bare string is still a GraphQL error with its text, not a cast error. */
+    @Test
+    void aGraphqlErrorThatIsABareStringIsStillAGraphqlError() {
+        OmsGqlException thrown = assertThrows(OmsGqlException) {
+            client([[body: [data: null, errors: ["Query cost too high"]]]]).execute("query { orders }", null, 400)
+        }
+        assertEquals("GRAPHQL_ERROR", thrown.code)
+        assertEquals("Query cost too high", thrown.message)
+    }
+
+    /**
+     * DAR-OPS-029 S40b: a non-JSON body on a status that is not retried is UNPARSEABLE, asked once. (This test answered 502,
+     * which is retried, with no sleeper: it slept ~50 s for real and only passed through the TRANSIENT wrapper.)
+     */
     @Test
     void aNonJsonBodyIsReportedRatherThanSwallowed() {
-        OmsGqlClient c = new OmsGqlClient(CONFIG, { String u, Map h, String b -> [statusCode: 502, body: "<html>bad gateway</html>"] })
+        List<Long> slept = []
+        OmsGqlClient c = scripted([[statusCode: 200, raw: "<html>login</html>"]], slept)
         OmsGqlException thrown = assertThrows(OmsGqlException) { c.execute("query { orders }", null, 400) }
-        assertTrue(thrown.message.contains("502"))
+        assertEquals("UNPARSEABLE", thrown.code)
+        assertTrue(thrown.message.contains("<html>login</html>"), thrown.message)
+        assertEquals(1, c.callCount)
+        assertEquals([], slept)
+    }
+
+    /** DAR-OPS-029 S40b: a 500 is a server fault, deliberately not retried (RETRYABLE_STATUS_CODES leaves it out). */
+    @Test
+    void aServerErrorIsNotRetried() {
+        List<Long> slept = []
+        OmsGqlClient json = scripted([[statusCode: 500, body: [data: null]]], slept)
+        assertEquals("HTTP_500", assertThrows(OmsGqlException) { json.execute("query { orders }", null, 400) }.code)
+        assertEquals(1, json.callCount)
+        OmsGqlClient html = scripted([[statusCode: 500, raw: "<html>error</html>"]], slept)
+        assertEquals("UNPARSEABLE", assertThrows(OmsGqlException) { html.execute("query { orders }", null, 400) }.code)
+        assertEquals(1, html.callCount)
+        assertEquals([], slept)
     }
 
     @Test

@@ -66,7 +66,7 @@ class OmsGqlLookupCache {
     private static String key(String scope, String kind, String id) { return "${scope}|${kind}|${id}".toString() }
 
     /** Drops expired entries. */
-    static void sweep() {
+    private static void sweep() {
         long now = clock.call()
         ENTRIES.entrySet().removeIf { Map.Entry<String, List> e ->
             String kind = e.key.split('\\|')[-2]

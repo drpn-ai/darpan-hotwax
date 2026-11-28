@@ -39,7 +39,8 @@ class OmsGqlThrottleGovernorTests {
     void aZeroRestoreRateDoesNotDivideByZero() {
         OmsGqlThrottleGovernor g = new OmsGqlThrottleGovernor()
         g.observe(extensionsWith(0, 0))
-        assertTrue(g.sleepMillisFor(750) > 0L)
+        // A reported rate of 0 is read as 1/s: 750 from empty takes 750 s, plus the margin.
+        assertEquals(750_500L, g.sleepMillisFor(750))
     }
 
     @Test
@@ -129,9 +130,12 @@ class OmsGqlThrottleGovernorTests {
     @Test
     void oneOmsUrlIsOneBucket() {
         OmsGqlThrottleGovernor.resetShared()
-        OmsGqlThrottleGovernor a = OmsGqlThrottleGovernor.forUrl("https://a.test/rest/s1/graphql")
-        assertTrue(a.is(OmsGqlThrottleGovernor.forUrl("https://a.test/rest/s1/graphql")))
-        assertFalse(a.is(OmsGqlThrottleGovernor.forUrl("https://b.test/rest/s1/graphql")))
-        OmsGqlThrottleGovernor.resetShared()
+        try {
+            OmsGqlThrottleGovernor a = OmsGqlThrottleGovernor.forUrl("https://a.test/rest/s1/graphql")
+            assertTrue(a.is(OmsGqlThrottleGovernor.forUrl("https://a.test/rest/s1/graphql")))
+            assertFalse(a.is(OmsGqlThrottleGovernor.forUrl("https://b.test/rest/s1/graphql")))
+        } finally {
+            OmsGqlThrottleGovernor.resetShared()
+        }
     }
 }

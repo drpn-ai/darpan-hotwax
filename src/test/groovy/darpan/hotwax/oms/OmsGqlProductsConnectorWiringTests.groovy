@@ -47,6 +47,7 @@ class OmsGqlProductsConnectorWiringTests {
         assertEquals("sourceFilters", r.filterParameterName, "R22 excludes sellable N on this side; a blank name would drop it")
         assertEquals("Y", r.enabled)
         List<Map<String, String>> others = connectors().findAll { it.systemEnumId != "OMS_PRODUCTS_GQL" && it.enabled == "Y" }
+        assertFalse(others.isEmpty(), "the other shipped connectors were read")
         assertTrue(others.every { it.extractServiceName != r.extractServiceName && it.expectedSourceConfigType != r.expectedSourceConfigType },
                 "a shared service or config type would shadow a shipped row")
     }
