@@ -1,7 +1,5 @@
 package darpan.hotwax.oms
 
-import java.util.regex.Pattern
-
 import static darpan.common.ValueSupport.normalize
 
 /**
@@ -17,7 +15,6 @@ class OmsPairLookupSupport {
 
     /** Ids per lookup call (the exchange verify sends up to this many). */
     static final int PAIR_LOOKUP_MAX_IDS = 100
-    private static final Pattern ASKABLE_ID = Pattern.compile('^[A-Za-z0-9_\\-]+$')
 
     private static final Closure DEFAULT_CLIENT_FACTORY = { Map config -> new OmsGqlClient(config) }
     private static Closure clientFactory = DEFAULT_CLIENT_FACTORY
@@ -29,21 +26,17 @@ class OmsPairLookupSupport {
 
     /** Returns [ok, ordersByExternalId: externalId -> [order summary], errors]. */
     static Map<String, Object> lookupOrdersByExternalId(Object rawConfig, Collection externalIds) {
-        List<String> ids = (externalIds ?: []).collect { normalize(it) }.findAll { it }.unique()
+        List<String> ids = OmsIdLookup.ids(externalIds)
         if (!ids) return failure("No externalIds provided for OMS pair lookup.")
         if (ids.size() > PAIR_LOOKUP_MAX_IDS) return failure("OMS pair lookup requested ${ids.size()} ids, above the ${PAIR_LOOKUP_MAX_IDS}-id cap.")
-        // The search string is `externalId:a,b`; an id carrying a separator would corrupt it.
-        if (!ids.every { ASKABLE_ID.matcher(it).matches() }) return failure("Shopify order ids must be plain identifiers.")
-        Map<String, Object> config = OmsExtractSupport.toPlainMap(rawConfig)
-        if (!config) return failure("OMS source config could not be read.")
-        try {
-            OmsGqlClient client = (OmsGqlClient) clientFactory.call(config)
+        if (!OmsIdLookup.askable(ids)) return failure("Shopify order ids must be plain identifiers.")
+        return OmsIdLookup.run(rawConfig, clientFactory, [ordersByExternalId: [:]], "OMS pair lookup") { OmsGqlClient client ->
             Map pagination = [lookupCalls: 0, exchangeAssocCalls: 0]
-            List<Map> nodes = OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.pairOrdersDocument(), "orders", "externalId",
-                    ids, OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.PAIR_ORDERS_RESERVATION, pagination)
             Set<String> requested = new HashSet<String>(ids)
-            List<Map> echoed = nodes.findAll { requested.contains(normalize(it.externalId)) }
-            if (nodes && !echoed) return failure("OMS pair lookup failed: the orders search did not honour the externalId filter.")
+            List<Map> echoed = OmsIdLookup.requireEcho(OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.pairOrdersDocument(),
+                    "orders", "externalId", ids, OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_ID_CHUNK,
+                    OmsGqlQueries.PAIR_ORDERS_RESERVATION, pagination), requested, "externalId", "orders")
+                    .findAll { requested.contains(normalize(it.externalId)) }
             List<String> orderIds = echoed.collect { it.orderId as String }.findAll { it }
             List<Map> assocs = orderIds ? OmsGqlOrderPageSource.fetchExchangeAssocs(client, orderIds, pagination) : []
             Map<String, Object> ordersByExternalId = ids.collectEntries { [(it): []] }
@@ -60,12 +53,10 @@ class OmsPairLookupSupport {
                 ])
             }
             return [ok: true, ordersByExternalId: ordersByExternalId, errors: []]
-        } catch (Exception e) {
-            return failure("OMS pair lookup failed: ${e.message}")
         }
     }
 
     private static Map<String, Object> failure(String message) {
-        return [ok: false, ordersByExternalId: [:], errors: [message]]
+        return OmsIdLookup.failure([ordersByExternalId: [:]], message)
     }
 }

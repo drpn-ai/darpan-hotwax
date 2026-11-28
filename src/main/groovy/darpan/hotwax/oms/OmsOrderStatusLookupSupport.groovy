@@ -1,7 +1,5 @@
 package darpan.hotwax.oms
 
-import java.util.regex.Pattern
-
 import static darpan.common.ValueSupport.normalize
 
 /**
@@ -10,13 +8,13 @@ import static darpan.common.ValueSupport.normalize
  * against what was asked. RAILS 2026-10-22: 350 ids in 7 calls, 3.5s; gorjana 1,227 in 25 calls, 14s.
  *
  * A failed call fails the whole lookup (ok=false, nothing classified): an order is never called missing because
- * HotWax could not be asked.
+ * HotWax could not be asked. Nor because HotWax ignored the filter: an answer naming no asked id fails too (OmsIdLookup).
  */
 class OmsOrderStatusLookupSupport {
 
     static final int ID_CHUNK = OmsGqlQueries.ORDER_STATUSES_ID_CHUNK
     static final int ITEMS_ID_CHUNK = OmsGqlQueries.ORDER_ITEMS_ID_CHUNK
-    private static final Pattern ASKABLE_ID = Pattern.compile('^[A-Za-z0-9_\\-]+$')
+    static final int SHIP_GROUPS_PER_ORDER = OmsGqlQueries.SHIP_GROUPS_PER_ORDER
 
     private static final Closure DEFAULT_CLIENT_FACTORY = { Map config -> new OmsGqlClient(config) }
     private static Closure clientFactory = DEFAULT_CLIENT_FACTORY
@@ -32,28 +30,26 @@ class OmsOrderStatusLookupSupport {
 
     /** Returns [ok, statusByOrderId: orderId -> statusId, missingIds, errors]. */
     static Map<String, Object> lookupOrderStatuses(Object rawConfig, Collection orderIds) {
-        List<String> ids = (orderIds ?: []).collect { normalize(it) }.findAll { it }.unique()
-        if (!ids) return [ok: true, statusByOrderId: [:], missingIds: [], errors: []]
-        if (!ids.every { ASKABLE_ID.matcher(it).matches() }) {
-            // The search string is `orderId:a,b`; an id carrying a separator would corrupt it.
-            return [ok: false, statusByOrderId: [:], missingIds: [], errors: ["OMS order ids must be plain identifiers."]]
-        }
-        Map<String, Object> config = OmsExtractSupport.toPlainMap(rawConfig)
-        if (!config) return [ok: false, statusByOrderId: [:], missingIds: [], errors: ["OMS source config could not be read."]]
-        try {
-            OmsGqlClient client = (OmsGqlClient) clientFactory.call(config)
+        List<String> ids = OmsIdLookup.ids(orderIds)
+        Map empty = [statusByOrderId: [:], missingIds: []]
+        if (!ids) return [ok: true] + empty + [errors: []]
+        if (!OmsIdLookup.askable(ids)) return OmsIdLookup.failure(empty, "OMS order ids must be plain identifiers.")
+        return OmsIdLookup.run(rawConfig, clientFactory, empty, "OMS order status lookup") { OmsGqlClient client ->
             Set<String> requested = new HashSet<String>(ids)
             Map<String, String> statusByOrderId = [:]
-            OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.orderStatusesDocument(), "orders", "orderId", ids,
-                    ID_CHUNK, ID_CHUNK, OmsGqlQueries.ORDER_STATUSES_RESERVATION, [lookupCalls: 0])
-                    .each { Map n ->
-                        String orderId = normalize(n.orderId)
-                        if (orderId && requested.contains(orderId)) statusByOrderId.put(orderId, normalize(n.statusId))
-                    }
+            orderRows(client, ids, requested).each { Map n ->
+                String orderId = normalize(n.orderId)
+                if (orderId && requested.contains(orderId)) statusByOrderId.put(orderId, normalize(n.statusId))
+            }
             return [ok: true, statusByOrderId: statusByOrderId, missingIds: ids.findAll { !statusByOrderId.containsKey(it) }, errors: []]
-        } catch (Exception e) {
-            return [ok: false, statusByOrderId: [:], missingIds: [], errors: ["OMS order status lookup failed: ${e.message}".toString()]]
         }
+    }
+
+    /** The asked orders' [orderId, statusId, orderDate] rows, echo-checked. */
+    private static List<Map> orderRows(OmsGqlClient client, List<String> ids, Set<String> requested) {
+        return OmsIdLookup.requireEcho(OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.orderStatusesDocument(), "orders",
+                "orderId", ids, ID_CHUNK, ID_CHUNK, OmsGqlQueries.ORDER_STATUSES_RESERVATION, [lookupCalls: 0]),
+                requested, "orderId", "orders")
     }
 
     /** DAR-BE-320. The OMS order status timeline's widest window (moqui-gql orderStatusTimeline: at most 31 days). */
@@ -98,21 +94,18 @@ class OmsOrderStatusLookupSupport {
      * nothing.
      */
     static Map<String, Object> lookupOrderItemStatuses(Object rawConfig, Collection orderIds) {
-        List<String> ids = (orderIds ?: []).collect { normalize(it) }.findAll { it }.unique()
-        if (!ids) return [ok: true, itemStatusByKey: [:], missingIds: [], errors: []]
-        if (!ids.every { ASKABLE_ID.matcher(it).matches() }) {
-            return [ok: false, itemStatusByKey: [:], missingIds: [], errors: ["OMS order ids must be plain identifiers."]]
-        }
-        Map<String, Object> config = OmsExtractSupport.toPlainMap(rawConfig)
-        if (!config) return [ok: false, itemStatusByKey: [:], missingIds: [], errors: ["OMS source config could not be read."]]
-        try {
-            OmsGqlClient client = (OmsGqlClient) clientFactory.call(config)
+        List<String> ids = OmsIdLookup.ids(orderIds)
+        Map empty = [itemStatusByKey: [:], missingIds: []]
+        if (!ids) return [ok: true] + empty + [errors: []]
+        if (!OmsIdLookup.askable(ids)) return OmsIdLookup.failure(empty, "OMS order ids must be plain identifiers.")
+        return OmsIdLookup.run(rawConfig, clientFactory, empty, "OMS order item status lookup") { OmsGqlClient client ->
             Set<String> requested = new HashSet<String>(ids)
             Map<String, String> itemStatusByKey = [:]
             Map<String, String> itemShipGroupByKey = [:]
             Set<String> answered = new HashSet<String>()
-            OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.orderItemStatusesDocument(), "orderItems", "orderId", ids,
-                    ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.ORDER_ITEMS_RESERVATION, [lookupCalls: 0])
+            OmsIdLookup.requireEcho(OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.orderItemStatusesDocument(), "orderItems",
+                    "orderId", ids, ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.ORDER_ITEMS_RESERVATION,
+                    [lookupCalls: 0]), requested, "orderId", "order items")
                     .each { Map n ->
                         String orderId = normalize(n.orderId)
                         if (!orderId || !requested.contains(orderId) || !normalize(n.orderItemSeqId)) return
@@ -122,8 +115,6 @@ class OmsOrderStatusLookupSupport {
                     }
             return [ok: true, itemStatusByKey: itemStatusByKey, itemShipGroupByKey: itemShipGroupByKey,
                     missingIds: ids.findAll { !answered.contains(it) }, errors: []]
-        } catch (Exception e) {
-            return [ok: false, itemStatusByKey: [:], missingIds: [], errors: ["OMS order item status lookup failed: ${e.message}".toString()]]
         }
     }
 
@@ -136,30 +127,25 @@ class OmsOrderStatusLookupSupport {
      * as the other lookups: only asked orders count, and a failed call classifies nothing.
      */
     static Map<String, Object> lookupOrderShipments(Object rawConfig, Collection orderIds) {
-        List<String> ids = (orderIds ?: []).collect { normalize(it) }.findAll { it }.unique()
-        if (!ids) return [ok: true, shipmentsByOrderId: [:], missingIds: [], errors: []]
-        if (!ids.every { ASKABLE_ID.matcher(it).matches() }) {
-            return [ok: false, shipmentsByOrderId: [:], missingIds: [], errors: ["OMS order ids must be plain identifiers."]]
-        }
-        Map<String, Object> config = OmsExtractSupport.toPlainMap(rawConfig)
-        if (!config) return [ok: false, shipmentsByOrderId: [:], missingIds: [], errors: ["OMS source config could not be read."]]
-        try {
-            OmsGqlClient client = (OmsGqlClient) clientFactory.call(config)
+        List<String> ids = OmsIdLookup.ids(orderIds)
+        Map empty = [shipmentsByOrderId: [:], missingIds: []]
+        if (!ids) return [ok: true] + empty + [errors: []]
+        if (!OmsIdLookup.askable(ids)) return OmsIdLookup.failure(empty, "OMS order ids must be plain identifiers.")
+        return OmsIdLookup.run(rawConfig, clientFactory, empty, "OMS shipment lookup") { OmsGqlClient client ->
             Set<String> requested = new HashSet<String>(ids)
-            Set<String> known = OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.orderStatusesDocument(), "orders", "orderId",
-                    ids, ID_CHUNK, ID_CHUNK, OmsGqlQueries.ORDER_STATUSES_RESERVATION, [lookupCalls: 0])
+            Set<String> known = orderRows(client, ids, requested)
                     .collect { Map n -> normalize(n.orderId) }.findAll { requested.contains(it) } as Set<String>
-            List<Map> shipments = OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.orderShipmentsDocument(), "shipments",
-                    "primaryOrderId", ids, OmsGqlQueries.SHIPMENTS_ID_CHUNK, OmsGqlQueries.SHIPMENTS_PAGE_SIZE,
-                    OmsGqlQueries.SHIPMENTS_RESERVATION, [lookupCalls: 0])
+            List<Map> shipments = OmsIdLookup.requireEcho(OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.orderShipmentsDocument(),
+                    "shipments", "primaryOrderId", ids, OmsGqlQueries.SHIPMENTS_ID_CHUNK, OmsGqlQueries.SHIPMENTS_PAGE_SIZE,
+                    OmsGqlQueries.SHIPMENTS_RESERVATION, [lookupCalls: 0]), requested, "primaryOrderId", "shipments")
                     .findAll { Map n -> requested.contains(normalize(n.primaryOrderId)) && normalize(n.shipmentTypeId) == "SALES_SHIPMENT" }
             List<String> facilityIds = shipments.collect { normalize(it.originFacilityId) }
-                    .findAll { it && ASKABLE_ID.matcher(it).matches() }.unique()
+                    .findAll { it && OmsIdLookup.ASKABLE_ID.matcher(it).matches() }.unique()
             Map<String, String> locationByFacility = [:]
             if (facilityIds) {
-                OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.facilityExternalIdsDocument(), "facilities", "facilityId",
-                        facilityIds, OmsGqlQueries.FACILITIES_ID_CHUNK, OmsGqlQueries.FACILITIES_ID_CHUNK,
-                        OmsGqlQueries.FACILITIES_RESERVATION, [lookupCalls: 0])
+                OmsIdLookup.requireEcho(OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.facilityExternalIdsDocument(), "facilities",
+                        "facilityId", facilityIds, OmsGqlQueries.FACILITIES_ID_CHUNK, OmsGqlQueries.FACILITIES_ID_CHUNK,
+                        OmsGqlQueries.FACILITIES_RESERVATION, [lookupCalls: 0]), facilityIds, "facilityId", "facilities")
                         .each { Map f -> if (normalize(f.facilityId)) locationByFacility.put(normalize(f.facilityId), normalize(f.externalId)) }
             }
             Map<String, List<Map>> byOrder = [:]
@@ -169,8 +155,6 @@ class OmsOrderStatusLookupSupport {
                         facilityId: facilityId, location: facilityId ? locationByFacility.get(facilityId) : null, statusId: normalize(n.statusId)]
             }
             return [ok: true, shipmentsByOrderId: byOrder, missingIds: ids.findAll { !known.contains(it) }, errors: []]
-        } catch (Exception e) {
-            return [ok: false, shipmentsByOrderId: [:], missingIds: [], errors: ["OMS shipment lookup failed: ${e.message}".toString()]]
         }
     }
 
@@ -182,34 +166,34 @@ class OmsOrderStatusLookupSupport {
      * the other lookups: only asked orders count, and a failed call classifies nothing.
      */
     static Map<String, Object> lookupShipGroupFacilities(Object rawConfig, Collection orderIds) {
-        List<String> ids = (orderIds ?: []).collect { normalize(it) }.findAll { it }.unique()
-        if (!ids) return [ok: true, shipGroupFacilityByKey: [:], missingIds: [], errors: []]
-        if (!ids.every { ASKABLE_ID.matcher(it).matches() }) {
-            return [ok: false, shipGroupFacilityByKey: [:], missingIds: [], errors: ["OMS order ids must be plain identifiers."]]
-        }
-        Map<String, Object> config = OmsExtractSupport.toPlainMap(rawConfig)
-        if (!config) return [ok: false, shipGroupFacilityByKey: [:], missingIds: [], errors: ["OMS source config could not be read."]]
-        try {
-            OmsGqlClient client = (OmsGqlClient) clientFactory.call(config)
+        List<String> ids = OmsIdLookup.ids(orderIds)
+        Map empty = [shipGroupFacilityByKey: [:], missingIds: []]
+        if (!ids) return [ok: true] + empty + [errors: []]
+        if (!OmsIdLookup.askable(ids)) return OmsIdLookup.failure(empty, "OMS order ids must be plain identifiers.")
+        return OmsIdLookup.run(rawConfig, clientFactory, empty, "OMS ship group lookup") { OmsGqlClient client ->
             Set<String> requested = new HashSet<String>(ids)
             Set<String> answered = new HashSet<String>()
             Map<String, List<String>> byKey = [:]
-            OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.shipGroupFacilitiesDocument(), "orders", "orderId", ids,
-                    OmsGqlQueries.SHIP_GROUP_FACILITIES_ID_CHUNK, OmsGqlQueries.SHIP_GROUP_FACILITIES_ID_CHUNK,
-                    OmsGqlQueries.SHIP_GROUP_FACILITIES_RESERVATION, [lookupCalls: 0])
+            OmsIdLookup.requireEcho(OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.shipGroupFacilitiesDocument(), "orders",
+                    "orderId", ids, OmsGqlQueries.SHIP_GROUP_FACILITIES_ID_CHUNK, OmsGqlQueries.SHIP_GROUP_FACILITIES_ID_CHUNK,
+                    OmsGqlQueries.SHIP_GROUP_FACILITIES_RESERVATION, [lookupCalls: 0]), requested, "orderId", "orders")
                     .each { Map n ->
                         String orderId = normalize(n.orderId)
                         if (!orderId || !requested.contains(orderId)) return
                         answered.add(orderId)
-                        OmsGqlOrderGrainAssembler.edgeNodes((Map) n.shipGroups).each { Map g ->
+                        List<Map> groups = OmsGqlOrderGrainAssembler.edgeNodes((Map) n.shipGroups)
+                        // DAR-OPS-029 S40b (OC145): a full list may have more groups past it; fail closed, naming the order.
+                        if (groups.size() >= SHIP_GROUPS_PER_ORDER) {
+                            throw new OmsGqlException("CUT_SHORT", ("order ${orderId} has ${groups.size()} ship groups, the most " +
+                                    "one read holds, so where every group ships from is not known").toString())
+                        }
+                        groups.each { Map g ->
                             String seq = normalize(g.shipGroupSeqId)
                             if (seq) byKey.put(itemKey(orderId, seq), [normalize(g.facilityId), normalize(((Map) g.facility)?.externalId),
                                     normalize(g.shipmentMethodTypeId)])
                         }
                     }
             return [ok: true, shipGroupFacilityByKey: byKey, missingIds: ids.findAll { !answered.contains(it) }, errors: []]
-        } catch (Exception e) {
-            return [ok: false, shipGroupFacilityByKey: [:], missingIds: [], errors: ["OMS ship group lookup failed: ${e.message}".toString()]]
         }
     }
 }

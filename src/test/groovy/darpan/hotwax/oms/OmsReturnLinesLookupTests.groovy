@@ -150,6 +150,53 @@ class OmsReturnLinesLookupTests {
         assertTrue((result.errors as List)[0].toString().contains("COST_EXCEEDED"))
     }
 
+    /** DAR-OPS-029 S40b: a return item whose return header does not come back is unknowable, so the lookup fails. */
+    @Test
+    void aReturnItemWhoseHeaderIsNotReturnedFailsTheLookup() {
+        omsAnswers([returns: { Set<String> values ->
+            [statusCode: 200, body: JsonOutput.toJson([data: [returns: [edges: [], pageInfo: [hasNextPage: false]]], errors: []])]
+        }])
+
+        Map result = OmsReturnLinesLookupSupport.lookupReturnLinesByOrderExternalId(CONFIG, ["7187329777795"])
+
+        assertFalse(result.ok as Boolean, "a silent skip would answer 'OMS booked no return' and pair nothing")
+        assertEquals([:], result.returnLinesByExternalId)
+        assertTrue((result.errors as List)[0].toString().contains("MALFORMED"), result.errors.toString())
+    }
+
+    /** DAR-OPS-029 S40b (OUTPUT CHANGE A): an orders answer naming no asked Shopify id is an ignored filter, not "no returns". */
+    @Test
+    void anOrdersAnswerNamingNoAskedIdFailsTheLookup() {
+        omsAnswers([orders: { Set<String> values ->
+            [statusCode: 200, body: JsonOutput.toJson([data: [orders: [edges: [[node: ORDERS[0]]], pageInfo: [hasNextPage: false]]],
+                                                       errors: []])]
+        }])
+
+        Map result = OmsReturnLinesLookupSupport.lookupReturnLinesByOrderExternalId(CONFIG, ["7187329777795"])
+
+        assertFalse(result.ok as Boolean, result.toString())
+        assertEquals([:], result.returnLinesByExternalId)
+        assertTrue((result.errors as List)[0].toString().contains("did not honour its id filter"), result.errors.toString())
+    }
+
+    /** DAR-OPS-029 S40b (OUTPUT CHANGE A): any failure answers ok:false like the other lookups; it never throws out. */
+    @Test
+    void aFailureOutsideGraphQlIsReportedNotThrown() {
+        OmsReturnLinesLookupSupport.setClientFactory { Map config ->
+            OmsGqlClient c = new OmsGqlClient(config, { String url, Map headers, String body ->
+                throw new IllegalStateException("OMS endpoint URL blocked by outbound policy: private address")
+            })
+            c.sleeper = { long ms -> }
+            return c
+        }
+
+        Map result = OmsReturnLinesLookupSupport.lookupReturnLinesByOrderExternalId(CONFIG, ["7187329777795"])
+
+        assertFalse(result.ok as Boolean)
+        assertEquals([:], result.returnLinesByExternalId)
+        assertTrue((result.errors as List)[0].toString().contains("blocked by outbound policy"), result.errors.toString())
+    }
+
     @Test
     void anIdCarryingASeparatorIsRefusedBeforeAnyCall() {
         omsAnswers()

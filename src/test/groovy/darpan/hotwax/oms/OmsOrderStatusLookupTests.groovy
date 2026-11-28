@@ -62,6 +62,85 @@ class OmsOrderStatusLookupTests {
         assertTrue(requests[0].query.toString().contains("statusId"))
     }
 
+    /**
+     * DAR-OPS-029 S40b (OUTPUT CHANGE A): an answer where no row names an asked id means OMS ignored the filter. Every
+     * lookup fails then; before, each asked order came back missing, as if HotWax did not have it.
+     */
+    @Test
+    void anAnswerNamingNoAskedIdFailsEveryLookupInsteadOfCallingAllMissing() {
+        OmsOrderStatusLookupSupport.setClientFactory { Map config ->
+            OmsGqlClient c = new OmsGqlClient(config, { String url, Map headers, String body ->
+                String doc = ((Map) new JsonSlurper().parseText(body)).query as String
+                String root = ["orderItems", "shipments", "facilities"].find { doc.contains("${it}(") } ?: "orders"
+                Map stranger = [orderId: "777", primaryOrderId: "777", orderItemSeqId: "01", statusId: "ITEM_APPROVED",
+                                shipmentId: "S1", shipmentTypeId: "SALES_SHIPMENT", facilityId: "F1"]
+                return [statusCode: 200, body: JsonOutput.toJson([data: [(root): [edges: [[node: stranger]],
+                        pageInfo: [hasNextPage: false]]], errors: []])]
+            })
+            c.sleeper = { long ms -> }
+            return c
+        }
+        Map<String, Map> results = [
+                statuses       : OmsOrderStatusLookupSupport.lookupOrderStatuses(CONFIG, ["145059"]),
+                itemStatuses   : OmsOrderStatusLookupSupport.lookupOrderItemStatuses(CONFIG, ["145059"]),
+                shipments      : OmsOrderStatusLookupSupport.lookupOrderShipments(CONFIG, ["145059"]),
+                shipGroups     : OmsOrderStatusLookupSupport.lookupShipGroupFacilities(CONFIG, ["145059"]),
+        ]
+        results.each { String name, Map result ->
+            assertFalse(result.ok as Boolean, "${name}: ${result}")
+            assertEquals([], result.missingIds, "${name}: nothing is called missing when HotWax could not be asked")
+            assertTrue((result.errors as List).any { it.toString().contains("did not honour its id filter") }, "${name}: ${result.errors}")
+        }
+    }
+
+    /**
+     * DAR-OPS-029 S40b (OUTPUT CHANGE B): an order whose ship groups fill the read's cap may have more, so the lookup fails
+     * naming it rather than leave a group past the cap with no facility. One group fewer is read whole.
+     */
+    @Test
+    void anOrderWhoseShipGroupsFillTheCapFailsTheLookup() {
+        Closure answering = { int groups ->
+            OmsOrderStatusLookupSupport.setClientFactory { Map config ->
+                OmsGqlClient c = new OmsGqlClient(config, { String url, Map headers, String body ->
+                    List edges = (1..groups).collect { [node: [shipGroupSeqId: String.format("%05d", it), facilityId: "F${it}"]] }
+                    return [statusCode: 200, body: JsonOutput.toJson([data: [orders: [edges: [[node: [orderId: "145059",
+                            shipGroups: [edges: edges]]]], pageInfo: [hasNextPage: false]]], errors: []])]
+                })
+                c.sleeper = { long ms -> }
+                return c
+            }
+        }
+        answering.call(OmsOrderStatusLookupSupport.SHIP_GROUPS_PER_ORDER)
+        Map full = OmsOrderStatusLookupSupport.lookupShipGroupFacilities(CONFIG, ["145059"])
+        assertFalse(full.ok as Boolean, full.toString())
+        assertEquals([:], full.shipGroupFacilityByKey)
+        assertTrue((full.errors as List)[0].toString().contains("145059"), full.errors.toString())
+
+        answering.call(OmsOrderStatusLookupSupport.SHIP_GROUPS_PER_ORDER - 1)
+        Map whole = OmsOrderStatusLookupSupport.lookupShipGroupFacilities(CONFIG, ["145059"])
+        assertTrue(whole.ok as Boolean, whole.toString())
+        assertEquals(OmsOrderStatusLookupSupport.SHIP_GROUPS_PER_ORDER - 1, (whole.shipGroupFacilityByKey as Map).size())
+    }
+
+    /** DAR-OPS-029 S40b: a failed call classifies nothing on the shipment and ship-group lookups too. */
+    @Test
+    void aFailedCallClassifiesNothingOnTheShipmentAndShipGroupLookups() {
+        OmsOrderStatusLookupSupport.setClientFactory { Map config ->
+            OmsGqlClient c = new OmsGqlClient(config, { String url, Map headers, String body -> [statusCode: 500, body: "boom"] })
+            c.sleeper = { long ms -> }
+            return c
+        }
+        Map shipments = OmsOrderStatusLookupSupport.lookupOrderShipments(CONFIG, ["145059"])
+        Map groups = OmsOrderStatusLookupSupport.lookupShipGroupFacilities(CONFIG, ["145059"])
+        [shipments, groups].each { Map r ->
+            assertFalse(r.ok as Boolean, r.toString())
+            assertEquals([], r.missingIds)
+            assertEquals(1, (r.errors as List).size())
+        }
+        assertEquals([:], shipments.shipmentsByOrderId)
+        assertEquals([:], groups.shipGroupFacilityByKey)
+    }
+
     @Test
     void ordersAnIgnoredFilterAnswersWithAreDropped() {
         // An ignored filter answers HTTP 200 with arbitrary orders; only ids that were asked for count.
@@ -94,7 +173,7 @@ class OmsOrderStatusLookupTests {
             [orderId: "NOT_ASKED", orderItemSeqId: "01", statusId: "ITEM_COMPLETED"],
     ]
 
-    private void omsItemsAnswer(int pageSize = 2) {
+    private void omsItemsAnswer(int pageSize = 2, boolean stray = true) {
         OmsOrderStatusLookupSupport.setClientFactory { Map config ->
             OmsGqlClient c = new OmsGqlClient(config, { String url, Map headers, String body ->
                 Map payload = (Map) new JsonSlurper().parseText(body)
@@ -103,7 +182,7 @@ class OmsOrderStatusLookupTests {
                 String q = vars.q as String
                 Set<String> ids = q.substring(q.indexOf(':') + 1).split(",") as Set
                 // An ignored filter would answer with every item; NOT_ASKED stands for that. Paged by cursor.
-                List<Map> all = ITEMS.findAll { ids.contains(it.orderId) || it.orderId == "NOT_ASKED" }
+                List<Map> all = ITEMS.findAll { ids.contains(it.orderId) || (stray && it.orderId == "NOT_ASKED") }
                 int from = vars.after ? (vars.after as int) : 0
                 List<Map> page = all.drop(from).take(pageSize)
                 boolean more = from + pageSize < all.size()
@@ -133,7 +212,8 @@ class OmsOrderStatusLookupTests {
 
     @Test
     void itemsAreAskedInChunksOfOrdersAndAFailedCallClassifiesNothing() {
-        omsItemsAnswer(100)
+        // No stray here: a stray beside no asked order is an ignored filter, which fails (see anAnswerNamingNoAskedId...).
+        omsItemsAnswer(100, false)
         List<String> ids = (1..(OmsOrderStatusLookupSupport.ITEMS_ID_CHUNK + 1)).collect { "M${100000 + it}".toString() }
         Map result = OmsOrderStatusLookupSupport.lookupOrderItemStatuses(CONFIG, ids)
         assertEquals(2, requests.size())

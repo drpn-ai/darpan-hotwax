@@ -468,14 +468,16 @@ class OmsGqlQueries {
     // DAR-BE-294: and how each ships (shipmentMethodTypeId), for an open line's own group.
     static final int SHIP_GROUP_FACILITIES_ID_CHUNK = 20
     static final int SHIP_GROUP_FACILITIES_RESERVATION = 600
+    /** The ship groups read per order; an order that fills it may have more (DAR-OPS-029 S40b: the lookup then fails). */
+    static final int SHIP_GROUPS_PER_ORDER = 10
 
     static String shipGroupFacilitiesDocument() {
-        return '''query OmsShipGroupFacilities($q: String, $first: Int, $after: String) {
-  orders(query: $q, first: $first, after: $after) {
-    edges { node { orderId shipGroups(first: 10) { edges { node { shipGroupSeqId facilityId shipmentMethodTypeId facility { externalId } } } } } }
+        return """query OmsShipGroupFacilities(\$q: String, \$first: Int, \$after: String) {
+  orders(query: \$q, first: \$first, after: \$after) {
+    edges { node { orderId shipGroups(first: ${SHIP_GROUPS_PER_ORDER}) { edges { node { shipGroupSeqId facilityId shipmentMethodTypeId facility { externalId } } } } } }
     pageInfo { hasNextPage endCursor }
   }
-}'''
+}""".toString()
     }
 
     // DAR-BE-329: each asked order's shipments, by primaryOrderId, for the count of NetSuite fulfillments against HotWax
