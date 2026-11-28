@@ -21,7 +21,6 @@ import groovy.json.JsonOutput
 class OmsScriptServiceSupport {
     static final String CONFIG_ENTITY_NAME = "darpan.hotwax.HotWaxOmsRestSourceConfig"
     static final String CONFIG_ID_REQUIRED = "OMS source config ID is required."
-    static final long PROGRESS_MIN_INTERVAL_MS = 2000L
 
     /**
      * The config gate every OMS extract and lookup runs first: id present, config visible to the trusted
@@ -56,44 +55,6 @@ class OmsScriptServiceSupport {
         return [usable: true, configId: configIdValue, sourceConfig: sourceConfig] as Map<String, Object>
     }
 
-    /**
-     * Live progress (advisory): with a run id, heartbeat the running record count onto this stage's
-     * RUNNING extract step as pages are consumed. The count IS the progress — an expected total is
-     * optional and only adds a percent, which the first extract of a run can never have because
-     * nothing has finished yet to divide against.
-     *
-     * Throttled on elapsed time rather than on percent change: percent-throttling needed the total,
-     * and a count has no natural "changed enough" threshold when page sizes vary by an order of
-     * magnitude across sources (a 50-record OMS page vs a Shopify bulk page). Writing faster than the
-     * UI polls buys nothing, so one heartbeat every couple of seconds is the useful ceiling — that
-     * also bounds the write volume on a 99k-order window to a few hundred updates instead of ~2000.
-     * The stage code is threaded in because the same extractor runs as file1 or file2 depending on
-     * the saved run's source order; it used to be hardcoded to file2, so every run with OMS on the
-     * first side silently looked up a step that was not RUNNING yet and reported nothing.
-     * Never fails the extraction.
-     *
-     * @return the page listener, or null when there is no run id to report against.
-     */
-    static Closure throttledProgressListener(def ec, Object reconciliationRunResultId, Object progressStageCode,
-                                             Object expectedRecordCount) {
-        String progressRunId = reconciliationRunResultId?.toString()?.trim()
-        String progressStage = progressStageCode?.toString()?.trim() ?: RunObservability.STAGE_EXTRACT_FILE2
-        Integer progressExpectedTotal = null
-        try {
-            progressExpectedTotal = expectedRecordCount != null ? (expectedRecordCount as Integer) : null
-        } catch (Exception ignored) {
-        }
-        if (!progressRunId) return null
-
-        Integer expectedTotal = progressExpectedTotal != null && progressExpectedTotal > 0 ? progressExpectedTotal : null
-        long lastReportedAtMs = 0L
-        return { Object cumulativeRawCount ->
-            long nowMs = System.currentTimeMillis()
-            if (nowMs - lastReportedAtMs < PROGRESS_MIN_INTERVAL_MS) return
-            lastReportedAtMs = nowMs
-            RunObservability.heartbeatStageProgress(ec, progressRunId, progressStage, cumulativeRawCount, expectedTotal)
-        }
-    }
 
     /**
      * The whole body of an OMS extract script: gate, output location, work file, progress, the
@@ -147,7 +108,7 @@ class OmsScriptServiceSupport {
                 ? File.createTempFile(workFilePrefix, ".partial", outputDirectory)
                 : File.createTempFile(workFilePrefix, ".partial")
 
-        Closure pageProgressListener = throttledProgressListener(ec, context.get("reconciliationRunResultId"),
+        Closure pageProgressListener = RunObservability.throttledProgressListener(ec, context.get("reconciliationRunResultId"),
                 context.get("progressStageCode"), context.get("expectedRecordCount"))
 
         Map extraction = null
