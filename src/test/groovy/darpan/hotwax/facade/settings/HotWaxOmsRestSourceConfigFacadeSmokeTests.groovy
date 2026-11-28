@@ -193,6 +193,7 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
         Map<String, Object> params = [description: "Probe", baseUrl: "https://probe.hotwax.io", authType: "BEARER",
                                       timeZone: "America/Chicago", isActive: true, canReadOrders: true]
 
+        Map before = snapshot("KREWE_HOTWAX")
         Map<String, Object> foreign = callSave(params + [omsRestSourceConfigId: "KREWE_HOTWAX"])
         ec.message.clearErrors()
         Map<String, Object> missing = callSave(params + [omsRestSourceConfigId: "NO_SUCH_HOTWAX"])
@@ -203,6 +204,41 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
         assertEquals(foreign.errors, missing.errors)
         assertNull(findOne("NO_SUCH_HOTWAX"), "a caller-named id must never create a row")
         assertEquals(KREWE, findOne("KREWE_HOTWAX").companyUserGroupId)
+        // DAR-OPS-029 S40c (QA): the refused save changed nothing on the foreign row, not only its owner.
+        assertEquals(before, snapshot("KREWE_HOTWAX"))
+    }
+
+    /** DAR-OPS-029 S40c (QA): a view-only tenant cannot save its own config, and the row is unchanged. */
+    @Test
+    void aViewOnlyTenantCannotSaveAndTheRowIsUnchanged() {
+        Map before = snapshot("KREWE_HOTWAX")
+        Map<String, Object> out = callSave([omsRestSourceConfigId: "KREWE_HOTWAX", description: "edited by a viewer",
+                                            baseUrl: "https://viewer.hotwax.io", authType: "NONE", timeZone: "UTC"])
+        assertFalse((Boolean) out.ok)
+        assertTrue((out.errors ?: []).join(" ").contains("read-only"), out.errors?.toString())
+        assertEquals(before, snapshot("KREWE_HOTWAX"))
+    }
+
+    /**
+     * DAR-OPS-029 S40c (QA): no secret reaches list or save output. The list test this joins read rows with no stored
+     * secret, so it could not have caught one.
+     */
+    @Test
+    void storedSecretsNeverReachListOrSaveOutput() {
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
+        Map<String, Object> saved = saveFacade([omsRestSourceConfigId: "GORJANA_SECRET_HOTWAX", description: "secrets",
+                baseUrl: "https://secret.hotwax.io", authType: "BASIC", username: "svc-user-s3cr3t", password: "pw-s3cr3t",
+                apiToken: "tok-s3cr3t", headersJson: '{"X-Api-Key":"hdr-s3cr3t"}', timeZone: "UTC"])
+        assertTrue((Boolean) saved.ok, saved.errors?.toString())
+        ec.message.clearErrors()
+        Map<String, Object> listed = listFacade([:])
+        assertTrue(((listed.omsRestSourceConfigs as List)*.omsRestSourceConfigId).contains(idOf("GORJANA_SECRET_HOTWAX")))
+        String out = groovy.json.JsonOutput.toJson([saved: saved, listed: listed])
+        ["svc-user-s3cr3t", "pw-s3cr3t", "tok-s3cr3t", "hdr-s3cr3t"].each { String secret ->
+            assertFalse(out.contains(secret), "${secret} reached the output")
+        }
+        Map row = ((listed.omsRestSourceConfigs as List).find { it.omsRestSourceConfigId == idOf("GORJANA_SECRET_HOTWAX") }) as Map
+        assertEquals([true, true, true, ["X-Api-Key"]], [row.hasUsername, row.hasPassword, row.hasApiToken, row.customHeaderNames])
     }
 
     @Test
@@ -418,6 +454,38 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
         assertEquals("tok-new", findOne("GORJANA_MOVE_HOTWAX").apiToken?.toString())
     }
 
+    /**
+     * DAR-OPS-029 S40c (U11, OUTPUT CHANGE): the edit form never shows custom headers back (the record carries only
+     * customHeaderNames), so a blank headersJson keeps the stored headers, as DAR-BE-212 keeps a blank username; an app
+     * edit used to wipe them. Never to a moved place: headers can carry a secret, so a moved base URL or auth type needs
+     * them again, and {} removes them.
+     */
+    @Test
+    void aBlankHeadersJsonKeepsTheStoredHeadersButNeverCarriesThemToAMovedPlace() {
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
+        Map<String, Object> base = [omsRestSourceConfigId: "GORJANA_HDR_HOTWAX", authType: "NONE", timeZone: "America/Chicago",
+                connectTimeoutSeconds: 30, readTimeoutSeconds: 60, isActive: true, canReadOrders: true]
+        assertTrue((Boolean) saveFacade(base + [baseUrl: "https://hdr.hotwax.io", headersJson: '{"X-Shop":"gorjana"}']).ok)
+
+        ec.message.clearErrors()
+        Map<String, Object> kept = saveFacade(base + [baseUrl: "https://hdr.hotwax.io", description: "renamed"])
+        assertTrue((Boolean) kept.ok, kept.errors?.toString())
+        assertEquals('{"X-Shop":"gorjana"}', findOne("GORJANA_HDR_HOTWAX").headersJson, "an edit that leaves the headers blank keeps them")
+        assertEquals(["X-Shop"], ((Map) kept.savedOmsRestSourceConfig).customHeaderNames)
+
+        ec.message.clearErrors()
+        Map<String, Object> moved = saveFacade(base + [baseUrl: "https://elsewhere.hotwax.io"])
+        assertFalse((Boolean) moved.ok, "the stored headers went along to a moved address")
+        assertTrue((moved.errors ?: []).join(" ").contains("Enter the custom headers again"), moved.errors?.toString())
+        assertEquals("https://hdr.hotwax.io", findOne("GORJANA_HDR_HOTWAX").baseUrl)
+
+        ec.message.clearErrors()
+        Map<String, Object> cleared = saveFacade(base + [baseUrl: "https://elsewhere.hotwax.io", headersJson: "{}"])
+        assertTrue((Boolean) cleared.ok, cleared.errors?.toString())
+        assertEquals(["https://elsewhere.hotwax.io", "{}"], findOne("GORJANA_HDR_HOTWAX").with { [it.baseUrl, it.headersJson] })
+        assertEquals([], ((Map) cleared.savedOmsRestSourceConfig).customHeaderNames)
+    }
+
     /** Review of DAR-BE-080: a new token sent with a moved address must not carry the stored password along (BASIC sends it). */
     @Test
     void aNewSecretOfOneKindDoesNotCarryTheOtherStoredOneToAMovedAddress() {
@@ -543,6 +611,13 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
             .parameters([omsRestSourceConfigId: idOf(configId)])
             .disableAuthz()
             .call()
+    }
+
+    /** The fields a refused save must leave as they were. */
+    private Map snapshot(String configId) {
+        def row = findOne(configId)
+        return ["description", "baseUrl", "authType", "timeZone", "headersJson", "isActive", "companyUserGroupId", "lastUpdatedDate"]
+                .collectEntries { [(it): row.get(it)] }
     }
 
     private def findOne(String configId) {

@@ -86,6 +86,18 @@ if (!ec.message.hasError()) {
         ec.message.addError(e.message)
     }
 
+    // DAR-OPS-029 S40c (U11, OC172): the edit form never shows the custom headers back (the record carries only
+    // customHeaderNames), so a blank headersJson on an edit keeps the stored headers, as DAR-BE-212 keeps a blank username.
+    // Never to a moved place: a header can carry a secret, so a moved base URL or auth type needs them again; {} removes them.
+    if (!ec.message.hasError() && existingConfig != null && !headersJsonValue && existingConfig.headersJson) {
+        if (SecretCarryOver.changedFields(existingConfig, [baseUrl: baseUrlValue, authType: authTypeValue], ["baseUrl", "authType"])) {
+            ec.message.addError("Enter the custom headers again: the base URL or auth type changed, so the stored ones are not " +
+                    "sent to the new place. Send {} to remove them.")
+        } else {
+            headersJsonValue = (String) existingConfig.headersJson
+        }
+    }
+
     // DAR-BE-080: a stored password or token is reused only while it goes to the same place. When the base URL, auth type
     // or headers moved, NO stored secret is carried over (not even the one of the other kind than the caller sent): the
     // auth type's own checks below then need every secret it uses in this request. A peer of a shared config can edit
