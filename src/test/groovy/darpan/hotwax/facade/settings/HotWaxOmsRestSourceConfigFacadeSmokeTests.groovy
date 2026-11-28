@@ -156,14 +156,16 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
 
             assertTrue((result.errors ?: []).isEmpty(), result.errors?.toString())
             assertTrue(result.dataAvailable as boolean)
-            assertEquals(1, result.recordCount)
-
-            // The kept sales order is written to the primary extract file; the exchange order is
-            // excluded from it (unchanged exclusion behavior) but captured into the sidecar below.
+            // DAR-BE-318 (DAR-OPS-029 S40c: this test still asserted the pre-318 read-time exclusion): a window read writes
+            // every order, the exchange order flagged isExchangeOrder=Y; darpan's Spark Keep sets it aside unless the side
+            // keeps exchange orders (the connector's built-in Keep line). It is also captured into the sidecar below.
+            assertEquals(2, result.recordCount)
             File extractFile = ec.resource.getLocationReference(result.fileLocation as String).getFile()
-            String extractText = extractFile.text
-            assertTrue(extractText.contains("O100"))
-            assertFalse(extractText.contains("M750653"))
+            Map<String, Map> byId = ((List<Map>) (JSON_SLURPER.parseText(extractFile.text) as Map).records)
+                    .collectEntries { [(it.orderId): it] }
+            assertEquals(["M750653", "O100"], byId.keySet().sort())
+            assertEquals("N", byId.O100.isExchangeOrder)
+            assertEquals("Y", byId.M750653.isExchangeOrder)
 
             assertNotNull(result.exchangeManifestFileLocation)
             String manifestLocation = result.exchangeManifestFileLocation as String
