@@ -3,17 +3,16 @@ import darpan.hotwax.oms.OmsGqlOrderPageSource
 import darpan.hotwax.oms.OmsExtractSupport
 import darpan.hotwax.oms.OmsScriptServiceSupport
 
-// Service edge for OMS order items at UNIT grain over GraphQL (DAR-BE-116): the GraphQL twin of
-// extractOmsOrderItems.groovy. Same extract options, same REST flattener and unit record; the pages come from
-// OmsGqlOrderPageSource (orders with their ship groups, items by orderId in
-// batches). The shared gate, work file, progress heartbeat and final move live in OmsScriptServiceSupport.runExtract.
+// Service edge for OMS order items at UNIT grain over GraphQL (DAR-BE-116; the REST read it replaced was retired by
+// DAR-BE-052). The unit record is OmsOrderLineUnitSupport's; the pages come from OmsGqlOrderPageSource (orders with
+// their ship groups, items by orderId in batches). The shared gate, work file, progress heartbeat and final move live in OmsScriptServiceSupport.runExtract.
 // DAR-BE-318: no source filters and so no excluded-records side file here; Keep runs in Spark over the file, and darpan
 // writes the side file (the connector row's excludedRecordsSidecar).
 OmsScriptServiceSupport.runExtract(ec, context, [
         requiredSystemEnumId  : "OMS_ORDER_ITEMS_GQL",
         workFilePrefix        : "oms-gql-order-items-extract-",
         extract               : { Map a ->
-            // As extractOmsOrderItems: exchange exclusion OFF and items without a Shopify id KEPT, because the
+            // Exchange exclusion OFF and items without a Shopify id KEPT, because the
             // NetSuite hops key on the OMS order. orderStatusIds and other window fields are refused by the
             // GraphQL page source rather than ignored.
             Map extractOptions = [

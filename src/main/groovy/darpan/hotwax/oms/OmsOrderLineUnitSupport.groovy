@@ -195,7 +195,12 @@ class OmsOrderLineUnitSupport {
         return value instanceof List ? (List) value : []
     }
 
-    /** A zero, negative, or unparseable quantity emits no unit rather than a negative loop. */
+    /**
+     * A zero, negative, or unparseable quantity emits no unit rather than a negative loop. Read as the data-defined twin
+     * reads it (OMS_ORDER_ITEMS_GQL_V1, units parse STRICT_INT: a number's whole part, text a whole number, so "1.0" is
+     * none); OmsGqlOrderItemsDataDefinitionTests holds the two equal. An exact reading (1.5 counted, "1.000000" one unit)
+     * changes both at the cutover (DAR-OPS-029 S40c, logged for S99), not this one alone.
+     */
     private static int toPositiveInt(Object value) {
         if (value instanceof Number) return Math.max(0, ((Number) value).intValue())
         try {

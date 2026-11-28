@@ -6,9 +6,8 @@ import darpan.hotwax.oms.OmsScriptServiceSupport
 
 // Service edge for OMS returns over GraphQL (connector OMS_RETURNS_GQL, DAR-BE-040 fix 3).
 //
-// The same edge as extractOmsReturns.groovy (all in OmsScriptServiceSupport.runExtract) and the same
-// REST returns pipeline; only the page source differs. Everything returns-specific lives in
-// OmsReturnsSourceSupport, not here.
+// The shared edge (OmsScriptServiceSupport.runExtract) over the returns pipeline the retired REST read used
+// (DAR-BE-052); only the page source is GraphQL. Everything returns-specific lives in OmsReturnsSourceSupport.
 OmsScriptServiceSupport.runExtract(ec, context, [
         requiredSystemEnumId: "OMS_RETURNS_GQL",
         workFilePrefix      : "oms-gql-returns-extract-",

@@ -9,6 +9,7 @@ import groovy.json.JsonSlurper
 import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
+import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertTrue
 
 /**
@@ -237,10 +238,12 @@ class OmsGqlOrderItemsDataDefinitionTests {
     void readByOrderIdOrShopifyIdWritesTheSameRecords() {
         Map c = coded(new Server(), [lookupKeys: ["O1", "O2", "O5"], lookupKeyField: "orderId"])
         Map d = data(new Server(), [mode: "ids", keys: ["O1", "O2", "O5"], keyField: "orderId"])
+        assertFalse(((List) d.records).isEmpty(), "the read by orderId wrote units (two empty reads would compare equal)")
         assertEquals(canonical((List) c.records), canonical((List) d.records))
         assertSameCounts((Map) c.metadata, d)
         Map c2 = coded(new Server(), [lookupKeys: ["SH1"], lookupKeyField: "externalId"])
         Map d2 = data(new Server(), [mode: "ids", keys: ["SH1"], keyField: "externalId"])
+        assertFalse(((List) d2.records).isEmpty(), "the read by externalId wrote units")
         assertEquals(canonical((List) c2.records), canonical((List) d2.records))
         // No key field: orderId, as the coded read defaults.
         Map d3 = data(new Server(), [mode: "ids", keys: ["O5"]])

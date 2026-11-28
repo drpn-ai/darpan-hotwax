@@ -10,6 +10,7 @@ import groovy.json.JsonSlurper
 import org.junit.jupiter.api.Test
 
 import static org.junit.jupiter.api.Assertions.assertEquals
+import static org.junit.jupiter.api.Assertions.assertFalse
 import static org.junit.jupiter.api.Assertions.assertThrows
 import static org.junit.jupiter.api.Assertions.assertTrue
 
@@ -295,6 +296,7 @@ class OmsGqlOrdersDataDefinitionTests {
         assertEquals((BASE + ["paymentRefNums"]) as Set, byId.O1.keySet())
         assertTrue(!byId.O4.containsKey("paymentRefNums"), "a list the slots cut short is not written")
         Map raw = data(new Server(), window(["orderId", "paymentPreferences"]))
+        assertFalse(((List<Map>) raw.records).isEmpty(), "the raw-rows read wrote orders")
         assertTrue(((List<Map>) raw.records).every { it.containsKey("paymentPreferenceSlotsFull") }, "kept with the raw rows")
     }
 
@@ -302,6 +304,7 @@ class OmsGqlOrdersDataDefinitionTests {
     void readByOrderIdOrShopifyIdWritesTheSameOrders() {
         Map c = coded(new Server(), BASE, [lookupKeys: ["O1", "O3", "O5"], lookupKeyField: "orderId"])
         Map d = data(new Server(), [mode: "ids", keys: ["O1", "O3", "O5"], keyField: "orderId", keep: BASE])
+        assertFalse(((List) d.records).isEmpty(), "the read by orderId wrote orders (two empty reads would compare equal)")
         assertSame(c, d, "by orderId")
         Map c2 = coded(new Server(), BASE, [lookupKeys: ["SH4", "SHR1"], lookupKeyField: "externalId"])
         Map d2 = data(new Server(), [mode: "ids", keys: ["SH4", "SHR1"], keyField: "externalId", keep: BASE])

@@ -190,6 +190,18 @@ class OmsAgentQuerySmokeTests {
         assertEquals(1, sent.size())
     }
 
+    /** DAR-OPS-029 S40c (QA): another tenant's connection and one that does not exist answer alike (no existence oracle). */
+    @Test
+    void "another tenant's config and a missing one answer alike"() {
+        String doc = "query Q { orders { edges { node { id } } } }"
+        Map foreign = run(TENANT_A, "OMS_B", doc)
+        Map missing = run(TENANT_A, "NO_SUCH_OMS", doc)
+        assertFalse(foreign.ok as boolean)
+        assertEquals(missing.errors, foreign.errors)
+        assertEquals(missing.code, foreign.code)
+        assertTrue(sent.isEmpty())
+    }
+
     @Test
     void "view-only refused for run, allowed for get schema"() {
         Map r = run(TENANT_VIEW, "OMS_V", "query Q { orders { edges { node { id } } } }")
@@ -210,7 +222,12 @@ class OmsAgentQuerySmokeTests {
         assertFalse(text.contains(HOST), text)
         assertFalse(text.contains(TOKEN), text)
         assertTrue(text.contains("[hidden]"), text)
-        assertTrue(logRows("query Leak { orders { edges { node { id } } } }", "ERROR").size() == 1)
+        List rows = logRows("query Leak { orders { edges { node { id } } } }", "ERROR")
+        assertEquals(1, rows.size())
+        // DAR-OPS-029 S40c (QA): the logged row is stripped too, not only the answer.
+        String logged = rows[0].getMap().toString()
+        assertFalse(logged.contains(HOST), logged)
+        assertFalse(logged.contains(TOKEN), logged)
     }
 
     @Test
@@ -218,7 +235,7 @@ class OmsAgentQuerySmokeTests {
         answer = { String body -> [statusCode: 200, body: JsonOutput.toJson([errors: [[message: "bad field on ${HOST}".toString()]]])] }
         Map r = run(TENANT_A, "OMS_A", "query Bad { orders { edges { node { id } } } }")
         assertEquals("ERROR", r.code)
-        assertFalse("${r.error}".contains(HOST))
+        assertFalse("${r.error} ${r.errors}".contains(HOST), "${r.error} ${r.errors}")
     }
 
     @Test
