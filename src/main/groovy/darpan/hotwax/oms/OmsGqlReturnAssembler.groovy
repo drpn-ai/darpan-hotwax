@@ -35,7 +35,7 @@ class OmsGqlReturnAssembler {
     }
 
     /** The value of `node`'s identification of `type` that has not ended (and matches `pattern`), else null. */
-    static String activeIdentification(Map node, String type, String pattern = /.+/) {
+    private static String activeIdentification(Map node, String type, String pattern = /.+/) {
         long now = System.currentTimeMillis()
         Map ident = ((node?.identifications instanceof List) ? (List<Map>) node.identifications : []).find { Object raw ->
             raw instanceof Map && normalize(raw.returnIdentificationTypeId) == type && normalize(raw.idValue) ==~ pattern &&

@@ -66,7 +66,7 @@ class OmsKeptFieldsProjection {
             readShapers: ["paymentRefNums", "paymentPreferences", "paymentMethodTypeIds"],
             shapedFields: ["paymentRefNums", "paymentPreferences", "paymentMethodTypeIds", "paymentPreferenceSlotsFull"],
             recordFollowsAskedFields: true,
-            exchangeManifestMax: 500,
+            exchangeManifestMax: OmsExtractSupport.EXCHANGE_MANIFEST_MAX_ENTRIES,
             appended: [OmsExtractSupport.IS_EXCHANGE_ORDER_FIELD])
 
     /** HotWax OMS returns (extract#HotWaxOmsGqlReturns): items[] always kept (RQ-21), and the window read's class (DAR-BE-318). */

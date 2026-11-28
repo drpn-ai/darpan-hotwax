@@ -246,7 +246,7 @@
             <parameter name="fileName">
                 <description>Optional output file name. Defaults to oms-returns-{fromMillis}-{thruMillis}.json.</description>
             </parameter>
-                    <parameter name="includeReturnsWithoutShopifyRef" type="Boolean" default="false">
+            <parameter name="includeReturnsWithoutShopifyRef" type="Boolean" default="false">
                 <description>DAR-BE-094. Keep the returns with no Shopify reference (counted as keptNoShopifyRefCount) instead
                     of excluding them: the OMS's own Happiness Guarantee and sellable returns, which Shopify never sees but
                     NetSuite must. For a check against NetSuite (R8), set in the automation source's
