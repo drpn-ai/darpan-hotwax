@@ -80,6 +80,15 @@ class OmsGqlOrdersDataDefinitionTests {
             [orderId: "O3", orderItemSeqId: "00002", toOrderId: "O10", toOrderItemSeqId: "00001", orderItemAssocTypeId: "EXCHANGE"],
             [orderId: "O6", orderItemSeqId: "00001", toOrderId: "O11", toOrderItemSeqId: "00001", orderItemAssocTypeId: "REPLACEMENT"],
     ]
+    /** DAR-BE-368: item rows, out of item order on purpose; P_NONAME has no internalName (its SKU is null). */
+    static final List<Map> ITEMS = [
+            [orderId: "O1", orderItemSeqId: "00002", externalId: "L12", productId: "P_SKU_B", quantity: 2, statusId: "ITEM_APPROVED", shipGroupSeqId: "00001"],
+            [orderId: "O1", orderItemSeqId: "00001", externalId: "L11", productId: "P_SKU_A", quantity: 1, statusId: "ITEM_COMPLETED", shipGroupSeqId: "00001"],
+            [orderId: "O5", orderItemSeqId: "00001", externalId: null, productId: "P_NONAME", quantity: 3, statusId: "ITEM_CREATED", shipGroupSeqId: "00001"],
+            [orderId: "O3", orderItemSeqId: "00001", externalId: "L31", productId: "P_SKU_A", quantity: 1, statusId: "ITEM_COMPLETED", shipGroupSeqId: "00001"],
+    ]
+    static final List<Map> PRODUCTS = [[productId: "P_SKU_A", internalName: "SKU-A"], [productId: "P_SKU_B", internalName: "SKU-B"],
+                                       [productId: "P_NONAME", internalName: null]]
 
     /** A HotWax moqui-gql stand-in that returns only what the document selects. */
     static class Server {
@@ -106,6 +115,12 @@ class OmsGqlOrdersDataDefinitionTests {
                 } else if (op == "OmsExchangeAssocs") {
                     root = "orderItemAssocs"
                     rows = ASSOCS.findAll { matches(it, (String) vars.q) }
+                } else if (op == "OmsUnitOrderItems") {
+                    root = "orderItems"
+                    rows = ITEMS.findAll { matches(it, (String) vars.q) }
+                } else if (op == "OmsProductNames") {
+                    root = "products"
+                    rows = PRODUCTS.findAll { matches(it, (String) vars.q) }
                 } else {
                     throw new IllegalStateException("unexpected query ${op}")
                 }
@@ -248,12 +263,14 @@ class OmsGqlOrdersDataDefinitionTests {
                 BASE + ["paymentPreferences"], BASE + ["paymentPreferences", "paymentRefNums"], ["paymentRefNums"],
                 BASE + ["notes", "statuses", "identifications", "productStoreId", "salesChannelEnumId", "statusFlowId",
                         "orderItemCount", "lastUpdatedTxStamp", "isCompleted", "hasPaymentPreference"],
+                BASE + ["orderItems"], ["itemQuantity"], BASE + ["orderItems", "itemQuantity"],
         ]
         fieldSets.each { List<String> wanted ->
             Map plan = OmsGqlQueries.orderGrainPagePlan(wanted as Set<String>)
             List<Map> on = ((List<Map>) orders.selections).findAll { RecordConditions.matches([wanted: wanted], it.when) }
             String document = DataSourceDefinitionSupport.fillSlots((String) orders.document, on)
-            assertEquals(tokens((String) plan.document), tokens(document), "fields asked for ${wanted}")
+            // .unique(): a by-id read's flag selection (itemQuantity, orderItems) asks orderId again, which GraphQL merges.
+            assertEquals(tokens((String) plan.document).unique(), tokens(document).unique(), "fields asked for ${wanted}")
             double cost = (pageSize.costPerRecord as double) + ((on.collect { (it.cost ?: 0) as double }.sum() ?: 0d) as double)
             int size = Math.min(pageSize.max as int, Math.max(1, (int) Math.floor((pageSize.budget as double) / cost)))
             assertEquals(plan.pageSize, size, "page size for ${wanted}")
@@ -298,6 +315,29 @@ class OmsGqlOrdersDataDefinitionTests {
         Map raw = data(new Server(), window(["orderId", "paymentPreferences"]))
         assertFalse(((List<Map>) raw.records).isEmpty(), "the raw-rows read wrote orders")
         assertTrue(((List<Map>) raw.records).every { it.containsKey("paymentPreferenceSlotsFull") }, "kept with the raw rows")
+    }
+
+    /**
+     * DAR-BE-368 (S40d): withOrderItems, an audit finding's order lines. Each order's items in item order with their
+     * Shopify line id, SKU, quantity and status, an order with none has an empty list, and a read that does not ask for
+     * them reads no item.
+     */
+    @Test
+    void orderItemsWriteTheSameLinesWithTheirSkus() {
+        List<String> keep = BASE + ["orderItems"]
+        Server dataServer = new Server()
+        Map d = data(dataServer, window(keep))
+        assertSame(coded(new Server(), keep), d, "keep orderItems")
+        Map<String, Map> byId = ((List<Map>) d.records).collectEntries { [(it.orderId): it] }
+        assertEquals([[orderItemSeqId: "00001", externalId: "L11", productId: "P_SKU_A", sku: "SKU-A", quantity: 1, statusId: "ITEM_COMPLETED"],
+                      [orderItemSeqId: "00002", externalId: "L12", productId: "P_SKU_B", sku: "SKU-B", quantity: 2, statusId: "ITEM_APPROVED"]],
+                byId.O1.orderItems)
+        assertEquals([[orderItemSeqId: "00001", externalId: null, productId: "P_NONAME", sku: null, quantity: 3, statusId: "ITEM_CREATED"]], byId.O5.orderItems)
+        assertEquals([], byId.O2.orderItems, "an order with no item has an empty list")
+        Server lean = new Server()
+        Map without = data(lean, window(BASE))
+        assertTrue(((List<Map>) without.records).every { !it.containsKey("orderItems") }, "not asked, not written")
+        assertTrue(lean.calls.every { it.op != "OmsUnitOrderItems" && it.op != "OmsProductNames" }, "not asked, not read")
     }
 
     @Test
