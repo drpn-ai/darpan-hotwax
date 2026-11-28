@@ -7,7 +7,7 @@
 | Consumer | Darpan reconciliation (component `darpan-hotwax` is the integration edge) |
 | Implementer | HotWax OMS ("maarg") team — their architect owns all design |
 | Supersedes | `../archive/2026-07-24-oms-recon-export-requirements.md`. That document specified orders only, and specified an async export-job-plus-file transport. Both decisions are revised here — see "What changed" below. |
-| Current reference | The endpoints this document asked for are in service: `/rest/s1/oms/reconciliationOrders` (opt-in connector) and `/rest/s1/oms/reconciliationReturns`. `rest-order-extraction.md`, `rest-return-extraction.md` and `graphql-connector.md` (same folder) describe the integration as it runs; read them, not this document, for current behaviour. |
+| Current reference | Superseded. Darpan stopped calling `/rest/s1/oms/reconciliationOrders` and `/rest/s1/oms/reconciliationReturns` when every OMS read moved to GraphQL (DAR-BE-052, 2026-11-02). `../oms/graphql-connector.md`, `../oms/order-extraction.md` and `../oms/return-extraction.md` describe the integration as it runs. |
 
 This is a requirements document. It states WHAT data Darpan needs and the
 externally observable contract it depends on. HOW the OMS produces it —
