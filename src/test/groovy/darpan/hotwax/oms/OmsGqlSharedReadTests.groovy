@@ -103,12 +103,14 @@ class OmsGqlSharedReadTests {
     @Test
     void aReaderJoinsAReadAFollowerStartedAndItRunsOnce() {
         int produced = 0
+        CountDownLatch started = new CountDownLatch(1)
         CountDownLatch release = new CountDownLatch(1)
-        Closure producer = { Closure emit -> produced++; release.await(5, TimeUnit.SECONDS); emit.call([id: 7]); [:] }
+        Closure producer = { Closure emit -> produced++; started.countDown(); release.await(5, TimeUnit.SECONDS); emit.call([id: 7]); [:] }
         def pool = Executors.newFixedThreadPool(1)
         try {
             Future following = pool.submit({ -> OmsGqlSharedRead.follow("k", producer) { Map r -> } } as java.util.concurrent.Callable)
-            Thread.sleep(300L)
+            // S99-216: wait until the follower's read is running (it was a 300 ms sleep, a guess on a busy machine)
+            assertTrue(started.await(5, TimeUnit.SECONDS), "the follower's read never started")
             Thread reader = Thread.start { release.countDown() }
             Map read = OmsGqlSharedRead.read("k", producer)
             reader.join()

@@ -54,7 +54,11 @@ class OmsSharedConfigRuntimeAccessTests {
     private static final String STRANGER = "OMS_RUNTIME_STRANGER"
     private static final Timestamp TEST_FROM_DATE = Timestamp.valueOf("2026-05-01 00:00:00")
     /** One sales order per orders page; no exchange associations. */
+    /** S99-216: every request the fake OMS received this test, so a refusal can prove nothing was sent. */
+    private static final java.util.concurrent.atomic.AtomicInteger SENT = new java.util.concurrent.atomic.AtomicInteger()
+
     private static final Closure FAKE_GQL_SENDER = { String url, Map headers, String body ->
+        SENT.incrementAndGet()
         String root = (new groovy.json.JsonSlurper().parseText(body).query =~ /\{\s*(\w+)\(/)[0][1]
         List nodes = root == "orders"
                 ? [[orderId: "O1", externalId: "SH-O1", orderTypeId: "SALES_ORDER", statusId: "ORDER_APPROVED",
@@ -90,6 +94,7 @@ class OmsSharedConfigRuntimeAccessTests {
 
     @BeforeEach
     void resetState() {
+        SENT.set(0)
         ec.message.clearErrors()
         ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, OWNER)
         java.lang.reflect.Constructor ctor = OmsGqlClient.getConstructor(Map, Closure)
@@ -143,6 +148,8 @@ class OmsSharedConfigRuntimeAccessTests {
         assertFalse((foreign.errors ?: []).isEmpty())
         assertFalse(foreign.dataAvailable as boolean)
 
+        assertEquals(0, SENT.get(), "a refused stranger sends nothing to the OMS (S99-216)")
+        assertEquals(null, foreign.fileLocation, "and writes no file")
         assertEquals(missing.errors, foreign.errors,
                 "a stranger automation tenant (no ownership, no grant) must get byte-identical text " +
                 "whether the config id is real-but-foreign or does not exist at all — divergence here " +
@@ -205,6 +212,8 @@ class OmsSharedConfigRuntimeAccessTests {
         Map<String, Object> foreign = extractFacade([omsRestSourceConfigId: configId])
         assertFalse((foreign.errors ?: []).isEmpty())
 
+        assertEquals(0, SENT.get(), "a refused stranger sends nothing to the OMS (S99-216)")
+        assertEquals(null, foreign.fileLocation, "and writes no file")
         assertEquals(missing.errors, foreign.errors,
                 "an interactive stranger (no ownership, no grant) must get byte-identical text " +
                 "whether the config id is real-but-foreign or does not exist at all")
