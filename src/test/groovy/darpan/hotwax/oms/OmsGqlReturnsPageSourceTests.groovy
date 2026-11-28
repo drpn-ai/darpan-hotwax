@@ -25,12 +25,29 @@ class OmsGqlReturnsPageSourceTests {
             requests.add([root: root, query: payload.query, variables: payload.variables])
             Closure h = handlers[root]
             if (h == null) throw new AssertionError("unexpected GraphQL root ${root}")
-            Object answer = h.call(payload.variables)
+            Object answer = honourIdFilter(h.call(payload.variables), (String) ((Map) payload.variables)?.q)
             if (answer instanceof Map && ((Map) answer).errors) return [statusCode: 200, body: JsonOutput.toJson(answer)]
             return [statusCode: 200, body: JsonOutput.toJson([data: [(root): answer], errors: []])]
         })
         c.sleeper = { long ms -> }
         return c
+    }
+
+    /**
+     * As the OMS does (S99-026): an id filter ("field:a,b", the query's last term) answers only the rows naming an asked id. A
+     * window term (field:>=… / field:<…) is not an id filter, and a row that does not carry the field is left as it is.
+     */
+    private static Object honourIdFilter(Object answer, String q) {
+        if (!(answer instanceof Map) || !(((Map) answer).edges instanceof List) || !q) return answer
+        def m = q.trim().tokenize(' ').last() =~ /^(\w+):([^<>=].*)$/
+        if (!m.matches()) return answer
+        String field = m.group(1)
+        Set<String> asked = m.group(2).tokenize(',') as Set<String>
+        List edges = ((List) ((Map) answer).edges).findAll { Object e ->
+            Map node = (Map) ((Map) e).node
+            !node.containsKey(field) || asked.contains(node.get(field)?.toString())
+        }
+        return ((Map) answer) + [edges: edges]
     }
 
     private static Map conn(List nodes, String endCursor = null) {
@@ -59,6 +76,29 @@ class OmsGqlReturnsPageSourceTests {
                 orderItems : { Map v -> conn([[orderId: "GR1", orderItemSeqId: "00101", externalId: "16501091238019"]]) },
                 products   : { Map v -> conn([[productId: "P1", internalName: "219-001-G"]]) },
                 goodIdentifications: { Map v -> conn([[productId: "P1", goodIdentificationTypeId: "NETSUITE_PRODUCT_ID", idValue: "30345", thruDate: null]]) }]
+    }
+
+    /** S99-026: a lookup answer whose rows name none of the asked ids means the OMS ignored the filter: it fails, never "missing". */
+    @Test
+    void aLookupAnswerNamingNoAskedIdFailsInsteadOfReadingAsMissing() {
+        Closure answering = { List<Map> nodes ->
+            new OmsGqlClient(CONFIG, { String u, Map h, String b -> [statusCode: 200, body: "{}"] }) {
+                @Override
+                Map execute(String document, Map variables, int reservation) {
+                    return [data: [returnItems: [edges: nodes.collect { [node: it] }, pageInfo: [hasNextPage: false]]]]
+                }
+            }
+        }
+        Closure lookup = { OmsGqlClient c, String key ->
+            OmsGqlReturnsPageSource.fetchByIds(c, OmsGqlQueries.returnItemsDocument(), "returnItems", key, ["R1", "R2"], 50, 50, 1, [lookupCalls: 0])
+        }
+        OmsGqlException e = (OmsGqlException) org.junit.jupiter.api.Assertions.assertThrows(OmsGqlException) {
+            lookup(answering([[returnId: "OTHER1"], [returnId: "OTHER2"]]), "returnId")
+        }
+        assertTrue(e.message.contains("did not honour"), e.message)
+        assertEquals(["R1"], lookup(answering([[returnId: "R1"]]), "returnId")*.returnId, "a partial answer is an answer: R2 is absent")
+        assertEquals([], lookup(answering([]), "returnId"), "nothing found is not an ignored filter")
+        assertEquals(1, lookup(answering([[orderId: "O9"]]), "returnId").size(), "rows that do not carry the key cannot be judged")
     }
 
     @Test

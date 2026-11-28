@@ -439,7 +439,9 @@ class OmsGqlReturnsPageSource {
                 }
                 Map connection = OmsGqlOrderPageSource.requireConnection(answer, root)
                 synchronized (pagination) { pagination.lookupCalls = (pagination.lookupCalls as int) + 1 }
-                all.addAll(OmsGqlOrderGrainAssembler.edgeNodes(connection))
+                List<Map> nodes = OmsGqlOrderGrainAssembler.edgeNodes(connection)
+                requireEcho(nodes, key, chunk, root)
+                all.addAll(nodes)
                 cursor = OmsGqlOrderPageSource.nextCursor(connection, seenCursors, root)
                 if (cursor == null) break
             }
@@ -447,6 +449,21 @@ class OmsGqlReturnsPageSource {
         return all
     }
 
+
+    /**
+     * DAR-OPS-029 S99-026: rows that carry the filter field and name none of the asked ids mean the OMS ignored the filter, and
+     * the asked ids would read as missing. A partial answer is an answer; rows that do not carry the field cannot be judged.
+     * The field is the key's last term (NETSUITE_PRODUCT_ID_KEY filters on a type, then productId).
+     */
+    private static void requireEcho(List<Map> nodes, String key, List<String> asked, String root) {
+        String field = key.tokenize(' ').last()
+        List<Map> carried = nodes.findAll { it.containsKey(field) }
+        if (!carried) return
+        Set<String> wanted = asked.collect { it as String } as Set<String>
+        if (!carried.any { wanted.contains(it.get(field)?.toString()) }) {
+            throw new OmsGqlException("FILTER_IGNORED", "${root} by ${field} did not honour its id filter: no row names an asked id".toString())
+        }
+    }
 
     private static String netsuiteOrderId(Map order) {
         return ((order?.identifications ?: []) as List<Map>).find { it?.orderIdentificationTypeId == "NETSUITE_ORDER_ID" }?.idValue as String
