@@ -14,6 +14,58 @@ import static org.junit.jupiter.api.Assertions.assertTrue
 class OmsExtractSupportTests {
     private static final JsonSlurper JSON_SLURPER = new JsonSlurper()
 
+    /** DAR-OPS-029 S40a: a zoneless window bound is UTC whatever the JVM zone, written with a space or a T. */
+    @Test
+    void aZonelessWindowBoundIsUtcWhateverTheJvmZone() {
+        TimeZone was = TimeZone.getDefault()
+        TimeZone.setDefault(TimeZone.getTimeZone("Asia/Kolkata"))
+        try {
+            long utc = java.time.Instant.parse("2026-11-01T00:00:00Z").toEpochMilli()
+            ["2026-11-01 00:00:00", "2026-11-01 00:00:00.0", "2026-11-01T00:00:00", "2026-11-01"].each { String text ->
+                List<String> errors = []
+                assertEquals(utc, OmsExtractSupport.parseWindowMillis(text, "windowStart", errors), text)
+                assertEquals([], errors, text)
+            }
+        } finally {
+            TimeZone.setDefault(was)
+        }
+    }
+
+    /** DAR-OPS-029 S40a: an inverted returns window is refused, as the orders extract refuses one, never read as empty. */
+    @Test
+    void anInvertedReturnsWindowIsRefusedNotReadAsEmpty() {
+        int calls = 0
+        Map extract = OmsReturnsSourceSupport.extractReturns([baseUrl: "https://x.test", authType: "NONE"],
+                "2026-10-02T00:00:00Z", "2026-10-01T00:00:00Z", null, null,
+                [pageFetcher: { Map ctx -> calls++; return [errors: [], warnings: [], serverCounts: [:]] }])
+        assertEquals(["windowStart must be before or equal to windowEnd."], extract.errors)
+        assertEquals(0, calls, "nothing is read for an inverted window")
+    }
+
+    /** DAR-OPS-029 S40a: every class the returns read counts reaches the file's metadata (keptNoShopifyRefCount was dropped). */
+    @Test
+    void everyReturnsClassCountReachesTheMetadata() {
+        Map filters = (Map) OmsReturnsSourceSupport.buildMetadata([returnsCount: 6, excludedNoShopifyRefCount: 0, excludedCancelledCount: 1,
+                keptNoShopifyRefCount: 2, excludedNotCancelledCount: 3]).filters
+        assertEquals(2, filters.keptNoShopifyRefCount)
+        assertEquals(3, filters.excludedNotCancelledCount)
+        assertFalse(((Map) OmsReturnsSourceSupport.buildMetadata([returnsCount: 1]).filters).containsKey("keptNoShopifyRefCount"),
+                "a count the read did not keep is not invented")
+    }
+
+    /** DAR-OPS-029 S40a: progress is advisory on the returns extract too (the orders extract already treats it so). */
+    @Test
+    void aFailingProgressListenerNeverFailsTheReturnsExtract() {
+        Map extract = OmsReturnsSourceSupport.extractReturns([baseUrl: "https://x.test", authType: "NONE"],
+                "2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z", null, { Object n -> throw new IllegalStateException("heartbeat down") },
+                [pageFetcher: { Map ctx ->
+                    ((Closure) ctx.pageConsumer).call([[returnId: "R1", externalId: "E1", items: []]])
+                    return [errors: [], warnings: [], serverCounts: [returnsCount: 1]]
+                }])
+        assertEquals([], extract.errors)
+        assertEquals(1, extract.recordCount)
+    }
+
     @Test
     void safeRowsKeepSecretsOut() {
         Map<String, Object> safeRow = OmsExtractSupport.safeConfigMap([

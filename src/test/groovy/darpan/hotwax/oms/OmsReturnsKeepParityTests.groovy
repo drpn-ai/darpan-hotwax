@@ -192,7 +192,8 @@ class OmsReturnsKeepParityTests {
         Map parity = assertParity([:], [], false)
         assertFalse(parity.after.unknownWhenAbsent as boolean, "nothing a tenant rule dropped: absent is absent")
         assertEquals(["R04", "R05", "R06", "R07", "R08"], (parity.setAsideBy as Map).keySet() as List)
-        assertEquals("ABSENT", RunConclusionSupport.lookup(parity.after.index, ConclusionKeySupport.compareKey([returnId: "R04"], ["returnId"], null)).presence)
+        // OC67 (S03a): the rows file names R04, which a built-in line set aside, so it reads EXCLUDED (the old read said ABSENT)
+        assertEquals("EXCLUDED", RunConclusionSupport.lookup(parity.after.index, ConclusionKeySupport.compareKey([returnId: "R04"], ["returnId"], null)).presence)
         assertEquals([], KeepArtifacts.readSummary(parity.file as File).configuredExclusions)
     }
 
@@ -282,7 +283,10 @@ class OmsReturnsKeepParityTests {
         assertEquals((before.kept as List).size(), summary.keptCount as int, label)
         Map afterCounts = new LinkedHashMap((Map) ((Map) after.metadata).filters)
         assertFalse(afterCounts.containsKey("configuredExclusions"), "${label}: the read applies no rule")
-        assertEquals(before.serverCounts, afterCounts, "${label}: the read's counts")
+        // DAR-OPS-029 S40a: two counts the read made and dropped now reach the metadata (keptNoShopifyRefCount,
+        // excludedNotCancelledCount); every count the old read wrote is unchanged
+        assertEquals(before.serverCounts, afterCounts.findAll { k, v -> !(k in ["keptNoShopifyRefCount", "excludedNotCancelledCount"]) },
+                "${label}: the read's counts")
 
         // no side file either way (OMS_RETURNS_GQL N), and the conclusions read every key the same
         assertFalse((after.sideKeep as Map).writeSidecar as boolean)
@@ -369,8 +373,18 @@ class OmsReturnsKeepParityTests {
         Map oldIndex = RunConclusionSupport.indexSide([extractFile: before, keyFields: keyFields], keys, firsts)
         Map newIndex = RunConclusionSupport.indexSide([extractFile: after, keyFields: keyFields], keys, firsts)
         assertEquals(oldIndex.unknownWhenAbsent, newIndex.unknownWhenAbsent, "${label}: unknown when absent")
+        // OC67 (S03a 6257e618): under Keep the rows file names every set-aside record, so its key reads EXCLUDED where the old
+        // read, which left it out of the file, said UNKNOWN or ABSENT. The set-aside keys come from the rows file itself.
+        Set<String> setAside = [] as Set<String>
+        KeepArtifacts.forEachSetAsideRecord(after) { Map r, String id ->
+            String k = ConclusionKeySupport.compareKey(r, keyFields, null)
+            if (k) setAside.add(k)
+        }
         keys.each { String key ->
-            assertEquals(RunConclusionSupport.lookup(oldIndex, key).presence, RunConclusionSupport.lookup(newIndex, key).presence, "${label}: ${key}")
+            String was = RunConclusionSupport.lookup(oldIndex, key).presence
+            String now = RunConclusionSupport.lookup(newIndex, key).presence
+            if (setAside.contains(key) && now != "KEPT") assertEquals("EXCLUDED", now, "${label}: ${key}: the Keep set it aside (OC67)")
+            else assertEquals(was, now, "${label}: ${key}")
         }
         assertTrue(keys.any { RunConclusionSupport.lookup(newIndex, it).presence == "KEPT" })
         return [unknownWhenAbsent: newIndex.unknownWhenAbsent, index: newIndex]

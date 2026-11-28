@@ -57,11 +57,14 @@ class OmsGqlReturnsPageSource {
         boolean onlyCancelled = ctx.onlyCancelledReturns == true
         if (onlyCancelled) keepNoShopifyRef = true
         if (keepNoShopifyRef) serverCounts.keptNoShopifyRefCount = 0
+        // the answers an onlyCancelledReturns read leaves out (any status but RETURN_CANCELLED), counted, never dropped silently
+        if (onlyCancelled) serverCounts.excludedNotCancelledCount = 0
         Map pagination = [strategy: "GRAPHQL_CURSOR", pageCount: 0, lookupCalls: 0]
         Closure failed = { String message ->
             [errors: [message], warnings: [], serverCounts: serverCounts, pagination: pagination, transport: "GRAPHQL"]
         }
-        List<String> keys = (List<String>) ctx.lookupKeys
+        // OC166: a key asked twice (across chunks) would be written twice, a false duplicate key downstream
+        List<String> keys = ((List<String>) ctx.lookupKeys)?.unique(false)
         if (!keys && (ctx.fromMillis == null || ctx.thruMillis == null)) {
             return failed("The OMS GraphQL returns extract requires a date window.")
         }
@@ -211,6 +214,7 @@ class OmsGqlReturnsPageSource {
                     if (onlyCancelled) {
                         // the OMS was asked for RETURN_CANCELLED only: a status it was not asked for is not R16's, Keep or not
                         if (verdict == OmsGqlReturnAssembler.CANCELLED) kept.add(n)
+                        else serverCounts.excludedNotCancelledCount = (serverCounts.excludedNotCancelledCount as int) + 1
                         return
                     }
                     countVerdict(serverCounts, verdict, keepNoShopifyRef)
@@ -334,7 +338,7 @@ class OmsGqlReturnsPageSource {
      * the orders its name descends from (gorjana 2026-11-04: WTY-#GOR195459209-1 replaces #GOR195459209, WTY-#GOR196813520-1-1
      * replaces WTY-#GOR196813520-1). A return whose items name no order cannot be found this way; R2 names that cause.
      */
-    static Map<String, String> replacementReturns(OmsGqlClient client, List<String> replacementIds, Map pagination) {
+    private static Map<String, String> replacementReturns(OmsGqlClient client, List<String> replacementIds, Map pagination) {
         Set<String> wanted = replacementIds as Set<String>
         Map<String, Object> replacements = ordersById(client, replacementIds, pagination)
         Set<String> candidates = new LinkedHashSet<String>()
@@ -370,7 +374,7 @@ class OmsGqlReturnsPageSource {
      * so they are found as replacementReturns finds its candidates: the orders by externalId (every type, as the window
      * read names a return's order whatever its type: an exchange keeps the original's id), then those orders' return items.
      */
-    static List<String> orderReturns(OmsGqlClient client, List<String> shopifyOrderIds, Map pagination) {
+    private static List<String> orderReturns(OmsGqlClient client, List<String> shopifyOrderIds, Map pagination) {
         OmsGqlQueries.requireIdKeys(shopifyOrderIds)
         List<String> orderIds = fetchByIds(client, OmsGqlQueries.orderExternalIdsDocument(), "orders", "externalId", shopifyOrderIds,
                 OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_ID_CHUNK, OmsGqlQueries.ORDERS_RESERVATION, pagination)

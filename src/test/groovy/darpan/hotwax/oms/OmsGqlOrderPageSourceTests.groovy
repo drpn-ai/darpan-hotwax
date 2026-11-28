@@ -261,6 +261,7 @@ class OmsGqlOrderPageSourceTests {
     void anItemOutsideTheReadShipGroupsOrWithNoProductStillWritesItsUnit() {
         // DAR-BE-129: the order read takes two ship groups, so a third group's item arrives with no facility; on
         // 2026-10-26 that null key failed a 20-minute Oct 1-25 extract.
+        OmsGqlLookupCache.reset()
         Map noProduct = item("M1", "00102", "00001") + [productId: null]
         ScriptedClient client = new ScriptedClient([
                 ordersPage([unitOrder("M1")], false),
@@ -275,6 +276,51 @@ class OmsGqlOrderPageSourceTests {
             assertEquals(["00101", "00102"], recs*.orderItemSeqId.sort())
             assertNull(recs.find { it.orderItemSeqId == "00101" }.facilityName)
             assertNull(recs.find { it.orderItemSeqId == "00102" }.sku)
+        } finally { out.delete() }
+    }
+
+    /** OC165: a page with no pageInfo could be any page, so it fails MALFORMED; it is never read as the last one. */
+    @Test
+    void aPageWithNoPageInfoFailsInsteadOfReadingAsTheLastPage() {
+        ScriptedClient client = new ScriptedClient([[data: [orders: [edges: [[node: order("M1")]]]]]])
+        File out = File.createTempFile("gql-", ".json")
+        try {
+            Map result = run(client, out, KEEP, null, [applyExchangeExclusion: false])
+            assertTrue(((List) result.errors).join(" ").contains("MALFORMED"), "${result.errors}")
+            assertFalse(out.exists() && out.length() > 0, "no file for a read that could be cut short")
+        } finally { out.delete() }
+    }
+
+    /** OC166: a key repeated across lookup chunks is asked (and written) once, never twice (a false duplicate key downstream). */
+    @Test
+    void aRepeatedLookupKeyIsReadOnce() {
+        List<String> keys = (1..OmsGqlQueries.LOOKUP_KEYS_CHUNK).collect { "K${it}".toString() } + ["K1"]
+        ScriptedClient client = new ScriptedClient([ordersPage([order("K1")], false)])
+        File out = File.createTempFile("gql-", ".json")
+        try {
+            Map result = OmsExtractSupport.extractOrdersToFile(CONFIG, FROM, THRU, out, KEEP, null, null, [applyExchangeExclusion: false],
+                    OmsGqlOrderPageSource.fetcher(client, [lookupKeys: keys]))
+            assertEquals([], result.errors)
+            assertEquals(1, client.calls.size(), "one chunk: the repeat of K1 is not a second chunk")
+            assertEquals(["K1"], ((List<Map>) (new JsonSlurper().parse(out) as Map).records)*.orderId)
+        } finally { out.delete() }
+    }
+
+    /** OC146 (S40b's flattener) reaches the extract's metadata: an item of quantity 0 makes no unit and is counted, never lost. */
+    @Test
+    void aZeroQuantityItemIsCountedInTheUnitExtractsMetadata() {
+        OmsGqlLookupCache.reset()
+        ScriptedClient client = new ScriptedClient([
+                ordersPage([unitOrder("M1")], false),
+                itemsPage([item("M1", "00101", "00001"), item("M1", "00102", "00002", "ITEM_COMPLETED", 0)]),
+                productsPage(["P00101", "P00102"]),
+                facilitiesPage(["STORE_1", "WH"])])
+        File out = File.createTempFile("gql-", ".json")
+        try {
+            Map result = run(client, out, null, null, UNIT_OPTIONS)
+            assertEquals([], result.errors)
+            assertEquals(1, ((Map) result.requestMetadata).droppedNonPositiveQuantity)
+            assertEquals(["00101"], ((List<Map>) (new JsonSlurper().parse(out) as Map).records)*.orderItemSeqId)
         } finally { out.delete() }
     }
 

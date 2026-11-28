@@ -221,8 +221,9 @@ class OmsGqlReturnsPageSourceTests {
                 ([:])                                    : [returnsCount: 5, excludedNoShopifyRefCount: 1, excludedCancelledCount: 2],
                 ([includeReturnsWithoutShopifyRef: true]): [returnsCount: 5, excludedNoShopifyRefCount: 0, excludedCancelledCount: 2,
                                                             keptNoShopifyRefCount: 1],
+                // OC: the 3 answers that are not cancelled are counted where they were dropped uncounted
                 ([onlyCancelledReturns: true])           : [returnsCount: 5, excludedNoShopifyRefCount: 0, excludedCancelledCount: 0,
-                                                            keptNoShopifyRefCount: 0],
+                                                            keptNoShopifyRefCount: 0, excludedNotCancelledCount: 3],
         ]
         expected.each { Map options, Map counts ->
             assertEquals(counts, read(options).serverCounts, "unshared ${options}")

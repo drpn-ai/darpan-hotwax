@@ -44,7 +44,8 @@ class OmsGqlOrderPageSource {
         }
 
         // Refuse what this transport cannot honour; silently ignoring any of these widens the extract.
-        List<String> keys = (List<String>) ctx.lookupKeys
+        // OC166: a key asked twice (across chunks) would be written twice, a false duplicate key downstream
+        List<String> keys = ((List<String>) ctx.lookupKeys)?.unique(false)
         if (!keys && (ctx.fromMillis == null || ctx.thruMillis == null)) {
             return failed("The OMS order extract requires a date window.")
         }
@@ -381,13 +382,6 @@ class OmsGqlOrderPageSource {
     }
 
     /**
-     * REST's order shape for the flattener: each item under the ship group it belongs to. An item naming a ship
-     * group the order did not return gets one of its own with no facility, so the unit is kept, not dropped.
-     * DAR-UI-081: each item also carries its SKU (its product's internalName, REST's sku) and its ship group's facility
-     * name, each read by id once per page as the returns read does (nesting them is charged per order), for the audit
-     * finding.
-     */
-    /**
      * DAR-BE-251: each order's units, its item rows' quantities summed; an order HotWax returned no item for has 0.
      * DAR-BE-300: plus the units of its EXC- orders (the EXCHANGE assocs pointing at it), since Shopify keeps an
      * exchange line on the original order.
@@ -407,9 +401,9 @@ class OmsGqlOrderPageSource {
      */
     private static void attachOrderItems(OmsGqlClient client, List<Map> orders, List<String> orderIds, Map pagination) {
         if (!orderIds) return
-        List<Map> items = OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.unitOrderItemsDocument(), "orderItems", "orderId",
-                orderIds, OmsGqlQueries.ORDER_ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.UNIT_ITEMS_RESERVATION, pagination)
-        Map<String, Object> skus = OmsGqlReturnsPageSource.productNames(client, items.collect { it.productId as String }, pagination)
+        Map read = unitItemsWithSkus(client, orderIds, pagination)
+        List<Map> items = (List<Map>) read.items
+        Map<String, Object> skus = (Map<String, Object>) read.skus
         Map<String, List<Map>> byOrder = items.groupBy { it.orderId as String }
         for (Map order : orders) {
             order.put(OmsGqlQueries.ORDER_ITEMS_FIELD, (byOrder[order.orderId as String] ?: [])
@@ -426,7 +420,7 @@ class OmsGqlOrderPageSource {
      * DAR-BE-300: EXC- order id -> the original it exchanges, for the given originals. A row naming an order not asked
      * for, or not an EXCHANGE, means HotWax ignored the filter: MALFORMED, never a count built on someone else's orders.
      */
-    static Map<String, String> exchangeOrdersOf(OmsGqlClient client, List<String> orderIds, Map pagination) {
+    private static Map<String, String> exchangeOrdersOf(OmsGqlClient client, List<String> orderIds, Map pagination) {
         Set<String> asked = orderIds as Set<String>
         Map<String, String> originalOfExchange = [:]
         for (Map assoc : fetchExchangeAssocs(client, orderIds, pagination, true)) {
@@ -440,10 +434,17 @@ class OmsGqlOrderPageSource {
         return originalOfExchange
     }
 
+    /**
+     * REST's order shape for the flattener: each item under the ship group it belongs to. An item naming a ship
+     * group the order did not return gets one of its own with no facility, so the unit is kept, not dropped.
+     * DAR-UI-081: each item also carries its SKU (its product's internalName, REST's sku) and its ship group's facility
+     * name, each read by id once per page as the returns read does (nesting them is charged per order), for the audit
+     * finding.
+     */
     private static void attachItemsToShipGroups(OmsGqlClient client, List<Map> orders, List<String> orderIds, Map pagination) {
-        List<Map> items = OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.unitOrderItemsDocument(), "orderItems", "orderId",
-                orderIds, OmsGqlQueries.ORDER_ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.UNIT_ITEMS_RESERVATION, pagination)
-        Map<String, Object> skus = OmsGqlReturnsPageSource.productNames(client, items.collect { it.productId as String }, pagination)
+        Map read = unitItemsWithSkus(client, orderIds, pagination)
+        List<Map> items = (List<Map>) read.items
+        Map<String, Object> skus = (Map<String, Object>) read.skus
         List<String> facilityIds = orders.collectMany { Map o -> ((o.shipGroups instanceof List) ? (List<Map>) o.shipGroups : [])
                 .collect { it?.facilityId as String } }
         Map<String, Object> facilityNames = OmsGqlLookupCache.lookup(client, OmsGqlLookupCache.FACILITY_NAME, facilityIds) { List<String> ids ->
@@ -473,6 +474,13 @@ class OmsGqlOrderPageSource {
             }
             order.shipGroups = groups
         }
+    }
+
+    /** These orders' items, read by id, and their SKUs (product internalName), read once per page: the unit read and orderItems. */
+    private static Map unitItemsWithSkus(OmsGqlClient client, List<String> orderIds, Map pagination) {
+        List<Map> items = OmsGqlReturnsPageSource.fetchByIds(client, OmsGqlQueries.unitOrderItemsDocument(), "orderItems", "orderId",
+                orderIds, OmsGqlQueries.ORDER_ITEMS_ID_CHUNK, OmsGqlQueries.ORDER_ITEMS_PAGE_SIZE, OmsGqlQueries.UNIT_ITEMS_RESERVATION, pagination)
+        return [items: items, skus: OmsGqlReturnsPageSource.productNames(client, items.collect { it.productId as String }, pagination)]
     }
 
     /** The EXCHANGE assocs from these orders, or (`toOrders`, DAR-BE-300) the ones pointing at them. */
@@ -561,9 +569,16 @@ class OmsGqlOrderPageSource {
         }
     }
 
-    /** The next cursor, null when done; MALFORMED on "more" without a cursor, or a cursor seen before. */
+    /**
+     * The next cursor, null when done; MALFORMED on "more" without a cursor, or a cursor seen before. OC165: also MALFORMED on a
+     * page with no pageInfo or a hasNextPage that is not a boolean (every document asks pageInfo), which could be any page.
+     */
     static String nextCursor(Map connection, Set<String> seenCursors, String root) {
-        Map pageInfo = (Map) (connection.pageInfo ?: [:])
+        Object info = connection.pageInfo
+        if (!(info instanceof Map) || !(((Map) info).hasNextPage instanceof Boolean)) {
+            throw new OmsGqlException("MALFORMED", "${root} answered no pageInfo.hasNextPage; refusing to read it as the last page")
+        }
+        Map pageInfo = (Map) info
         if (pageInfo.hasNextPage != true) return null
         String cursor = pageInfo.endCursor as String
         if (!cursor) throw new OmsGqlException("MALFORMED", "${root} reported hasNextPage with no endCursor; refusing to truncate")

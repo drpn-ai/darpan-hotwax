@@ -73,6 +73,8 @@ class OmsReturnsSourceSupport {
 
         Long fromMillis = OmsExtractSupport.parseWindowMillis(windowStart, "windowStart", errors)
         Long thruMillis = OmsExtractSupport.parseWindowMillis(windowEnd, "windowEnd", errors)
+        // OC152: refused as the orders extract refuses it; a backwards window reads nothing and would land as an empty extract.
+        if (fromMillis != null && thruMillis != null && fromMillis > thruMillis) errors.add("windowStart must be before or equal to windowEnd.")
         if (errors) return failure(errors, [], retainRecords)
 
         List<Map<String, Object>> collected = []
@@ -98,7 +100,13 @@ class OmsReturnsSourceSupport {
                     pageConsumer: { List pageReturns ->
                         cumulativeRaw += pageReturns.size()
                         consumePage(pageReturns)
-                        if (pageProgressListener != null) pageProgressListener.call(cumulativeRaw)
+                        // OC153: progress is advisory, as on the orders extract: a heartbeat failure never fails the read.
+                        if (pageProgressListener != null) {
+                            try {
+                                pageProgressListener.call(cumulativeRaw)
+                            } catch (Exception ignored) {
+                            }
+                        }
                     }])
             errors.addAll((List<String>) (fetched?.errors ?: []))
             warnings.addAll((List<String>) (fetched?.warnings ?: []))
@@ -297,7 +305,8 @@ class OmsReturnsSourceSupport {
                 continue
             }
             found.addAll(matched)
-            boolean truncated = (connection.pageInfo instanceof Map) && ((Map) connection.pageInfo).hasNextPage == true
+            // OC165: a page that does not say whether there is more is treated as cut short (its unmatched ids stay unresolved)
+            boolean truncated = !(connection.pageInfo instanceof Map) || ((Map) connection.pageInfo).hasNextPage != false
             if (truncated) unresolved.addAll(chunk.findAll { !matched.contains(it) })
         }
         failedCounts.each { String message, Integer count ->
@@ -328,6 +337,10 @@ class OmsReturnsSourceSupport {
         filters.put("serverReportedReturnsCount", normalizeInt(serverCounts.get("returnsCount"), 0))
         if (serverCounts.containsKey("excludedCancelledCount")) {
             filters.put("excludedCancelledCount", normalizeInt(serverCounts.get("excludedCancelledCount"), 0))
+        }
+        // DAR-OPS-029 S40a: the read counts these too (includeReturnsWithoutShopifyRef / onlyCancelledReturns); they were dropped
+        ["keptNoShopifyRefCount", "excludedNotCancelledCount"].each { String key ->
+            if (serverCounts.containsKey(key)) filters.put(key, normalizeInt(serverCounts.get(key), 0))
         }
         return [filters: filters]
     }

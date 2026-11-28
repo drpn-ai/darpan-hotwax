@@ -73,8 +73,9 @@ class OmsExtractSupport {
             { String text -> Instant.parse(text).toEpochMilli() },
             { String text -> OffsetDateTime.parse(text).toInstant().toEpochMilli() },
             { String text -> ZonedDateTime.parse(text).toInstant().toEpochMilli() },
-            { String text -> Timestamp.valueOf(text).time },
-            { String text -> LocalDateTime.parse(text).toInstant(ZoneOffset.UTC).toEpochMilli() },
+            // OC151: a zoneless bound is UTC, written with a T or a space ("2026-11-01 00:00:00", SQL text). Timestamp.valueOf
+            // read the space form in the JVM's zone, so the same bound meant two instants.
+            { String text -> LocalDateTime.parse(text.replaceFirst(' ', 'T')).toInstant(ZoneOffset.UTC).toEpochMilli() },
             { String text -> LocalDate.parse(text).atStartOfDay().toInstant(ZoneOffset.UTC).toEpochMilli() },
     ]
 
@@ -188,6 +189,8 @@ class OmsExtractSupport {
         // apart from "nothing was dropped".
         int droppedNullLineIdCount = 0
         int nonUnitQuantityCount = 0
+        // OC146 (S40b): items with a zero, negative or unreadable quantity, which make no unit
+        int droppedNonPositiveQuantity = 0
         int keptNullShopifyIdCount = 0
         int extractedRecordCount = 0
         int consumedRawCount = 0
@@ -208,6 +211,7 @@ class OmsExtractSupport {
             extractedRecordCount += writtenCount
             droppedNullLineIdCount += (int) (pageBundle.droppedNullLineIdCount ?: 0)
             nonUnitQuantityCount += (int) (pageBundle.nonUnitQuantityCount ?: 0)
+            droppedNonPositiveQuantity += (int) (pageBundle.droppedNonPositiveQuantity ?: 0)
             keptNullShopifyIdCount += (int) (pageBundle.keptNullShopifyIdCount ?: 0)
             consumedRawCount += (int) pageBundle.rawCount
             if (pageProgressListener != null) {
@@ -249,6 +253,7 @@ class OmsExtractSupport {
         if (options.get("emitGrain") == "ORDER_LINE_UNIT") {
             requestMetadata.droppedNullLineIdCount = droppedNullLineIdCount
             requestMetadata.nonUnitQuantityCount = nonUnitQuantityCount
+            requestMetadata.droppedNonPositiveQuantity = droppedNonPositiveQuantity
             if (options.get("requireShopifyLineId") == false) {
                 requestMetadata.keptNullShopifyIdCount = keptNullShopifyIdCount
             }
@@ -680,6 +685,7 @@ class OmsExtractSupport {
         List outputRecords
         int droppedNullLineIdCount = 0
         int nonUnitQuantityCount = 0
+        int droppedNonPositiveQuantity = 0
         int keptNullShopifyIdCount = 0
         if (unitGrain) {
             // Unit grain does NOT take keepFieldSet: the unit record IS the projection.
@@ -691,6 +697,7 @@ class OmsExtractSupport {
                 Map flattened = OmsOrderLineUnitSupport.flattenOrderToUnits((Map) record, flattenOptions)
                 droppedNullLineIdCount += (flattened.droppedNullLineId as int)
                 nonUnitQuantityCount += (flattened.nonUnitQuantityCount as int)
+                droppedNonPositiveQuantity += ((flattened.droppedNonPositiveQuantity ?: 0) as int)
                 keptNullShopifyIdCount += (flattened.keptNullShopifyIdCount as int)
                 Map<String, Object> orderScalars = overlay ? topLevelScalars((Map) record) : null
                 for (Object unit : (List) flattened.units) {
@@ -727,6 +734,7 @@ class OmsExtractSupport {
                 excludedExchangeOrders    : pageFilter.excludedExchangeOrders,
                 droppedNullLineIdCount    : droppedNullLineIdCount,
                 nonUnitQuantityCount      : nonUnitQuantityCount,
+                droppedNonPositiveQuantity: droppedNonPositiveQuantity,
                 keptNullShopifyIdCount    : keptNullShopifyIdCount,
                 serializedRecords         : serialized.toString(),
         ]
@@ -984,17 +992,6 @@ class OmsExtractSupport {
     }
 
     /**
-     * DAR-BE-205. The extract options of an orders read. A conclusion lookup asks for orders by id and must answer for
-     * every id it names, exchange orders included: the exchange exclusion keeps exchanges out of a sales-order
-     * COMPARISON, and a lookup compares nothing. Any other read by key (an audit re-check, a side read by the other side's
-     * keys) leaves exchange orders out itself, as it always has (DAR-BE-318: keyed reads answer exactly as before). A window
-     * read keeps the default: its exchange orders are written flagged for Keep.
-     *
-     * DAR-BE-345: a side that keeps exchange orders (keepExchangeOrders, the OMS_GQL connector's extract option) is read by
-     * key as its window read reads, exchange orders written flagged (null: the default), so its Keep keeps what the window
-     * kept. A conclusion lookup and a window read are unchanged by it.
-     */
-    /**
      * DAR-BE-368. The fields a side reads: its rules' (readFields), plus each order's items (orderItems) when the side turns
      * on withOrderItems, the OMS_GQL connector's extract option, so an audit finding about the order lists its lines. Off,
      * the read fields are as sent (null stays null).
@@ -1005,6 +1002,17 @@ class OmsExtractSupport {
         return ((fields ?: []) + [OmsGqlQueries.ORDER_ITEMS_FIELD]).unique() as List<String>
     }
 
+    /**
+     * DAR-BE-205. The extract options of an orders read. A conclusion lookup asks for orders by id and must answer for
+     * every id it names, exchange orders included: the exchange exclusion keeps exchanges out of a sales-order
+     * COMPARISON, and a lookup compares nothing. Any other read by key (an audit re-check, a side read by the other side's
+     * keys) leaves exchange orders out itself, as it always has (DAR-BE-318: keyed reads answer exactly as before). A window
+     * read keeps the default: its exchange orders are written flagged for Keep.
+     *
+     * DAR-BE-345: a side that keeps exchange orders (keepExchangeOrders, the OMS_GQL connector's extract option) is read by
+     * key as its window read reads, exchange orders written flagged (null: the default), so its Keep keeps what the window
+     * kept. A conclusion lookup and a window read are unchanged by it.
+     */
     static Map<String, Object> lookupExtractOptions(Object lookupKeys, Object conclusionLookup, Object keepExchangeOrders = null) {
         boolean keyed = lookupKeys instanceof Collection && !((Collection) lookupKeys).isEmpty()
         if (!keyed) return null
