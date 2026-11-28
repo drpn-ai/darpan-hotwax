@@ -61,7 +61,7 @@ class DataDefinedOrderItemsServiceSmokeTests {
                 [enumId: "SCFG_HOTWAX_OMS", enumTypeId: "DarpanSharedConfigType", description: "HotWax OMS"])
         upsert("darpan.hotwax.HotWaxOmsRestSourceConfig", [omsRestSourceConfigId: CONFIG_ID], [
                 omsRestSourceConfigId: CONFIG_ID, description: "Data-defined items", companyUserGroupId: TENANT,
-                baseUrl: "https://oms.test/", ordersPath: "/rest/s1/oms/orders", authType: "API_KEY", apiToken: "k",
+                baseUrl: "https://oms.test/", authType: "API_KEY", apiToken: "k",
                 connectTimeoutSeconds: 5, readTimeoutSeconds: 10, isActive: "Y", canReadOrders: "Y",
                 createdDate: CREATED, lastUpdatedDate: CREATED])
         originalFactory = DataDefinedExtract.transportFactory

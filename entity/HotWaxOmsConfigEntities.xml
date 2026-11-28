@@ -8,7 +8,6 @@
         <field name="companyUserGroupId" type="id" not-null="true"/>
         <field name="createdByUserId" type="id"/>
         <field name="baseUrl" type="text-long" cannot-be-null="true"/>
-        <field name="ordersPath" type="text-long" default="'/rest/s1/oms/orders'"/>
         <field name="timeZone" type="text-short" default="'UTC'">
             <description>Timezone used to interpret HotWax date-window setup for this source.</description>
         </field>
@@ -19,9 +18,6 @@
         <field name="headersJson" type="text-long"/>
         <field name="connectTimeoutSeconds" type="number-integer" default="30"/>
         <field name="readTimeoutSeconds" type="number-integer" default="60"/>
-        <field name="returnsPageSize" type="number-integer" default="500">
-            <description>Rows requested per page from the OMS reconciliationReturns endpoint. Lower this when OMS cannot build a full page inside its gateway timeout. Clamped to 1..1000 at extraction time.</description>
-        </field>
         <field name="isActive" type="text-indicator" default="'Y'"/>
         <field name="canReadOrders" type="text-indicator" default="'Y'"/>
         <field name="createdDate" type="date-time"/>
