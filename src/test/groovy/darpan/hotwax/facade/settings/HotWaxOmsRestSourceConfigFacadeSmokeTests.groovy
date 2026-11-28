@@ -474,18 +474,60 @@ class HotWaxOmsRestSourceConfigFacadeSmokeTests {
         assertTrue((Boolean) kept.ok, kept.errors?.toString())
         assertEquals('{"X-Shop":"gorjana"}', findOne("GORJANA_HDR_HOTWAX").headersJson, "an edit that leaves the headers blank keeps them")
         assertEquals(["X-Shop"], ((Map) kept.savedOmsRestSourceConfig).customHeaderNames)
+        assertNull(kept.reason)
 
         ec.message.clearErrors()
         Map<String, Object> moved = saveFacade(base + [baseUrl: "https://elsewhere.hotwax.io"])
         assertFalse((Boolean) moved.ok, "the stored headers went along to a moved address")
         assertTrue((moved.errors ?: []).join(" ").contains("Enter the custom headers again"), moved.errors?.toString())
+        // C4: the app's confirm switches on the code. It rides in the result with the MessageFacade empty: Moqui's JSON-RPC
+        // dispatcher answers a call that ends with a MessageFacade error with a bare error and drops the result.
+        assertEquals("HEADERS_NOT_CARRIED", moved.reason)
+        assertFalse(ec.message.hasError(), "a MessageFacade error would drop the reason on the JSON-RPC path: ${ec.message.errors}")
         assertEquals("https://hdr.hotwax.io", findOne("GORJANA_HDR_HOTWAX").baseUrl)
+        assertEquals('{"X-Shop":"gorjana"}', findOne("GORJANA_HDR_HOTWAX").headersJson, "nothing was saved")
 
         ec.message.clearErrors()
         Map<String, Object> cleared = saveFacade(base + [baseUrl: "https://elsewhere.hotwax.io", headersJson: "{}"])
         assertTrue((Boolean) cleared.ok, cleared.errors?.toString())
         assertEquals(["https://elsewhere.hotwax.io", "{}"], findOne("GORJANA_HDR_HOTWAX").with { [it.baseUrl, it.headersJson] })
         assertEquals([], ((Map) cleared.savedOmsRestSourceConfig).customHeaderNames)
+        assertNull(cleared.reason)
+
+        // Any other refusal keeps its plain error and no reason.
+        ec.message.clearErrors()
+        Map<String, Object> other = saveFacade(base + [baseUrl: "http://127.0.0.1"])
+        assertFalse((Boolean) other.ok)
+        assertNull(other.reason)
+    }
+
+    /**
+     * DAR-OPS-029 S40c (Session 010 re-verify of OC172): the same rule on a BASIC config, whose stored password is a
+     * secret too. A blank edit keeps headers, username and password; a host move or an auth move is HEADERS_NOT_CARRIED
+     * (the headers refusal comes before the secret checks, so the app's confirm sees its code), and nothing is saved.
+     */
+    @Test
+    void aBasicConfigKeepsItsHeadersOnABlankEditAndRefusesAMoveWithTheReason() {
+        ec.user.setPreference(TenantAccessSupport.ACTIVE_TENANT_PREFERENCE_KEY, GORJANA)
+        Map<String, Object> base = [omsRestSourceConfigId: "GORJANA_BASIC_HDR_HOTWAX", timeZone: "UTC", isActive: true, canReadOrders: true]
+        assertTrue((Boolean) saveFacade(base + [baseUrl: "https://basic.hotwax.io", authType: "BASIC", username: "svc",
+                password: "pw-stored", headersJson: '{"X-Shop":"gorjana"}']).ok)
+
+        ec.message.clearErrors()
+        Map<String, Object> kept = saveFacade(base + [baseUrl: "https://basic.hotwax.io", authType: "BASIC", description: "renamed"])
+        assertTrue((Boolean) kept.ok, kept.errors?.toString())
+        assertEquals(['{"X-Shop":"gorjana"}', "svc", "pw-stored"],
+                findOne("GORJANA_BASIC_HDR_HOTWAX").with { [it.headersJson, it.username, it.password?.toString()] })
+
+        for (Map moved in [[baseUrl: "https://other.hotwax.io", authType: "BASIC"], [baseUrl: "https://basic.hotwax.io", authType: "BEARER"]]) {
+            ec.message.clearErrors()
+            Map<String, Object> refused = saveFacade(base + moved)
+            assertFalse((Boolean) refused.ok, "${moved}")
+            assertEquals("HEADERS_NOT_CARRIED", refused.reason, "${moved}: ${refused.errors}")
+            assertFalse(ec.message.hasError(), "${moved}: ${ec.message.errors}")
+            assertEquals(["https://basic.hotwax.io", "BASIC", '{"X-Shop":"gorjana"}', "pw-stored"],
+                    findOne("GORJANA_BASIC_HDR_HOTWAX").with { [it.baseUrl, it.authType, it.headersJson, it.password?.toString()] })
+        }
     }
 
     /** Review of DAR-BE-080: a new token sent with a moved address must not carry the stored password along (BASIC sends it). */

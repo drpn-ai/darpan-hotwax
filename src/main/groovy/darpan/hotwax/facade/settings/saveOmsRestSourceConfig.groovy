@@ -22,6 +22,9 @@ Integer readTimeoutValue = normalizeInt(readTimeoutSeconds, 60)
 String isActiveValue = normalizeBool(isActive, true) ? "Y" : "N"
 String canReadOrdersValue = normalizeBool(canReadOrders, true) ? "Y" : "N"
 String activeTenantUserGroupId = TenantAccessSupport.currentActiveTenantUserGroupId(ec)
+// DAR-OPS-029 S40c (OC172/C4): the one refusal the app answers with its own confirm, so it carries a reason code.
+final String HEADERS_NOT_CARRIED = "HEADERS_NOT_CARRIED"
+String refusalReason = null
 
 if (!TenantAccessSupport.requireActiveTenantRunAccess(ec)) {
     Map envelope = FacadeSupport.envelope(ec)
@@ -91,8 +94,10 @@ if (!ec.message.hasError()) {
     // Never to a moved place: a header can carry a secret, so a moved base URL or auth type needs them again; {} removes them.
     if (!ec.message.hasError() && existingConfig != null && !headersJsonValue && existingConfig.headersJson) {
         if (SecretCarryOver.changedFields(existingConfig, [baseUrl: baseUrlValue, authType: authTypeValue], ["baseUrl", "authType"])) {
-            ec.message.addError("Enter the custom headers again: the base URL or auth type changed, so the stored ones are not " +
-                    "sent to the new place. Send {} to remove them.")
+            // Answered in the envelope with reason, not through ec.message: Moqui's JSON-RPC dispatcher answers a call that
+            // ends with a MessageFacade error with a bare error and drops the result, so the client would never see the
+            // code (TwoFactorFacadeSupport.refused, finish#PasskeyFirstSignIn). Nothing below runs, so nothing is saved.
+            refusalReason = HEADERS_NOT_CARRIED
         } else {
             headersJsonValue = (String) existingConfig.headersJson
         }
@@ -114,18 +119,18 @@ if (!ec.message.hasError()) {
     // username-only config carry its account name to a new server (security review, 2026-11-10).
     String storedUsername = changedPlace ? null : existingConfig?.username
 
-    if (!ec.message.hasError() && authTypeValue == "BASIC") {
+    if (!ec.message.hasError() && !refusalReason && authTypeValue == "BASIC") {
         if (!usernameValue && !storedUsername) ec.message.addError("Username is required for BASIC auth.")
         if (!passwordValue && !storedPassword) ec.message.addError(movedFields ? SecretCarryOver.refusal(movedFields, "password or token") : "Password is required for BASIC auth.")
     }
-    if (!ec.message.hasError() && authTypeValue == "BEARER" && !apiTokenValue && !passwordValue && !storedApiToken && !storedPassword) {
+    if (!ec.message.hasError() && !refusalReason && authTypeValue == "BEARER" && !apiTokenValue && !passwordValue && !storedApiToken && !storedPassword) {
         ec.message.addError(movedFields ? SecretCarryOver.refusal(movedFields, "password or token") : "API token is required for BEARER auth.")
     }
-    if (!ec.message.hasError() && authTypeValue == "API_KEY" && !apiTokenValue && !passwordValue && !storedApiToken && !storedPassword) {
+    if (!ec.message.hasError() && !refusalReason && authTypeValue == "API_KEY" && !apiTokenValue && !passwordValue && !storedApiToken && !storedPassword) {
         ec.message.addError(movedFields ? SecretCarryOver.refusal(movedFields, "password or token") : "API key is required for API_KEY auth.")
     }
 
-    if (!ec.message.hasError()) {
+    if (!ec.message.hasError() && !refusalReason) {
         if (!configIdValue) configIdValue = darpan.facade.common.TenantScopedFinder.mintId(ec, "darpan.hotwax.HotWaxOmsRestSourceConfig", "omsRestSourceConfigId")
         // Ownership never transfers: an existing row keeps its original owner even when a peer
         // saves it — only a brand-new row is assigned to the active tenant. Reassigning here would
@@ -171,3 +176,10 @@ Map envelope = FacadeSupport.envelope(ec)
 ok = envelope.ok
 messages = envelope.messages
 errors = envelope.errors
+if (refusalReason == HEADERS_NOT_CARRIED) {
+    ok = false
+    messages = []
+    errors = ["Enter the custom headers again: the base URL or auth type changed, so the stored ones are not sent to the " +
+                      "new place. Send {} to remove them."]
+    reason = HEADERS_NOT_CARRIED
+}

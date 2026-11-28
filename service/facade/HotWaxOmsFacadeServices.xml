@@ -76,6 +76,9 @@
             <parameter name="ok" type="Boolean"/>
             <parameter name="messages" type="List"/>
             <parameter name="errors" type="List"/>
+            <parameter name="reason"><description>DAR-OPS-029 S40c (C4): with ok false, HEADERS_NOT_CARRIED when the edit moved the base
+                URL or auth type, left the custom headers blank, and the config stores headers: nothing was saved; send the
+                headers again, or {} to remove them. Blank on every other answer.</description></parameter>
             <parameter name="savedOmsRestSourceConfig" type="Map">
                 <!-- Same shape as omsRestSourceConfigs' item schema above (list#HotWaxOmsRestSourceConfigs)
                      — safeConfigMapFromPlain plus isShared, declared in full per house convention. -->
